@@ -101,7 +101,7 @@ namespace TerminalApp
         Windows.UI.Xaml.Media.Brush FrameBrush { get; };
         void WindowActivated(Boolean activated);
         UInt32 NumberOfTabs();
-        Windows.Foundation.IAsyncOperation<Boolean> ConfirmCollectOtherWindows(UInt32 windowCount, UInt32 tabCount);
+        Windows.Foundation.IAsyncOperation<Boolean> ConfirmCollectOtherWindows(UInt32 windowCount, UInt32 tabCount, UInt32 externalWindowCount);
 
         Boolean GetMinimizeToNotificationArea();
         Boolean GetAlwaysShowNotificationIcon();

@@ -225,7 +225,7 @@ namespace winrt::TerminalApp::implementation
         bool OnDirectKeyEvent(const uint32_t vkey, const uint8_t scanCode, const bool down);
 
         void AttachContent(Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::ActionAndArgs> args, uint32_t tabIndex);
-        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount);
+        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount);
         void SendContentToOther(winrt::TerminalApp::RequestReceiveContentArgs args);
         void SendAllTabsToWindow(uint64_t targetWindowId);
 

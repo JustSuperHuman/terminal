@@ -14,7 +14,7 @@
 - One-command local update:
   - `bun run update`
   - This restores NuGet packages, builds `Terminal\CascadiaPackage` as Debug x64, registers the loose `WindowsTerminalDev` package, installs a per-user `wt.exe` shim, and launches it.
-  - Re-registration removes the existing `WindowsTerminalDev` package registration first and preserves app data when the host supports it; this avoids the same-version dev package registration block.
+  - Re-registration removes the existing `WindowsTerminalDev` package registration first, clears the generated loose-package output directory, and preserves app data when the host supports it; this avoids the same-version dev package registration block and stale package output locks.
   - Use `bun run update -- -NoLaunch` to build/register without launching.
   - Use `bun run update -- -MakeDefault` to also set `WindowsTerminalDev` as the per-user default terminal application.
   - Use `bun run update -- -NoWtShim` to skip replacing `wt.exe` command resolution.
@@ -72,4 +72,5 @@
 - Launch/window sizing for the rail is currently hard-coded at 240px in `TerminalWindow.cpp`; matching visual width is on `TabRowControl.xaml`.
 - The vertical rail background is driven by `TerminalPage::_updateThemeColors()` assigning `TitlebarBrush()` to `_tabRow.Background()`, so acrylic/custom tab-row themes stay on the rail even when the collapsed backing `TabView` is not in the titlebar.
 - Vertical tab search tokenizes whitespace terms and searches title/profile/path metadata first, then command history/quick fixes and the last 32K chars of terminal buffer text for queries with at least two typed chars when metadata does not match.
-- The collect-windows rail button routes `TabRowControl -> TerminalPage -> TerminalWindow -> AppHost`, counts tabs through `WindowEmperor::GetWindows()`, confirms with a `ContentDialog`, then moves live tab content using the existing `_MoveContent`/`AttachContent` handoff.
+- The collect-windows rail button routes `TabRowControl -> TerminalPage -> TerminalWindow -> AppHost`, counts live-collectable tabs through `WindowEmperor::GetWindows()`, confirms with a `ContentDialog`, then moves live tab content using the existing `_MoveContent`/`AttachContent` handoff.
+- External terminal windows are discovered with `EnumWindows()` in `AppHost.cpp` and shown in the collect dialog, but they cannot be live-moved because `ControlInteractivity`/ConPTY content IDs are process-local and Windows exposes no safe handoff for already-running terminal apps, other WT packages, or elevated sessions.

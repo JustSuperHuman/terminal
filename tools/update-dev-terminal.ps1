@@ -72,6 +72,29 @@ if (Test-Path $devExe) {
     }
 }
 
+$existingPackages = Get-AppxPackage -Name WindowsTerminalDev -ErrorAction SilentlyContinue
+if ($existingPackages) {
+    Write-Host 'Unregistering existing WindowsTerminalDev package...'
+    $removePackageCommand = Get-Command Remove-AppxPackage
+
+    foreach ($existingPackage in $existingPackages) {
+        $removePackageArgs = @{
+            Package = $existingPackage.PackageFullName
+        }
+
+        if ($removePackageCommand.Parameters.ContainsKey('PreserveApplicationData')) {
+            $removePackageArgs.PreserveApplicationData = $true
+        }
+
+        Remove-AppxPackage @removePackageArgs
+    }
+}
+
+if (Test-Path $packageRoot) {
+    Write-Host 'Clearing generated WindowsTerminalDev loose-package output...'
+    Remove-Item -LiteralPath $packageRoot -Recurse -Force
+}
+
 Write-Host 'Restoring NuGet packages...'
 & .\dep\nuget\nuget.exe restore .\dep\nuget\packages.config -PackagesDirectory .\packages
 
@@ -94,24 +117,6 @@ if (-not (Test-Path $manifest)) {
 }
 
 Write-Host 'Registering WindowsTerminalDev loose package...'
-$existingPackages = Get-AppxPackage -Name WindowsTerminalDev -ErrorAction SilentlyContinue
-if ($existingPackages) {
-    Write-Host 'Unregistering existing WindowsTerminalDev package...'
-    $removePackageCommand = Get-Command Remove-AppxPackage
-
-    foreach ($existingPackage in $existingPackages) {
-        $removePackageArgs = @{
-            Package = $existingPackage.PackageFullName
-        }
-
-        if ($removePackageCommand.Parameters.ContainsKey('PreserveApplicationData')) {
-            $removePackageArgs.PreserveApplicationData = $true
-        }
-
-        Remove-AppxPackage @removePackageArgs
-    }
-}
-
 Add-AppxPackage -Register $manifest -ForceUpdateFromAnyVersion -ForceApplicationShutdown
 
 if ($MakeDefault) {

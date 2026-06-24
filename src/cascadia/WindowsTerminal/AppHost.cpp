@@ -27,6 +27,162 @@ using namespace std::chrono_literals;
 static constexpr short KeyPressed{ gsl::narrow_cast<short>(0x8000) };
 static constexpr auto FrameUpdateInterval = std::chrono::milliseconds(16);
 
+static bool _equalsInsensitive(std::wstring_view left, std::wstring_view right) noexcept
+{
+    return left.size() == right.size() &&
+           CompareStringOrdinal(left.data(), gsl::narrow<int>(left.size()), right.data(), gsl::narrow<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+static bool _containsInsensitive(std::wstring_view text, std::wstring_view needle) noexcept
+{
+    if (needle.empty() || needle.size() > text.size())
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i <= text.size() - needle.size(); ++i)
+    {
+        if (CompareStringOrdinal(text.data() + i, gsl::narrow<int>(needle.size()), needle.data(), gsl::narrow<int>(needle.size()), TRUE) == CSTR_EQUAL)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static std::wstring_view _filenameFromPath(std::wstring_view path) noexcept
+{
+    const auto pos = path.find_last_of(L"\\/");
+    return pos == std::wstring_view::npos ? path : path.substr(pos + 1);
+}
+
+static bool _isKnownTerminalProcessName(std::wstring_view filename) noexcept
+{
+    static constexpr std::wstring_view names[]{
+        L"WindowsTerminal.exe",
+        L"OpenConsole.exe",
+        L"conhost.exe",
+        L"cmd.exe",
+        L"powershell.exe",
+        L"pwsh.exe",
+        L"wt.exe",
+        L"wtd.exe",
+        L"wezterm-gui.exe",
+        L"wezterm.exe",
+        L"alacritty.exe",
+        L"kitty.exe",
+        L"mintty.exe",
+    };
+
+    for (const auto name : names)
+    {
+        if (_equalsInsensitive(filename, name))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool _isLikelyTerminalTitle(std::wstring_view title) noexcept
+{
+    return _containsInsensitive(title, L"Windows Terminal") ||
+           _containsInsensitive(title, L"Command Prompt") ||
+           _containsInsensitive(title, L"PowerShell") ||
+           _containsInsensitive(title, L"pwsh") ||
+           _containsInsensitive(title, L"cmd.exe");
+}
+
+static std::wstring _windowText(HWND hwnd)
+{
+    const auto length = GetWindowTextLengthW(hwnd);
+    if (length <= 0)
+    {
+        return {};
+    }
+
+    std::wstring text(gsl::narrow<size_t>(length) + 1, L'\0');
+    const auto copied = GetWindowTextW(hwnd, text.data(), length + 1);
+    text.resize(gsl::narrow<size_t>(std::max(copied, 0)));
+    return text;
+}
+
+static std::wstring _processImageName(DWORD processId)
+{
+    wil::unique_handle process{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId) };
+    if (!process)
+    {
+        return {};
+    }
+
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;)
+    {
+        auto size = gsl::narrow<DWORD>(path.size());
+        if (QueryFullProcessImageNameW(process.get(), 0, path.data(), &size))
+        {
+            path.resize(size);
+            return path;
+        }
+
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        {
+            return {};
+        }
+
+        path.resize(path.size() * 2);
+    }
+}
+
+struct ExternalTerminalWindowSearch
+{
+    DWORD CurrentProcessId;
+    uint32_t Count;
+};
+
+static BOOL CALLBACK _countExternalTerminalWindow(HWND hwnd, LPARAM lParam)
+{
+    if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER))
+    {
+        return TRUE;
+    }
+
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+    {
+        return TRUE;
+    }
+
+    auto& search = *reinterpret_cast<ExternalTerminalWindowSearch*>(lParam);
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == 0 || processId == search.CurrentProcessId)
+    {
+        return TRUE;
+    }
+
+    const auto imageName = _processImageName(processId);
+    const auto title = _windowText(hwnd);
+    const auto knownTerminalProcess = !imageName.empty() && _isKnownTerminalProcessName(_filenameFromPath(imageName));
+
+    if (knownTerminalProcess || (imageName.empty() && _isLikelyTerminalTitle(title)))
+    {
+        ++search.Count;
+    }
+
+    return TRUE;
+}
+
+static uint32_t _countExternalTerminalWindows()
+{
+    ExternalTerminalWindowSearch search{ GetCurrentProcessId(), 0 };
+    EnumWindows(_countExternalTerminalWindow, reinterpret_cast<LPARAM>(&search));
+    return search.Count;
+}
+
 winrt::com_ptr<IVirtualDesktopManager> getDesktopManager()
 {
     static til::shared_mutex<winrt::com_ptr<IVirtualDesktopManager>> s_desktopManager;
@@ -961,8 +1117,9 @@ safe_void_coroutine AppHost::_CollectOtherWindowsRequested(const winrt::Windows:
         }
     }
 
+    const auto externalTerminalWindowCount = _countExternalTerminalWindows();
     const auto weakThis = weak_from_this();
-    const auto confirmed = co_await _windowLogic.ConfirmCollectOtherWindows(collectableWindowCount, collectableTabCount);
+    const auto confirmed = co_await _windowLogic.ConfirmCollectOtherWindows(collectableWindowCount, collectableTabCount, externalTerminalWindowCount);
     const auto strongThis = weakThis.lock();
     if (!strongThis || !confirmed)
     {
