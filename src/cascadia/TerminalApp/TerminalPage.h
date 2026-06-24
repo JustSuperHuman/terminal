@@ -225,7 +225,9 @@ namespace winrt::TerminalApp::implementation
         bool OnDirectKeyEvent(const uint32_t vkey, const uint8_t scanCode, const bool down);
 
         void AttachContent(Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::ActionAndArgs> args, uint32_t tabIndex);
+        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount);
         void SendContentToOther(winrt::TerminalApp::RequestReceiveContentArgs args);
+        void SendAllTabsToWindow(uint64_t targetWindowId);
 
         uint32_t NumberOfTabs() const;
 
@@ -243,6 +245,7 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<IInspectable, IInspectable> SetTaskbarProgress;
         til::typed_event<IInspectable, IInspectable> Initialized;
         til::typed_event<IInspectable, IInspectable> IdentifyWindowsRequested;
+        til::typed_event<IInspectable, IInspectable> CollectOtherWindowsRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::RenameWindowRequestedArgs> RenameWindowRequested;
         til::typed_event<IInspectable, IInspectable> SummonWindowRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::SummonWindowByIdRequestedArgs> SummonWindowByIdRequested;

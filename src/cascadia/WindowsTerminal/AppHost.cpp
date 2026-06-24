@@ -265,6 +265,7 @@ void AppHost::Initialize()
     _revokers.CloseWindowRequested = _windowLogic.CloseWindowRequested(winrt::auto_revoke, { this, &AppHost::_CloseRequested });
     _revokers.SetTaskbarProgress = _windowLogic.SetTaskbarProgress(winrt::auto_revoke, { this, &AppHost::SetTaskbarProgress });
     _revokers.IdentifyWindowsRequested = _windowLogic.IdentifyWindowsRequested(winrt::auto_revoke, { this, &AppHost::_IdentifyWindowsRequested });
+    _revokers.CollectOtherWindowsRequested = _windowLogic.CollectOtherWindowsRequested(winrt::auto_revoke, { this, &AppHost::_CollectOtherWindowsRequested });
     _revokers.WindowSizeChanged = _windowLogic.WindowSizeChanged(winrt::auto_revoke, { this, &AppHost::_WindowSizeChanged });
 
     // A note: make sure to listen to our _window_'s settings changed, not the
@@ -936,6 +937,50 @@ void AppHost::_IdentifyWindowsRequested(const winrt::Windows::Foundation::IInspe
                                         const winrt::Windows::Foundation::IInspectable /*args*/)
 {
     PostMessageW(_windowManager->GetMainWindow(), WindowEmperor::WM_IDENTIFY_ALL_WINDOWS, 0, 0);
+}
+
+safe_void_coroutine AppHost::_CollectOtherWindowsRequested(const winrt::Windows::Foundation::IInspectable /*sender*/,
+                                                          const winrt::Windows::Foundation::IInspectable /*args*/)
+{
+    const auto targetId = _windowLogic.WindowProperties().WindowId();
+    auto collectableWindowCount = uint32_t{ 0 };
+    auto collectableTabCount = uint32_t{ 0 };
+
+    for (const auto window : _windowManager->GetWindows())
+    {
+        if (window == this)
+        {
+            continue;
+        }
+
+        const auto tabs = window->Logic().NumberOfTabs();
+        if (tabs > 0)
+        {
+            ++collectableWindowCount;
+            collectableTabCount += tabs;
+        }
+    }
+
+    const auto weakThis = weak_from_this();
+    const auto confirmed = co_await _windowLogic.ConfirmCollectOtherWindows(collectableWindowCount, collectableTabCount);
+    const auto strongThis = weakThis.lock();
+    if (!strongThis || !confirmed)
+    {
+        co_return;
+    }
+
+    for (const auto window : strongThis->_windowManager->GetWindows())
+    {
+        if (window == strongThis.get())
+        {
+            continue;
+        }
+
+        if (window->Logic().NumberOfTabs() > 0)
+        {
+            window->Logic().SendAllTabsToWindow(targetId);
+        }
+    }
 }
 
 // Method Description:

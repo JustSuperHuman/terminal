@@ -100,6 +100,8 @@ namespace TerminalApp
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         Windows.UI.Xaml.Media.Brush FrameBrush { get; };
         void WindowActivated(Boolean activated);
+        UInt32 NumberOfTabs();
+        Windows.Foundation.IAsyncOperation<Boolean> ConfirmCollectOtherWindows(UInt32 windowCount, UInt32 tabCount);
 
         Boolean GetMinimizeToNotificationArea();
         Boolean GetAlwaysShowNotificationIcon();
@@ -129,6 +131,7 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> RaiseVisualBell;
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
+        event Windows.Foundation.TypedEventHandler<Object, Object> CollectOtherWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> IsQuakeWindowChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;
         event Windows.Foundation.TypedEventHandler<Object, SummonWindowByIdRequestedArgs> SummonWindowByIdRequested;
@@ -150,5 +153,6 @@ namespace TerminalApp
 
         void AttachContent(String content, UInt32 tabIndex);
         void SendContentToOther(RequestReceiveContentArgs args);
+        void SendAllTabsToWindow(UInt64 targetWindowId);
     }
 }

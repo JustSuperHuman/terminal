@@ -102,7 +102,10 @@ namespace TerminalApp
 
         Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
         void WindowActivated(Boolean activated);
+        UInt32 NumberOfTabs();
+        Windows.Foundation.IAsyncOperation<Boolean> ConfirmCollectOtherWindows(UInt32 windowCount, UInt32 tabCount);
         void SendContentToOther(RequestReceiveContentArgs args);
+        void SendAllTabsToWindow(UInt64 targetWindowId);
 
         event Windows.Foundation.TypedEventHandler<Object, Object> TitleChanged;
         event Windows.Foundation.TypedEventHandler<Object, Object> CloseWindowRequested;
@@ -113,6 +116,7 @@ namespace TerminalApp
         event Windows.Foundation.TypedEventHandler<Object, Object> Initialized;
         event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
         event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
+        event Windows.Foundation.TypedEventHandler<Object, Object> CollectOtherWindowsRequested;
         event Windows.Foundation.TypedEventHandler<Object, RenameWindowRequestedArgs> RenameWindowRequested;
         event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;
         event Windows.Foundation.TypedEventHandler<Object, SummonWindowByIdRequestedArgs> SummonWindowByIdRequested;

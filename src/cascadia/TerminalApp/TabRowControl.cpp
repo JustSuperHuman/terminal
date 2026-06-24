@@ -475,6 +475,15 @@ namespace winrt::TerminalApp::implementation
         _updateFilteredTabs();
     }
 
+    void TabRowControl::OnCollectWindowsClick(const winrt::Windows::Foundation::IInspectable&,
+                                              const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        if (CollectWindowsRequested)
+        {
+            CollectWindowsRequested();
+        }
+    }
+
     void TabRowControl::OnRecentSortToggleChecked(const winrt::Windows::Foundation::IInspectable&,
                                                   const winrt::Windows::UI::Xaml::RoutedEventArgs&)
     {

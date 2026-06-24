@@ -246,6 +246,20 @@ AppHost* WindowEmperor::GetWindowByName(std::wstring_view name) const noexcept
     return nullptr;
 }
 
+std::vector<AppHost*> WindowEmperor::GetWindows() const
+{
+    _assertIsMainThread();
+
+    std::vector<AppHost*> windows;
+    windows.reserve(_windows.size());
+    for (const auto& window : _windows)
+    {
+        windows.push_back(window.get());
+    }
+
+    return windows;
+}
+
 void WindowEmperor::CreateNewWindow(winrt::TerminalApp::WindowRequestedArgs args)
 {
     _assertIsMainThread();

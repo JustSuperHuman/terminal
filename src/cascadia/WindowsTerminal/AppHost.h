@@ -79,6 +79,8 @@ private:
 
     void _IdentifyWindowsRequested(winrt::Windows::Foundation::IInspectable sender,
                                    winrt::Windows::Foundation::IInspectable args);
+    safe_void_coroutine _CollectOtherWindowsRequested(winrt::Windows::Foundation::IInspectable sender,
+                                                      winrt::Windows::Foundation::IInspectable args);
     void _DisplayWindowId(const winrt::Windows::Foundation::IInspectable& sender,
                           const winrt::Windows::Foundation::IInspectable& args);
 
@@ -163,6 +165,7 @@ private:
         winrt::TerminalApp::TerminalWindow::CloseWindowRequested_revoker CloseWindowRequested;
         winrt::TerminalApp::TerminalWindow::SetTaskbarProgress_revoker SetTaskbarProgress;
         winrt::TerminalApp::TerminalWindow::IdentifyWindowsRequested_revoker IdentifyWindowsRequested;
+        winrt::TerminalApp::TerminalWindow::CollectOtherWindowsRequested_revoker CollectOtherWindowsRequested;
         winrt::TerminalApp::TerminalWindow::IsQuakeWindowChanged_revoker IsQuakeWindowChanged;
         winrt::TerminalApp::TerminalWindow::SummonWindowRequested_revoker SummonWindowRequested;
         winrt::TerminalApp::TerminalWindow::SummonWindowByIdRequested_revoker SummonWindowByIdRequested;
