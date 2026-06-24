@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <vector>
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 
@@ -23,6 +24,8 @@ namespace winrt
 
 namespace winrt::TerminalApp::implementation
 {
+    static constexpr size_t MaxSearchBufferChars = 32768;
+
     TabRowControl::TabRowControl()
     {
         _filteredTabs = winrt::single_threaded_observable_vector<TerminalApp::Tab>();
@@ -92,27 +95,169 @@ namespace winrt::TerminalApp::implementation
         return result;
     }
 
-    bool TabRowControl::_matchesFilter(const winrt::TerminalApp::Tab& tab, const std::wstring_view filter) const
+    std::vector<std::wstring> TabRowControl::_splitSearchTerms(const std::wstring_view filter)
     {
-        if (filter.empty())
+        std::vector<std::wstring> terms;
+
+        size_t termStart{};
+        while (termStart < filter.size())
+        {
+            while (termStart < filter.size() && std::iswspace(filter[termStart]))
+            {
+                ++termStart;
+            }
+
+            auto termEnd{ termStart };
+            while (termEnd < filter.size() && !std::iswspace(filter[termEnd]))
+            {
+                ++termEnd;
+            }
+
+            if (termEnd > termStart)
+            {
+                terms.emplace_back(filter.substr(termStart, termEnd - termStart));
+            }
+
+            termStart = termEnd;
+        }
+
+        return terms;
+    }
+
+    void TabRowControl::_appendSearchText(std::wstring& text, const winrt::hstring& value)
+    {
+        if (value.empty())
+        {
+            return;
+        }
+
+        const auto folded{ _foldForSearch(value) };
+        text.append(folded);
+        text.push_back(L' ');
+
+        for (const auto ch : folded)
+        {
+            switch (ch)
+            {
+            case L'\\':
+            case L'/':
+            case L'_':
+            case L'-':
+            case L'.':
+            case L':':
+                text.push_back(L' ');
+                break;
+            default:
+                text.push_back(ch);
+                break;
+            }
+        }
+        text.push_back(L' ');
+    }
+
+    bool TabRowControl::_containsAllTerms(const std::wstring& text, const std::vector<std::wstring>& terms)
+    {
+        return std::all_of(terms.begin(), terms.end(), [&](const auto& term) {
+            return text.find(term) != std::wstring::npos;
+        });
+    }
+
+    bool TabRowControl::_shouldSearchBuffer(const std::vector<std::wstring>& terms)
+    {
+        return std::any_of(terms.begin(), terms.end(), [](const auto& term) {
+            return term.size() > 1;
+        });
+    }
+
+    std::wstring TabRowControl::_tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const
+    {
+        std::wstring text;
+        _appendSearchText(text, tab.Title());
+
+        const auto tabImpl{ winrt::get_self<Tab>(tab) };
+        if (!tabImpl)
+        {
+            return text;
+        }
+
+        if (const auto content{ tabImpl->GetActiveContent() })
+        {
+            _appendSearchText(text, content.Title());
+        }
+
+        if (const auto profile{ tabImpl->GetFocusedProfile() })
+        {
+            _appendSearchText(text, profile.Name());
+            _appendSearchText(text, profile.TabTitle());
+            _appendSearchText(text, profile.Source());
+            _appendSearchText(text, profile.Commandline());
+            _appendSearchText(text, profile.StartingDirectory());
+            _appendSearchText(text, profile.EvaluatedStartingDirectory());
+        }
+
+        if (const auto control{ tabImpl->GetActiveTerminalControl() })
+        {
+            _appendSearchText(text, control.WorkingDirectory());
+
+            const auto history{ control.CommandHistory() };
+            _appendSearchText(text, history.CurrentCommandline());
+            if (const auto commands{ history.History() })
+            {
+                for (const auto& command : commands)
+                {
+                    _appendSearchText(text, command);
+                }
+            }
+            if (const auto quickFixes{ history.QuickFixes() })
+            {
+                for (const auto& quickFix : quickFixes)
+                {
+                    _appendSearchText(text, quickFix);
+                }
+            }
+
+            if (includeBuffer)
+            {
+                auto buffer{ control.ReadEntireBuffer() };
+                if (buffer.size() > MaxSearchBufferChars)
+                {
+                    buffer = winrt::hstring{ std::wstring_view{ buffer }.substr(buffer.size() - MaxSearchBufferChars) };
+                }
+
+                _appendSearchText(text, buffer);
+            }
+        }
+
+        return text;
+    }
+
+    bool TabRowControl::_matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms) const
+    {
+        if (terms.empty())
         {
             return true;
         }
 
-        const auto title{ _foldForSearch(tab.Title()) };
-        return title.find(filter) != std::wstring::npos;
+        const auto fastText{ _tabSearchText(tab, false) };
+        if (_containsAllTerms(fastText, terms))
+        {
+            return true;
+        }
+
+        return _shouldSearchBuffer(terms) && _containsAllTerms(_tabSearchText(tab, true), terms);
     }
 
     void TabRowControl::_updateFilteredTabs()
     {
         const auto filter{ _foldForSearch(VerticalTabSearchBox().Text()) };
+        const auto terms{ _splitSearchTerms(filter) };
 
         _filteredTabs.Clear();
         if (_tabs)
         {
             for (const auto& tab : _tabs)
             {
-                if (_matchesFilter(tab, filter))
+                if (_matchesFilter(tab, terms))
                 {
                     _filteredTabs.Append(tab);
                 }

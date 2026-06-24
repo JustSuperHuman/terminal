@@ -59,3 +59,5 @@
 - Current vertical-tab prototype keeps the original `mux:TabView` collapsed as the behavioral backing control and renders tabs through `TabRowControl.FilteredTabs`.
 - Vertical-tab selection is bridged through `TabRowControl::VerticalTabSelected` into `TerminalPage::_SetFocusedTab`; `_SetFocusedTab` and tab initialization now call `_UpdatedSelectedTab` directly because the collapsed backing `TabView` cannot be relied on to populate the center `TabContent`.
 - Launch/window sizing for the rail is currently hard-coded at 240px in `TerminalWindow.cpp`; matching visual width is on `TabRowControl.xaml`.
+- The vertical rail background is driven by `TerminalPage::_updateThemeColors()` assigning `TitlebarBrush()` to `_tabRow.Background()`, so acrylic/custom tab-row themes stay on the rail even when the collapsed backing `TabView` is not in the titlebar.
+- Vertical tab search tokenizes whitespace terms and searches title/profile/path metadata first, then command history/quick fixes and the last 32K chars of terminal buffer text for queries with at least two typed chars when metadata does not match.
