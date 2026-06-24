@@ -15,6 +15,7 @@
 #include <propvarutil.h>
 
 #include "AppHost.h"
+#include "icon.h"
 #include "resource.h"
 #include "VirtualDesktopUtils.h"
 #include "../../types/inc/User32Utils.hpp"
@@ -1036,7 +1037,7 @@ static WindowEmperor* GetThisFromHandle(HWND const window) noexcept
 void WindowEmperor::_createMessageWindow(const wchar_t* className)
 {
     const auto instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
-    const auto icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APPICON));
+    const auto icon = reinterpret_cast<HICON>(GetActiveAppIconHandle(false));
 
     const WNDCLASS wc{
         .lpfnWndProc = &_wndProc,
@@ -1071,7 +1072,8 @@ void WindowEmperor::_createMessageWindow(const wchar_t* className)
     _notificationIcon.uID = 1;
     _notificationIcon.uFlags = NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP | NIF_ICON;
     _notificationIcon.uCallbackMessage = WM_NOTIFY_FROM_NOTIFICATION_AREA;
-    _notificationIcon.hIcon = icon;
+    _notificationIconHandle = CreateNotificationIconHandle();
+    _notificationIcon.hIcon = _notificationIconHandle ? _notificationIconHandle.get() : reinterpret_cast<HICON>(GetActiveAppIconHandle(true));
     _notificationIcon.uVersion = NOTIFYICON_VERSION_4;
 
     // AppName happens to be in the ContextMenu's Resources, see GH#12264
