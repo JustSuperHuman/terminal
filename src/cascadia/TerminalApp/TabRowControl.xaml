@@ -43,7 +43,8 @@
         <StackPanel Grid.Row="1"
                     Margin="8,0,8,4"
                     Orientation="Horizontal"
-                    Spacing="4">
+                    Spacing="4"
+                    Visibility="{x:Bind ShowElevationShield, Mode=OneWay}">
             <!--  EA18 is the "Shield" glyph  -->
             <FontIcon x:Uid="ElevationShield"
                       Margin="0,4,0,4"
@@ -61,7 +62,7 @@
                     VerticalAlignment="Stretch"
                     Background="Transparent"
                     BorderThickness="0"
-                    Visibility="{x:Bind ShowWorkspacesButton, Mode=OneWay}">
+                    Visibility="Collapsed">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal"
                                 Spacing="8">
