@@ -4,10 +4,14 @@
 #include "pch.h"
 #include "TabRowControl.h"
 
+#include <ThrottledFunc.h>
+
 #include "TabRowControl.g.cpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cwctype>
+#include <utility>
 #include <vector>
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
@@ -25,6 +29,7 @@ namespace winrt
 namespace winrt::TerminalApp::implementation
 {
     static constexpr size_t MaxSearchBufferChars = 32768;
+    static constexpr std::chrono::seconds RecentActivityDebounce{ 2 };
 
     TabRowControl::TabRowControl()
     {
@@ -52,11 +57,13 @@ namespace winrt::TerminalApp::implementation
             _tabsChangedToken = _tabs.VectorChanged([weakThis{ get_weak() }](auto&&, auto&&) {
                 if (auto self{ weakThis.get() })
                 {
+                    self->_pruneActivityState();
                     self->_updateFilteredTabs();
                 }
             });
         }
 
+        _pruneActivityState();
         _updateFilteredTabs();
     }
 
@@ -78,7 +85,10 @@ namespace winrt::TerminalApp::implementation
         uint32_t filteredIndex{};
         if (_filteredTabs.IndexOf(_selectedTab, filteredIndex))
         {
-            VerticalTabList().SelectedItem(_selectedTab);
+            if (VerticalTabList().SelectedItem() != _selectedTab)
+            {
+                VerticalTabList().SelectedItem(_selectedTab);
+            }
         }
         else
         {
@@ -169,6 +179,101 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    bool TabRowControl::_containsTab(const std::vector<winrt::TerminalApp::Tab>& tabs, const winrt::TerminalApp::Tab& tab)
+    {
+        return std::find(tabs.begin(), tabs.end(), tab) != tabs.end();
+    }
+
+    bool TabRowControl::_tabIsTracked(const winrt::TerminalApp::Tab& tab) const
+    {
+        uint32_t index{};
+        return _tabs && _tabs.IndexOf(tab, index);
+    }
+
+    void TabRowControl::_pruneActivityState()
+    {
+        _recentActivityTabs.erase(std::remove_if(_recentActivityTabs.begin(), _recentActivityTabs.end(), [this](const auto& tab) {
+                                      return !_tabIsTracked(tab);
+                                  }),
+                                  _recentActivityTabs.end());
+
+        _activityDebounces.erase(std::remove_if(_activityDebounces.begin(), _activityDebounces.end(), [this](const auto& item) {
+                                     return !_tabIsTracked(item.Tab);
+                                 }),
+                                 _activityDebounces.end());
+    }
+
+    void TabRowControl::_updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms)
+    {
+        const auto canReorder{ !SortByRecentActivity() && terms.empty() };
+        if (CanReorderVerticalTabs() != canReorder)
+        {
+            CanReorderVerticalTabs(canReorder);
+        }
+    }
+
+    void TabRowControl::_setRecentActivitySortEnabled(const bool enabled)
+    {
+        if (SortByRecentActivity() != enabled)
+        {
+            SortByRecentActivity(enabled);
+            _updateFilteredTabs();
+        }
+    }
+
+    void TabRowControl::NotifyTabTitleUpdated(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab || !_tabIsTracked(tab))
+        {
+            return;
+        }
+
+        const auto existing = std::find_if(_activityDebounces.begin(), _activityDebounces.end(), [&](const auto& item) {
+            return item.Tab == tab;
+        });
+
+        if (existing != _activityDebounces.end())
+        {
+            existing->Update->Run();
+            return;
+        }
+
+        auto weakThis{ get_weak() };
+        auto update = std::make_shared<ThrottledFunc<>>(
+            winrt::Windows::System::DispatcherQueue::GetForCurrentThread(),
+            til::throttled_func_options{
+                .delay = RecentActivityDebounce,
+                .debounce = true,
+                .trailing = true,
+            },
+            [weakThis, tab]() {
+                if (const auto self{ weakThis.get() })
+                {
+                    self->_markTabRecentlyUpdated(tab);
+                }
+            });
+
+        _activityDebounces.push_back({ tab, update });
+        update->Run();
+    }
+
+    void TabRowControl::_markTabRecentlyUpdated(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!_tabIsTracked(tab))
+        {
+            _pruneActivityState();
+            return;
+        }
+
+        _recentActivityTabs.erase(std::remove(_recentActivityTabs.begin(), _recentActivityTabs.end(), tab), _recentActivityTabs.end());
+        _recentActivityTabs.insert(_recentActivityTabs.begin(), tab);
+
+        if (SortByRecentActivity())
+        {
+            _updateFilteredTabs();
+        }
+    }
+
     std::wstring TabRowControl::_tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const
     {
         std::wstring text;
@@ -252,16 +357,36 @@ namespace winrt::TerminalApp::implementation
         const auto filter{ _foldForSearch(VerticalTabSearchBox().Text()) };
         const auto terms{ _splitSearchTerms(filter) };
 
-        _filteredTabs.Clear();
+        _updateCanReorderVerticalTabs(terms);
+
+        std::vector<TerminalApp::Tab> visibleTabs;
+        auto appendIfVisible = [&](const auto& tab) {
+            if (!_containsTab(visibleTabs, tab) && _tabIsTracked(tab) && _matchesFilter(tab, terms))
+            {
+                visibleTabs.push_back(tab);
+            }
+        };
+
+        if (SortByRecentActivity())
+        {
+            for (const auto& tab : _recentActivityTabs)
+            {
+                appendIfVisible(tab);
+            }
+        }
+
         if (_tabs)
         {
             for (const auto& tab : _tabs)
             {
-                if (_matchesFilter(tab, terms))
-                {
-                    _filteredTabs.Append(tab);
-                }
+                appendIfVisible(tab);
             }
+        }
+
+        _filteredTabs.Clear();
+        for (const auto& tab : visibleTabs)
+        {
+            _filteredTabs.Append(tab);
         }
 
         SelectTab(_selectedTab);
@@ -304,16 +429,6 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TabRowControl::OnVerticalTabItemClick(const winrt::Windows::Foundation::IInspectable&,
-                                               const winrt::Windows::UI::Xaml::Controls::ItemClickEventArgs& e)
-    {
-        if (const auto tab{ e.ClickedItem().try_as<TerminalApp::Tab>() })
-        {
-            _selectedTab = tab;
-            VerticalTabSelected.raise(*this, tab);
-        }
-    }
-
     void TabRowControl::OnVerticalTabCloseClick(const winrt::Windows::Foundation::IInspectable& sender,
                                                 const winrt::Windows::UI::Xaml::RoutedEventArgs&)
     {
@@ -327,6 +442,49 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+    }
+
+    void TabRowControl::OnVerticalTabDragItemsStarting(const winrt::Windows::Foundation::IInspectable&,
+                                                       const winrt::Windows::UI::Xaml::Controls::DragItemsStartingEventArgs& e)
+    {
+        _draggedTab = nullptr;
+
+        const auto items{ e.Items() };
+        if (items && items.Size() == 1)
+        {
+            _draggedTab = items.GetAt(0).try_as<TerminalApp::Tab>();
+        }
+    }
+
+    void TabRowControl::OnVerticalTabDragItemsCompleted(const winrt::Windows::Foundation::IInspectable&,
+                                                        const winrt::Windows::UI::Xaml::Controls::DragItemsCompletedEventArgs&)
+    {
+        auto draggedTab{ std::exchange(_draggedTab, nullptr) };
+        if (!draggedTab || !VerticalTabMoveRequested)
+        {
+            _updateFilteredTabs();
+            return;
+        }
+
+        uint32_t targetIndex{};
+        if (_filteredTabs.IndexOf(draggedTab, targetIndex))
+        {
+            VerticalTabMoveRequested(draggedTab, targetIndex);
+        }
+
+        _updateFilteredTabs();
+    }
+
+    void TabRowControl::OnRecentSortToggleChecked(const winrt::Windows::Foundation::IInspectable&,
+                                                  const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        _setRecentActivitySortEnabled(true);
+    }
+
+    void TabRowControl::OnRecentSortToggleUnchecked(const winrt::Windows::Foundation::IInspectable&,
+                                                    const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        _setRecentActivitySortEnabled(false);
     }
 
     // Method Description:

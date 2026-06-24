@@ -14,5 +14,7 @@ namespace TerminalApp
         Boolean ShowElevationShield;
         Boolean ShowWorkspacesButton;
         String WorkspaceName;
+        Boolean SortByRecentActivity;
+        Boolean CanReorderVerticalTabs;
     }
 }

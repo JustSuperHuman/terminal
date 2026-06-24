@@ -451,6 +451,12 @@
   <data name="VerticalTabSearchBox.PlaceholderText" xml:space="preserve">
     <value>Search tabs, paths, output</value>
   </data>
+  <data name="RecentSortToggle.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Sort tabs by recent activity</value>
+  </data>
+  <data name="RecentSortToggle.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Sort tabs by recent activity</value>
+  </data>
   <data name="VerticalTabCloseButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
     <value>Close tab</value>
   </data>
