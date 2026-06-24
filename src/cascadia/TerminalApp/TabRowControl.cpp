@@ -30,6 +30,7 @@ namespace winrt::TerminalApp::implementation
 {
     static constexpr size_t MaxSearchBufferChars = 32768;
     static constexpr std::chrono::seconds RecentActivityDebounce{ 2 };
+    static constexpr double VerticalTabTitleToolTipMaxWidth = 560.0;
 
     TabRowControl::TabRowControl()
     {
@@ -219,6 +220,22 @@ namespace winrt::TerminalApp::implementation
             SortByRecentActivity(enabled);
             _updateFilteredTabs();
         }
+    }
+
+    void TabRowControl::_closeVerticalTabTitleToolTip()
+    {
+        if (_verticalTabTitleToolTip)
+        {
+            _verticalTabTitleToolTip.IsOpen(false);
+        }
+
+        if (_verticalTabTitleToolTipOwner)
+        {
+            WUX::Controls::ToolTipService::SetToolTip(_verticalTabTitleToolTipOwner, winrt::Windows::Foundation::IInspectable{ nullptr });
+        }
+
+        _verticalTabTitleToolTip = nullptr;
+        _verticalTabTitleToolTipOwner = nullptr;
     }
 
     void TabRowControl::NotifyTabTitleUpdated(const winrt::TerminalApp::Tab& tab)
@@ -411,12 +428,15 @@ namespace winrt::TerminalApp::implementation
     void TabRowControl::OnVerticalTabSearchTextChanged(const winrt::Windows::Foundation::IInspectable&,
                                                        const winrt::Windows::UI::Xaml::Controls::TextChangedEventArgs&)
     {
+        _closeVerticalTabTitleToolTip();
         _updateFilteredTabs();
     }
 
     void TabRowControl::OnVerticalTabSelectionChanged(const winrt::Windows::Foundation::IInspectable&,
                                                       const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs&)
     {
+        _closeVerticalTabTitleToolTip();
+
         if (_updatingVerticalSelection)
         {
             return;
@@ -432,6 +452,8 @@ namespace winrt::TerminalApp::implementation
     void TabRowControl::OnVerticalTabCloseClick(const winrt::Windows::Foundation::IInspectable& sender,
                                                 const winrt::Windows::UI::Xaml::RoutedEventArgs&)
     {
+        _closeVerticalTabTitleToolTip();
+
         if (const auto button{ sender.try_as<winrt::Windows::UI::Xaml::Controls::Button>() })
         {
             if (const auto tab{ button.DataContext().try_as<TerminalApp::Tab>() })
@@ -444,9 +466,74 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    void TabRowControl::OnVerticalTabTitlePointerEntered(const winrt::Windows::Foundation::IInspectable& sender,
+                                                         const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        const auto titleElement{ sender.try_as<WUX::FrameworkElement>() };
+        if (!titleElement)
+        {
+            return;
+        }
+
+        const auto dataContext{ titleElement.DataContext() };
+        if (!dataContext)
+        {
+            return;
+        }
+
+        const auto tab{ dataContext.try_as<TerminalApp::Tab>() };
+        if (!tab)
+        {
+            return;
+        }
+
+        const auto title{ tab.Title() };
+        if (title.empty())
+        {
+            return;
+        }
+
+        _closeVerticalTabTitleToolTip();
+
+        WUX::Controls::TextBlock tooltipText;
+        tooltipText.Text(title);
+        tooltipText.MaxWidth(VerticalTabTitleToolTipMaxWidth);
+        tooltipText.TextWrapping(WUX::TextWrapping::Wrap);
+
+        WUX::Controls::ToolTip tooltip;
+        tooltip.Content(tooltipText);
+        tooltip.IsHitTestVisible(false);
+        tooltip.Placement(WUX::Controls::Primitives::PlacementMode::Right);
+
+        WUX::Controls::ToolTipService::SetToolTip(titleElement, tooltip);
+        tooltip.IsOpen(true);
+
+        _verticalTabTitleToolTip = tooltip;
+        _verticalTabTitleToolTipOwner = titleElement;
+    }
+
+    void TabRowControl::OnVerticalTabTitlePointerExited(const winrt::Windows::Foundation::IInspectable&,
+                                                        const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        _closeVerticalTabTitleToolTip();
+    }
+
+    void TabRowControl::OnVerticalTabTitlePointerCanceled(const winrt::Windows::Foundation::IInspectable&,
+                                                          const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        _closeVerticalTabTitleToolTip();
+    }
+
+    void TabRowControl::OnVerticalTabTitlePointerCaptureLost(const winrt::Windows::Foundation::IInspectable&,
+                                                             const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        _closeVerticalTabTitleToolTip();
+    }
+
     void TabRowControl::OnVerticalTabDragItemsStarting(const winrt::Windows::Foundation::IInspectable&,
                                                        const winrt::Windows::UI::Xaml::Controls::DragItemsStartingEventArgs& e)
     {
+        _closeVerticalTabTitleToolTip();
         _draggedTab = nullptr;
 
         const auto items{ e.Items() };

@@ -315,6 +315,9 @@ namespace winrt::TerminalApp::implementation
 
         bool _activated{ false };
         bool _visible{ true };
+        bool _resizingVerticalTabPane{ false };
+        double _verticalTabResizeStartX{ 0.0 };
+        double _verticalTabResizeStartWidth{ 0.0 };
 
         std::vector<std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs>> _previouslyClosedPanesAndTabs{};
 
@@ -406,6 +409,16 @@ namespace winrt::TerminalApp::implementation
         void _UpdateTabView();
         void _UpdateTabWidthMode();
         void _SetBackgroundImage(const winrt::Microsoft::Terminal::Settings::Model::IAppearanceConfig& newAppearance);
+        void _VerticalTabResizePointerEntered(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerExited(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerPressed(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerMoved(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerReleased(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerCanceled(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _VerticalTabResizePointerCaptureLost(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _SetVerticalTabResizeCursor(const bool resizing) const;
+        void _SetVerticalTabPaneWidth(const double width);
+        void _StopVerticalTabPaneResize(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
         void _DuplicateFocusedTab();
         void _DuplicateTab(const Tab& tab);
