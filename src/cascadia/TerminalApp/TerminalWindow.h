@@ -128,6 +128,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Media::Brush TitlebarBrush();
         winrt::Windows::UI::Xaml::Media::Brush FrameBrush();
         void WindowActivated(const bool activated);
+        uint32_t NumberOfTabs() const;
+        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount);
 
         bool GetMinimizeToNotificationArea();
         bool GetAlwaysShowNotificationIcon();
@@ -148,6 +150,7 @@ namespace winrt::TerminalApp::implementation
 
         void AttachContent(winrt::hstring content, uint32_t tabIndex);
         void SendContentToOther(winrt::TerminalApp::RequestReceiveContentArgs args);
+        void SendAllTabsToWindow(uint64_t targetWindowId);
 
         // -------------------------------- WinRT Events ---------------------------------
         // PropertyChanged is surprisingly not a typed event, so we'll define that one manually.
@@ -224,6 +227,7 @@ namespace winrt::TerminalApp::implementation
         FORWARDED_TYPED_EVENT(RaiseVisualBell, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, RaiseVisualBell);
         FORWARDED_TYPED_EVENT(SetTaskbarProgress, winrt::Windows::Foundation::IInspectable, winrt::Windows::Foundation::IInspectable, _root, SetTaskbarProgress);
         FORWARDED_TYPED_EVENT(IdentifyWindowsRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, IdentifyWindowsRequested);
+        FORWARDED_TYPED_EVENT(CollectOtherWindowsRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, CollectOtherWindowsRequested);
         FORWARDED_TYPED_EVENT(SummonWindowRequested, Windows::Foundation::IInspectable, Windows::Foundation::IInspectable, _root, SummonWindowRequested);
         FORWARDED_TYPED_EVENT(SummonWindowByIdRequested, Windows::Foundation::IInspectable, winrt::TerminalApp::SummonWindowByIdRequestedArgs, _root, SummonWindowByIdRequested);
         FORWARDED_TYPED_EVENT(FocusTabRequested, Windows::Foundation::IInspectable, winrt::TerminalApp::Tab, _root, FocusTabRequested);

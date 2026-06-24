@@ -355,6 +355,12 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         };
+        tabRowImpl->CollectWindowsRequested = [weakThis{ get_weak() }]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->CollectOtherWindowsRequested.raise(*page, nullptr);
+            }
+        };
 
         // Set the initial workspace name from the window name.
         // Use raw WindowName() so unnamed windows show no text.
@@ -2824,6 +2830,40 @@ namespace winrt::TerminalApp::implementation
     uint32_t TerminalPage::NumberOfTabs() const
     {
         return _tabs.Size();
+    }
+
+    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalPage::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount)
+    {
+        ContentDialog dialog{};
+
+        if (windowCount == 0 || tabCount == 0)
+        {
+            dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogNoneTitle")));
+            dialog.Content(winrt::box_value(RS_(L"CollectWindowsDialogNoneBody")));
+            dialog.CloseButtonText(RS_(L"CollectWindowsDialogClose"));
+            dialog.DefaultButton(ContentDialogButton::Close);
+
+            if (auto presenter{ _dialogPresenter.get() })
+            {
+                co_await presenter.ShowDialog(dialog);
+            }
+
+            co_return false;
+        }
+
+        dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogTitle")));
+        dialog.Content(winrt::box_value(RS_fmt(L"CollectWindowsDialogBody", tabCount, windowCount)));
+        dialog.PrimaryButtonText(RS_(L"CollectWindowsDialogCollect"));
+        dialog.CloseButtonText(RS_(L"CollectWindowsDialogCancel"));
+        dialog.DefaultButton(ContentDialogButton::Primary);
+
+        if (auto presenter{ _dialogPresenter.get() })
+        {
+            const auto result = co_await presenter.ShowDialog(dialog);
+            co_return result == ContentDialogResult::Primary;
+        }
+
+        co_return false;
     }
 
     // Method Description:
@@ -6151,6 +6191,30 @@ namespace winrt::TerminalApp::implementation
         }
 
         _sendDraggedTabToWindow(winrt::to_hstring(args.TargetWindow()), args.TabIndex(), std::nullopt);
+    }
+
+    void TerminalPage::SendAllTabsToWindow(uint64_t targetWindowId)
+    {
+        if (targetWindowId == _WindowProperties.WindowId())
+        {
+            return;
+        }
+
+        std::vector<winrt::TerminalApp::Tab> tabsToMove;
+        std::copy(begin(_tabs), end(_tabs), std::back_inserter(tabsToMove));
+
+        const auto targetWindow{ winrt::to_hstring(targetWindowId) };
+        const auto appendTabIndex{ static_cast<uint32_t>(-1) };
+        for (const auto& tab : tabsToMove)
+        {
+            if (const auto tabImpl{ _GetTabImpl(tab) })
+            {
+                auto startupActions = tabImpl->BuildStartupActions(BuildStartupKind::Content);
+                _DetachTabFromWindow(tabImpl);
+                _MoveContent(std::move(startupActions), targetWindow, appendTabIndex);
+                _RemoveTab(tab);
+            }
+        }
     }
 
     void TerminalPage::_onTabDroppedOutside(winrt::IInspectable /*sender*/,

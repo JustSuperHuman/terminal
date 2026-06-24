@@ -550,6 +550,33 @@
   <data name="ConfirmCloseDialog_MultiplePanesPrimary" xml:space="preserve">
     <value>Close panes</value>
   </data>
+  <data name="CollectWindowsButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Collect windows</value>
+  </data>
+  <data name="CollectWindowsButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Collect windows</value>
+  </data>
+  <data name="CollectWindowsDialogTitle" xml:space="preserve">
+    <value>Collect terminal windows?</value>
+  </data>
+  <data name="CollectWindowsDialogBody" xml:space="preserve">
+    <value>Collect {0} tab(s) from {1} other window(s) into this window?</value>
+  </data>
+  <data name="CollectWindowsDialogCollect" xml:space="preserve">
+    <value>Collect</value>
+  </data>
+  <data name="CollectWindowsDialogCancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="CollectWindowsDialogNoneTitle" xml:space="preserve">
+    <value>No terminal windows to collect</value>
+  </data>
+  <data name="CollectWindowsDialogNoneBody" xml:space="preserve">
+    <value>There are no other Terminal windows in this instance.</value>
+  </data>
+  <data name="CollectWindowsDialogClose" xml:space="preserve">
+    <value>OK</value>
+  </data>
   <data name="DontAskAgainCheckBox.Content" xml:space="preserve">
     <value>Don't ask me again</value>
   </data>

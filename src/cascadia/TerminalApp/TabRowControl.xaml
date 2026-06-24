@@ -34,6 +34,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="32" />
+                <ColumnDefinition Width="32" />
             </Grid.ColumnDefinitions>
 
             <TextBox x:Name="VerticalTabSearchBox"
@@ -47,9 +48,23 @@
                 </TextBox.ContextFlyout>
             </TextBox>
 
+            <Button x:Name="CollectWindowsButton"
+                    x:Uid="CollectWindowsButton"
+                    Grid.Column="1"
+                    Width="32"
+                    Height="32"
+                    Padding="0"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Stretch"
+                    Click="OnCollectWindowsClick">
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          FontSize="12"
+                          Glyph="&#xE8DE;" />
+            </Button>
+
             <ToggleButton x:Name="RecentSortToggle"
                           x:Uid="RecentSortToggle"
-                          Grid.Column="1"
+                          Grid.Column="2"
                           Width="32"
                           Height="32"
                           Padding="0"
