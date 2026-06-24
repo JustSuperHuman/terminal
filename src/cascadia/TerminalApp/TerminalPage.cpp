@@ -2832,14 +2832,22 @@ namespace winrt::TerminalApp::implementation
         return _tabs.Size();
     }
 
-    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalPage::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount)
+    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalPage::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount)
     {
         ContentDialog dialog{};
 
         if (windowCount == 0 || tabCount == 0)
         {
-            dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogNoneTitle")));
-            dialog.Content(winrt::box_value(RS_(L"CollectWindowsDialogNoneBody")));
+            if (externalWindowCount > 0)
+            {
+                dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogExternalOnlyTitle")));
+                dialog.Content(winrt::box_value(RS_fmt(L"CollectWindowsDialogExternalOnlyBody", externalWindowCount)));
+            }
+            else
+            {
+                dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogNoneTitle")));
+                dialog.Content(winrt::box_value(RS_(L"CollectWindowsDialogNoneBody")));
+            }
             dialog.CloseButtonText(RS_(L"CollectWindowsDialogClose"));
             dialog.DefaultButton(ContentDialogButton::Close);
 
@@ -2852,7 +2860,9 @@ namespace winrt::TerminalApp::implementation
         }
 
         dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogTitle")));
-        dialog.Content(winrt::box_value(RS_fmt(L"CollectWindowsDialogBody", tabCount, windowCount)));
+        dialog.Content(winrt::box_value(externalWindowCount > 0 ?
+                                            RS_fmt(L"CollectWindowsDialogBodyWithExternal", tabCount, windowCount, externalWindowCount) :
+                                            RS_fmt(L"CollectWindowsDialogBody", tabCount, windowCount)));
         dialog.PrimaryButtonText(RS_(L"CollectWindowsDialogCollect"));
         dialog.CloseButtonText(RS_(L"CollectWindowsDialogCancel"));
         dialog.DefaultButton(ContentDialogButton::Primary);

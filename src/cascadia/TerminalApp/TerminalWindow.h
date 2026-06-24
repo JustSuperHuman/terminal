@@ -129,7 +129,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Media::Brush FrameBrush();
         void WindowActivated(const bool activated);
         uint32_t NumberOfTabs() const;
-        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount);
+        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount);
 
         bool GetMinimizeToNotificationArea();
         bool GetAlwaysShowNotificationIcon();

@@ -1025,11 +1025,11 @@ namespace winrt::TerminalApp::implementation
         return _root ? _root->NumberOfTabs() : 0;
     }
 
-    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalWindow::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount)
+    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalWindow::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount)
     {
         if (_root)
         {
-            co_return co_await _root->ConfirmCollectOtherWindows(windowCount, tabCount);
+            co_return co_await _root->ConfirmCollectOtherWindows(windowCount, tabCount, externalWindowCount);
         }
 
         co_return false;

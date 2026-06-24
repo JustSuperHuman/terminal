@@ -562,6 +562,11 @@
   <data name="CollectWindowsDialogBody" xml:space="preserve">
     <value>Collect {0} tab(s) from {1} other window(s) into this window?</value>
   </data>
+  <data name="CollectWindowsDialogBodyWithExternal" xml:space="preserve">
+    <value>Collect {0} tab(s) from {1} other window(s) into this window?
+
+{2} other terminal window(s) were found outside this Terminal instance. Windows does not expose a safe live-session handoff for other terminal apps, packages, or elevations, so those windows cannot be moved into tabs.</value>
+  </data>
   <data name="CollectWindowsDialogCollect" xml:space="preserve">
     <value>Collect</value>
   </data>
@@ -573,6 +578,12 @@
   </data>
   <data name="CollectWindowsDialogNoneBody" xml:space="preserve">
     <value>There are no other Terminal windows in this instance.</value>
+  </data>
+  <data name="CollectWindowsDialogExternalOnlyTitle" xml:space="preserve">
+    <value>Other terminal windows found</value>
+  </data>
+  <data name="CollectWindowsDialogExternalOnlyBody" xml:space="preserve">
+    <value>Found {0} terminal window(s) outside this Terminal instance. Windows does not expose a safe live-session handoff for other terminal apps, packages, or elevations, so there are no tabs this window can collect.</value>
   </data>
   <data name="CollectWindowsDialogClose" xml:space="preserve">
     <value>OK</value>
