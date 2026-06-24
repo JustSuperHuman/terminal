@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include "winrt/Microsoft.UI.Xaml.Controls.h"
 
 #include "Tab.h"
@@ -41,7 +45,12 @@ namespace winrt::TerminalApp::implementation
         bool _updatingVerticalSelection{ false };
 
         void _updateFilteredTabs();
-        bool _matchesFilter(const winrt::TerminalApp::Tab& tab, const std::wstring_view filter) const;
+        bool _matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms) const;
+        std::wstring _tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const;
+        static bool _containsAllTerms(const std::wstring& text, const std::vector<std::wstring>& terms);
+        static bool _shouldSearchBuffer(const std::vector<std::wstring>& terms);
+        static void _appendSearchText(std::wstring& text, const winrt::hstring& value);
+        static std::vector<std::wstring> _splitSearchTerms(const std::wstring_view filter);
         static std::wstring _foldForSearch(const winrt::hstring& value);
     };
 }

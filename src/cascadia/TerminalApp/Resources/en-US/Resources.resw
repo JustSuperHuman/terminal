@@ -449,7 +449,7 @@
     <value>Shift+Click to open a new window</value>
   </data>
   <data name="VerticalTabSearchBox.PlaceholderText" xml:space="preserve">
-    <value>Search tabs</value>
+    <value>Search tabs, paths, output</value>
   </data>
   <data name="VerticalTabCloseButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
     <value>Close tab</value>

@@ -5218,7 +5218,8 @@ namespace winrt::TerminalApp::implementation
             TitlebarBrush(backgroundSolidBrush);
         }
 
-        if (!_settings.GlobalSettings().ShowTabsInTitlebar())
+        constexpr bool useVerticalTabs{ true };
+        if (useVerticalTabs || !_settings.GlobalSettings().ShowTabsInTitlebar())
         {
             _tabRow.Background(TitlebarBrush());
         }
