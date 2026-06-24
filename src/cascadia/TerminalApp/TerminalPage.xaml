@@ -24,11 +24,39 @@
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <local:TabRowControl x:Name="TabRow"
-                             Grid.Row="0"
-                             Grid.RowSpan="2"
-                             Grid.Column="0"
-                             KeyUp="_KeyDownHandler" />
+        <Grid x:Name="VerticalTabPane"
+              Grid.Row="0"
+              Grid.RowSpan="2"
+              Grid.Column="0"
+              Background="{x:Bind TitlebarBrush, Mode=OneWay}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="VerticalTabColumn"
+                                  Width="240"
+                                  MinWidth="200"
+                                  MaxWidth="520" />
+                <ColumnDefinition Width="6" />
+            </Grid.ColumnDefinitions>
+
+            <local:TabRowControl x:Name="TabRow"
+                                 Grid.Column="0"
+                                 HorizontalAlignment="Stretch"
+                                 KeyUp="_KeyDownHandler" />
+
+            <Border x:Name="VerticalTabResizeHandle"
+                    Grid.Column="1"
+                    Background="Transparent"
+                    PointerCanceled="_VerticalTabResizePointerCanceled"
+                    PointerCaptureLost="_VerticalTabResizePointerCaptureLost"
+                    PointerEntered="_VerticalTabResizePointerEntered"
+                    PointerExited="_VerticalTabResizePointerExited"
+                    PointerMoved="_VerticalTabResizePointerMoved"
+                    PointerPressed="_VerticalTabResizePointerPressed"
+                    PointerReleased="_VerticalTabResizePointerReleased">
+                <Rectangle Width="1"
+                           HorizontalAlignment="Center"
+                           Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+            </Border>
+        </Grid>
 
         <StackPanel Grid.Row="0"
                     Grid.Column="1"

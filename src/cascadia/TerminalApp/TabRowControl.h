@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "winrt/Microsoft.UI.Xaml.Controls.h"
+#include "winrt/Windows.UI.Xaml.Controls.h"
+#include "winrt/Windows.UI.Xaml.Input.h"
 
 #include "Tab.h"
 #include "TabRowControl.g.h"
@@ -29,6 +31,10 @@ namespace winrt::TerminalApp::implementation
         void OnVerticalTabSearchTextChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::TextChangedEventArgs& e);
         void OnVerticalTabSelectionChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs& e);
         void OnVerticalTabCloseClick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
+        void OnVerticalTabTitlePointerEntered(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void OnVerticalTabTitlePointerExited(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void OnVerticalTabTitlePointerCanceled(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void OnVerticalTabTitlePointerCaptureLost(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void OnVerticalTabDragItemsStarting(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::DragItemsStartingEventArgs& e);
         void OnVerticalTabDragItemsCompleted(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::DragItemsCompletedEventArgs& e);
         void OnCollectWindowsClick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
@@ -63,6 +69,8 @@ namespace winrt::TerminalApp::implementation
         winrt::event_token _tabsChangedToken{};
         winrt::TerminalApp::Tab _selectedTab{ nullptr };
         winrt::TerminalApp::Tab _draggedTab{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToolTip _verticalTabTitleToolTip{ nullptr };
+        winrt::Windows::UI::Xaml::FrameworkElement _verticalTabTitleToolTipOwner{ nullptr };
         std::vector<winrt::TerminalApp::Tab> _recentActivityTabs;
         std::vector<ActivityDebounce> _activityDebounces;
         bool _updatingVerticalSelection{ false };
@@ -70,6 +78,7 @@ namespace winrt::TerminalApp::implementation
         void _updateFilteredTabs();
         void _setRecentActivitySortEnabled(const bool enabled);
         void _markTabRecentlyUpdated(const winrt::TerminalApp::Tab& tab);
+        void _closeVerticalTabTitleToolTip();
         void _pruneActivityState();
         void _updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms);
         bool _tabIsTracked(const winrt::TerminalApp::Tab& tab) const;

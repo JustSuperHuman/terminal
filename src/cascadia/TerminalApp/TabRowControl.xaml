@@ -10,8 +10,6 @@
                   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
                   xmlns:mtu="using:Microsoft.Terminal.UI"
                   xmlns:mux="using:Microsoft.UI.Xaml.Controls"
-                  Width="240"
-                  MinWidth="200"
                   Background="{ThemeResource TabViewBackground}"
                   mc:Ignorable="d">
 
@@ -174,6 +172,10 @@
 
                         <TextBlock Grid.Column="1"
                                    VerticalAlignment="Center"
+                                   PointerCanceled="OnVerticalTabTitlePointerCanceled"
+                                   PointerCaptureLost="OnVerticalTabTitlePointerCaptureLost"
+                                   PointerEntered="OnVerticalTabTitlePointerEntered"
+                                   PointerExited="OnVerticalTabTitlePointerExited"
                                    Text="{x:Bind Title, Mode=OneWay}"
                                    TextTrimming="CharacterEllipsis" />
 

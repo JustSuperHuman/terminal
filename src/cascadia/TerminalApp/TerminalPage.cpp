@@ -5,6 +5,8 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include <algorithm>
+
 #include <TerminalCore/ControlKeyStates.hpp>
 #include <TerminalThemeHelpers.h>
 #include <til/hash.h>
@@ -218,6 +220,8 @@ namespace clipboard
 
 namespace winrt::TerminalApp::implementation
 {
+    static constexpr double MinimumTerminalContentWidth = 320.0;
+
     TerminalPage::TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager) :
         _tabs{ winrt::single_threaded_observable_vector<TerminalApp::Tab>() },
         _mruTabs{ winrt::single_threaded_observable_vector<TerminalApp::Tab>() },
@@ -505,6 +509,113 @@ namespace winrt::TerminalApp::implementation
     Windows::UI::Xaml::Automation::Peers::AutomationPeer TerminalPage::OnCreateAutomationPeer()
     {
         return Automation::Peers::FrameworkElementAutomationPeer(*this);
+    }
+
+    void TerminalPage::_SetVerticalTabResizeCursor(const bool resizing) const
+    {
+        try
+        {
+            CoreWindow::GetForCurrentThread().PointerCursor(CoreCursor{ resizing ? CoreCursorType::SizeWestEast : CoreCursorType::Arrow, 0 });
+        }
+        CATCH_LOG();
+    }
+
+    void TerminalPage::_SetVerticalTabPaneWidth(const double width)
+    {
+        const auto column{ VerticalTabColumn() };
+        const auto minWidth{ column.MinWidth() };
+        auto maxWidth{ column.MaxWidth() };
+
+        const auto rootWidth{ Root().ActualWidth() };
+        if (rootWidth > 0)
+        {
+            const auto handleWidth{ VerticalTabResizeHandle().ActualWidth() };
+            const auto maxWidthWithContent{ std::max(minWidth, rootWidth - handleWidth - MinimumTerminalContentWidth) };
+            maxWidth = std::min(maxWidth, maxWidthWithContent);
+        }
+
+        const auto clampedWidth{ std::clamp(width, minWidth, maxWidth) };
+        column.Width(GridLengthHelper::FromValueAndType(clampedWidth, GridUnitType::Pixel));
+    }
+
+    void TerminalPage::_VerticalTabResizePointerEntered(const Windows::Foundation::IInspectable&,
+                                                        const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        _SetVerticalTabResizeCursor(true);
+    }
+
+    void TerminalPage::_VerticalTabResizePointerExited(const Windows::Foundation::IInspectable&,
+                                                       const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        if (!_resizingVerticalTabPane)
+        {
+            _SetVerticalTabResizeCursor(false);
+        }
+    }
+
+    void TerminalPage::_VerticalTabResizePointerPressed(const Windows::Foundation::IInspectable& sender,
+                                                        const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        const auto resizeHandle{ sender.try_as<WUX::UIElement>() };
+        if (!resizeHandle)
+        {
+            return;
+        }
+
+        resizeHandle.CapturePointer(e.Pointer());
+        const auto point{ e.GetCurrentPoint(Root()) };
+        _verticalTabResizeStartX = point.Position().X;
+        _verticalTabResizeStartWidth = VerticalTabColumn().ActualWidth();
+        _resizingVerticalTabPane = true;
+        _SetVerticalTabResizeCursor(true);
+        e.Handled(true);
+    }
+
+    void TerminalPage::_VerticalTabResizePointerMoved(const Windows::Foundation::IInspectable&,
+                                                      const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        if (!_resizingVerticalTabPane)
+        {
+            return;
+        }
+
+        const auto point{ e.GetCurrentPoint(Root()) };
+        _SetVerticalTabPaneWidth(_verticalTabResizeStartWidth + point.Position().X - _verticalTabResizeStartX);
+        e.Handled(true);
+    }
+
+    void TerminalPage::_StopVerticalTabPaneResize(const Windows::Foundation::IInspectable& sender,
+                                                  const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        if (const auto resizeHandle{ sender.try_as<WUX::UIElement>() })
+        {
+            resizeHandle.ReleasePointerCapture(e.Pointer());
+        }
+
+        if (_resizingVerticalTabPane)
+        {
+            _resizingVerticalTabPane = false;
+            _SetVerticalTabResizeCursor(false);
+            e.Handled(true);
+        }
+    }
+
+    void TerminalPage::_VerticalTabResizePointerReleased(const Windows::Foundation::IInspectable& sender,
+                                                         const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopVerticalTabPaneResize(sender, e);
+    }
+
+    void TerminalPage::_VerticalTabResizePointerCanceled(const Windows::Foundation::IInspectable& sender,
+                                                         const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopVerticalTabPaneResize(sender, e);
+    }
+
+    void TerminalPage::_VerticalTabResizePointerCaptureLost(const Windows::Foundation::IInspectable& sender,
+                                                            const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopVerticalTabPaneResize(sender, e);
     }
 
     // Method Description:
