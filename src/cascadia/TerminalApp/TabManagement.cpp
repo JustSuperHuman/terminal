@@ -202,9 +202,11 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // This kicks off TabView::SelectionChanged, in response to which
-        // we'll attach the terminal's Xaml control to the Xaml root.
+        // Keep the backing TabView selection current, then attach the tab
+        // content explicitly. The backing TabView is collapsed in vertical tab
+        // mode, so it cannot be the only source of the visible content update.
         _tabView.SelectedItem(tabViewItem);
+        _UpdatedSelectedTab(*newTabImpl);
     }
 
     // Method Description:
@@ -263,14 +265,15 @@ namespace winrt::TerminalApp::implementation
 
         if (_tabView)
         {
-            // collapse/show the tabs themselves
-            _tabView.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
+            // Keep the backing TabView in the tree for tab behavior, but the
+            // visible tab surface is the vertical rail in TabRowControl.
+            _tabView.Visibility(Visibility::Collapsed);
         }
         if (_tabRow)
         {
-            // collapse/show the row that the tabs are in.
+            _tabRow.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
             // NaN is the special value XAML uses for "Auto" sizing.
-            _tabRow.Height(isVisible ? NAN : 0);
+            _tabRow.Height(NAN);
         }
     }
 
@@ -710,10 +713,8 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - An async method for changing the focused tab on the UI thread. This
-    //   method will _only_ set the selected item of the TabView, which will
-    //   then also trigger a TabView::SelectionChanged event, which we'll handle
-    //   in TerminalPage::_OnTabSelectionChanged, where we'll mark the new tab
-    //   as focused.
+    //   keeps the backing TabView selection current and explicitly attaches
+    //   the selected tab's content to the page.
     // Arguments:
     // - tab: tab to focus.
     // Return Value:
@@ -736,6 +737,7 @@ namespace winrt::TerminalApp::implementation
             if (_tabs.IndexOf(tab, tabIndex))
             {
                 _tabView.SelectedItem(tab.TabViewItem());
+                _UpdatedSelectedTab(tab);
             }
         }
     }
@@ -1081,6 +1083,11 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_UpdatedSelectedTab(const winrt::TerminalApp::Tab& tab)
     {
+        if (_tabRow)
+        {
+            winrt::get_self<implementation::TabRowControl>(_tabRow)->SelectTab(tab);
+        }
+
         // Unfocus all the tabs.
         for (const auto& tab : _tabs)
         {
@@ -1124,7 +1131,10 @@ namespace winrt::TerminalApp::implementation
                 _UpdateBackground(profile);
             }
 
-            _adjustProcessPriorityThrottled->Run();
+            if (_adjustProcessPriorityThrottled)
+            {
+                _adjustProcessPriorityThrottled->Run();
+            }
         }
         CATCH_LOG();
     }
@@ -1145,6 +1155,11 @@ namespace winrt::TerminalApp::implementation
     // - eventArgs: the event's constituent arguments
     void TerminalPage::_OnTabSelectionChanged(const IInspectable& sender, const WUX::Controls::SelectionChangedEventArgs& /*eventArgs*/)
     {
+        if (_tabView.Visibility() == Visibility::Collapsed)
+        {
+            return;
+        }
+
         if (!_rearranging && !_removing)
         {
             auto tabView = sender.as<MUX::Controls::TabView>();

@@ -6,6 +6,9 @@
 
 #include "TabRowControl.g.cpp"
 
+#include <algorithm>
+#include <cwctype>
+
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 
 using namespace winrt;
@@ -22,7 +25,101 @@ namespace winrt::TerminalApp::implementation
 {
     TabRowControl::TabRowControl()
     {
+        _filteredTabs = winrt::single_threaded_observable_vector<TerminalApp::Tab>();
         InitializeComponent();
+    }
+
+    winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::Tab> TabRowControl::FilteredTabs() const noexcept
+    {
+        return _filteredTabs;
+    }
+
+    void TabRowControl::SetTabs(const winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::Tab>& tabs)
+    {
+        if (_tabs && _tabsChangedToken.value != 0)
+        {
+            _tabs.VectorChanged(_tabsChangedToken);
+            _tabsChangedToken = {};
+        }
+
+        _tabs = tabs;
+
+        if (_tabs)
+        {
+            _tabsChangedToken = _tabs.VectorChanged([weakThis{ get_weak() }](auto&&, auto&&) {
+                if (auto self{ weakThis.get() })
+                {
+                    self->_updateFilteredTabs();
+                }
+            });
+        }
+
+        _updateFilteredTabs();
+    }
+
+    void TabRowControl::SelectTab(const winrt::TerminalApp::Tab& tab)
+    {
+        _selectedTab = tab;
+
+        _updatingVerticalSelection = true;
+        auto restoreSelection = wil::scope_exit([&]() {
+            _updatingVerticalSelection = false;
+        });
+
+        if (!_selectedTab)
+        {
+            VerticalTabList().SelectedIndex(-1);
+            return;
+        }
+
+        uint32_t filteredIndex{};
+        if (_filteredTabs.IndexOf(_selectedTab, filteredIndex))
+        {
+            VerticalTabList().SelectedItem(_selectedTab);
+        }
+        else
+        {
+            VerticalTabList().SelectedIndex(-1);
+        }
+    }
+
+    std::wstring TabRowControl::_foldForSearch(const winrt::hstring& value)
+    {
+        std::wstring result{ value.c_str() };
+        std::transform(result.begin(), result.end(), result.begin(), [](const wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return result;
+    }
+
+    bool TabRowControl::_matchesFilter(const winrt::TerminalApp::Tab& tab, const std::wstring_view filter) const
+    {
+        if (filter.empty())
+        {
+            return true;
+        }
+
+        const auto title{ _foldForSearch(tab.Title()) };
+        return title.find(filter) != std::wstring::npos;
+    }
+
+    void TabRowControl::_updateFilteredTabs()
+    {
+        const auto filter{ _foldForSearch(VerticalTabSearchBox().Text()) };
+
+        _filteredTabs.Clear();
+        if (_tabs)
+        {
+            for (const auto& tab : _tabs)
+            {
+                if (_matchesFilter(tab, filter))
+                {
+                    _filteredTabs.Append(tab);
+                }
+            }
+        }
+
+        SelectTab(_selectedTab);
     }
 
     // Method Description:
@@ -39,6 +136,52 @@ namespace winrt::TerminalApp::implementation
     // <unused>
     void TabRowControl::OnNewTabButtonDrop(const IInspectable&, const winrt::Windows::UI::Xaml::DragEventArgs&)
     {
+    }
+
+    void TabRowControl::OnVerticalTabSearchTextChanged(const winrt::Windows::Foundation::IInspectable&,
+                                                       const winrt::Windows::UI::Xaml::Controls::TextChangedEventArgs&)
+    {
+        _updateFilteredTabs();
+    }
+
+    void TabRowControl::OnVerticalTabSelectionChanged(const winrt::Windows::Foundation::IInspectable&,
+                                                      const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs&)
+    {
+        if (_updatingVerticalSelection)
+        {
+            return;
+        }
+
+        if (const auto tab{ VerticalTabList().SelectedItem().try_as<TerminalApp::Tab>() })
+        {
+            _selectedTab = tab;
+            VerticalTabSelected.raise(*this, tab);
+        }
+    }
+
+    void TabRowControl::OnVerticalTabItemClick(const winrt::Windows::Foundation::IInspectable&,
+                                               const winrt::Windows::UI::Xaml::Controls::ItemClickEventArgs& e)
+    {
+        if (const auto tab{ e.ClickedItem().try_as<TerminalApp::Tab>() })
+        {
+            _selectedTab = tab;
+            VerticalTabSelected.raise(*this, tab);
+        }
+    }
+
+    void TabRowControl::OnVerticalTabCloseClick(const winrt::Windows::Foundation::IInspectable& sender,
+                                                const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        if (const auto button{ sender.try_as<winrt::Windows::UI::Xaml::Controls::Button>() })
+        {
+            if (const auto tab{ button.DataContext().try_as<TerminalApp::Tab>() })
+            {
+                if (const auto tabImpl{ winrt::get_self<Tab>(tab) })
+                {
+                    tabImpl->CloseRequested.raise(nullptr, nullptr);
+                }
+            }
+        }
     }
 
     // Method Description:

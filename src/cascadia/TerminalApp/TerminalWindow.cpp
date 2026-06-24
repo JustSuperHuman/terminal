@@ -282,7 +282,9 @@ namespace winrt::TerminalApp::implementation
 
     bool TerminalWindow::GetShowTabsInTitlebar()
     {
-        return _settings.GlobalSettings().ShowTabsInTitlebar();
+        // The vertical tab rail lives in the page content area, not the
+        // non-client titlebar slot used by horizontal tabs.
+        return false;
     }
 
     bool TerminalWindow::GetInitialAlwaysOnTop()
@@ -657,10 +659,17 @@ namespace winrt::TerminalApp::implementation
             };
         }
 
+        static constexpr bool useVerticalTabs = true;
+        if (useVerticalTabs && !focusMode)
+        {
+            static constexpr auto tabRailWidth = 240;
+            proposedSize.Width += tabRailWidth * scale;
+        }
+
         // GH#2061 - If the global setting "Always show tab bar" is
         // set or if "Show tabs in title bar" is set, then we'll need to add
         // the height of the tab bar here.
-        if (_settings.GlobalSettings().ShowTabsInTitlebar() && !focusMode)
+        if (!useVerticalTabs && _settings.GlobalSettings().ShowTabsInTitlebar() && !focusMode)
         {
             // In the past, we used to actually instantiate a TitlebarControl
             // and use Measure() to determine the DesiredSize of the control, to
@@ -678,7 +687,7 @@ namespace winrt::TerminalApp::implementation
             static constexpr auto titlebarHeight = 40;
             proposedSize.Height += (titlebarHeight)*scale;
         }
-        else if (_settings.GlobalSettings().AlwaysShowTabs() && !focusMode)
+        else if (!useVerticalTabs && _settings.GlobalSettings().AlwaysShowTabs() && !focusMode)
         {
             // Same comment as above, but with a TabRowControl.
             //
@@ -1375,7 +1384,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::Size pixelSize = { static_cast<float>(args.Width()), static_cast<float>(args.Height()) };
         const auto scale = static_cast<float>(DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel());
 
-        if (!FocusMode())
+        static constexpr bool useVerticalTabs = true;
+        if (useVerticalTabs && !FocusMode())
+        {
+            static constexpr auto tabRailWidth = 240;
+            pixelSize.Width += tabRailWidth * scale;
+        }
+        else if (!FocusMode())
         {
             if (!_settings.GlobalSettings().AlwaysShowTabs())
             {

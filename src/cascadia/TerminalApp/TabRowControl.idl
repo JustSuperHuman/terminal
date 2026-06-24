@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+import "Tab.idl";
+
 namespace TerminalApp
 {
     [default_interface] runtimeclass TabRowControl : Windows.UI.Xaml.Controls.ContentPresenter,
@@ -8,6 +10,7 @@ namespace TerminalApp
     {
         TabRowControl();
         Microsoft.UI.Xaml.Controls.TabView TabView { get; };
+        Windows.Foundation.Collections.IObservableVector<Tab> FilteredTabs { get; };
         Boolean ShowElevationShield;
         Boolean ShowWorkspacesButton;
         String WorkspaceName;
