@@ -17,15 +17,21 @@
           Background="Transparent">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
 
         <local:TabRowControl x:Name="TabRow"
                              Grid.Row="0"
+                             Grid.RowSpan="2"
+                             Grid.Column="0"
                              KeyUp="_KeyDownHandler" />
 
-        <StackPanel Grid.Row="1"
+        <StackPanel Grid.Row="0"
+                    Grid.Column="1"
                     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
             <mux:InfoBar x:Name="KeyboardServiceWarningInfoBar"
                          x:Load="False"
@@ -57,7 +63,8 @@
         </StackPanel>
 
         <Grid x:Name="TabContent"
-              Grid.Row="2"
+              Grid.Row="1"
+              Grid.Column="1"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch">
             <Grid.Background>
@@ -73,7 +80,7 @@
             when the dialog gets opened, the dialog seemingly causes a giant
             hole to appear in the body of the app.
             
-            Assigning all the dialogs to Row 2 (where the rest of the content
+            Assigning all the dialogs to Row 1 (where the rest of the content
             is) makes the "hole" appear in the same space as the rest of the
             TabContent, fixing the issue.
             
@@ -83,11 +90,13 @@
         -->
 
         <local:AboutDialog x:Name="AboutDialog"
-                           Grid.Row="2"
+                           Grid.Row="1"
+                           Grid.Column="1"
                            x:Load="False" />
 
         <ContentDialog x:Name="ConfirmCloseDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <CheckBox x:Uid="DontAskAgainCheckBox" />
@@ -95,13 +104,15 @@
 
         <ContentDialog x:Name="CloseReadOnlyDialog"
                        x:Uid="CloseReadOnlyDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Close" />
 
         <ContentDialog x:Name="MultiLinePasteDialog"
                        x:Uid="MultiLinePasteDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <StackPanel>
@@ -121,13 +132,15 @@
 
         <ContentDialog x:Name="LargePasteDialog"
                        x:Uid="LargePasteDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary" />
 
         <ContentDialog x:Name="ControlNoticeDialog"
                        x:Uid="ControlNoticeDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <TextBlock IsTextSelectionEnabled="True"
@@ -141,7 +154,8 @@
 
         <ContentDialog x:Name="UriErrorDialog"
                        x:Uid="UriErrorDialog"
-                       Grid.Row="2"
+                       Grid.Row="1"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Close">
             <TextBlock IsTextSelectionEnabled="True"
@@ -156,14 +170,16 @@
         </ContentDialog>
 
         <local:CommandPalette x:Name="CommandPaletteElement"
-                              Grid.Row="2"
+                              Grid.Row="1"
+                              Grid.Column="1"
                               VerticalAlignment="Stretch"
                               x:Load="False"
                               PreviewKeyDown="_KeyDownHandler"
                               Visibility="Collapsed" />
 
         <local:SuggestionsControl x:Name="SuggestionsElement"
-                                  Grid.Row="2"
+                                  Grid.Row="1"
+                                  Grid.Column="1"
                                   HorizontalAlignment="Left"
                                   VerticalAlignment="Top"
                                   x:Load="False"
@@ -177,6 +193,8 @@
         -->
         <mux:TeachingTip x:Name="WindowIdToast"
                          Title="{x:Bind WindowProperties.WindowIdForDisplay}"
+                         Grid.Row="1"
+                         Grid.Column="1"
                          x:Load="False"
                          IsLightDismissEnabled="True"
                          Subtitle="{x:Bind WindowProperties.WindowNameForDisplay, Mode=OneWay}" />
@@ -184,6 +202,8 @@
         <mux:TeachingTip x:Name="WindowRenamer"
                          x:Uid="WindowRenamer"
                          Title="{x:Bind WindowProperties.WindowIdForDisplay}"
+                         Grid.Row="1"
+                         Grid.Column="1"
                          x:Load="False"
                          ActionButtonClick="_WindowRenamerActionClick"
                          ActionButtonStyle="{ThemeResource AccentButtonStyle}"
@@ -203,12 +223,16 @@
         <mux:TeachingTip x:Name="WindowCwdToast"
                          x:Uid="WindowCwdToast"
                          Title="{x:Bind WindowProperties.VirtualWorkingDirectory, Mode=OneWay}"
+                         Grid.Row="1"
+                         Grid.Column="1"
                          x:Load="False"
                          IsLightDismissEnabled="True" />
 
         <mux:TeachingTip x:Name="ActionSavedToast"
                          x:Uid="ActionSavedToast"
                          Title="Action Saved"
+                         Grid.Row="1"
+                         Grid.Column="1"
                          HorizontalAlignment="Stretch"
                          x:Load="False"
                          IsLightDismissEnabled="True">
@@ -236,6 +260,8 @@
         <mux:TeachingTip x:Name="ActionSaveFailedToast"
                          x:Uid="ActionSaveFailedToast"
                          Title="Action Save Failed"
+                         Grid.Row="1"
+                         Grid.Column="1"
                          x:Load="False"
                          IsLightDismissEnabled="True">
             <mux:TeachingTip.Content>

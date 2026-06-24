@@ -339,6 +339,13 @@ namespace winrt::TerminalApp::implementation
         _newTabButton = tabRowImpl->NewTabButton();
         _workspaceFlyout = tabRowImpl->WorkspaceFlyout();
         _workspaceDropdown = tabRowImpl->WorkspaceDropdown();
+        tabRowImpl->SetTabs(_tabs);
+        tabRowImpl->VerticalTabSelected([weakThis{ get_weak() }](auto&&, const auto& tab) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_SetFocusedTab(tab);
+            }
+        });
 
         // Set the initial workspace name from the window name.
         // Use raw WindowName() so unnamed windows show no text.
@@ -353,7 +360,8 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        if (_settings.GlobalSettings().ShowTabsInTitlebar())
+        static constexpr bool useVerticalTabs = true;
+        if (!useVerticalTabs && _settings.GlobalSettings().ShowTabsInTitlebar())
         {
             // Remove the TabView from the page. We'll hang on to it, we need to
             // put it in the titlebar.
@@ -4632,7 +4640,7 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
-            _tabView.SelectedItem(_settingsTab.TabViewItem());
+            _SetFocusedTab(_settingsTab);
         }
     }
 
