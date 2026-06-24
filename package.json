@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "update": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/update-dev-terminal.ps1"
+  }
+}

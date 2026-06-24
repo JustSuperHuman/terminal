@@ -11,6 +11,13 @@
 
 ## Build And Run
 
+- One-command local update:
+  - `bun run update`
+  - This restores NuGet packages, builds `Terminal\CascadiaPackage` as Debug x64, registers the loose `WindowsTerminalDev` package, and launches it.
+  - Re-registration removes the existing `WindowsTerminalDev` package registration first and preserves app data when the host supports it; this avoids the same-version dev package registration block.
+  - Use `bun run update -- -NoLaunch` to build/register without launching.
+  - Use `bun run update -- -MakeDefault` to also set `WindowsTerminalDev` as the per-user default terminal application.
+  - Use `bun run update -- -Pull` only when the working tree is clean and you want a `git pull --ff-only` before building.
 - Restore submodules before building: `git submodule update --init --recursive`
 - PowerShell build path:
   - `.\dep\nuget\nuget.exe restore .\dep\nuget\packages.config -PackagesDirectory .\packages`
@@ -24,6 +31,8 @@
 - Local loose-package deploy/run:
   - `Add-AppxPackage -Register .\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml -ForceUpdateFromAnyVersion -ForceApplicationShutdown`
   - `Start-Process "shell:AppsFolder\WindowsTerminalDev_8wekyb3d8bbwe!App"`
+- Dev package identity is `WindowsTerminalDev_8wekyb3d8bbwe`; its command alias is `wtd.exe`, not the Store package `wt.exe`.
+- To make this the everyday terminal, pin Windows Terminal Dev and set Windows' default terminal app to the dev package if it appears in Settings. Do not overwrite the Store package identity.
 - For local app testing, build/deploy `CascadiaPackage` from Visual Studio, use the loose manifest above, or build/deploy the generated appx recipe/MSIX per `doc\building.md`.
 - Useful docs: `README.md`, `doc\building.md`, `tools\README.md`, `doc\STYLE.md`, `doc\ORGANIZATION.md`.
 

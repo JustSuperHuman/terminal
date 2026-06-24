@@ -28,17 +28,40 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBox x:Name="VerticalTabSearchBox"
-                 x:Uid="VerticalTabSearchBox"
-                 Grid.Row="0"
-                 Margin="8,8,8,4"
-                 Padding="10,5,10,6"
-                 IsSpellCheckEnabled="False"
-                 TextChanged="OnVerticalTabSearchTextChanged">
-            <TextBox.ContextFlyout>
-                <mtu:TextMenuFlyout />
-            </TextBox.ContextFlyout>
-        </TextBox>
+        <Grid Grid.Row="0"
+              Margin="8,8,8,4"
+              ColumnSpacing="6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="32" />
+            </Grid.ColumnDefinitions>
+
+            <TextBox x:Name="VerticalTabSearchBox"
+                     x:Uid="VerticalTabSearchBox"
+                     Grid.Column="0"
+                     Padding="10,5,10,6"
+                     IsSpellCheckEnabled="False"
+                     TextChanged="OnVerticalTabSearchTextChanged">
+                <TextBox.ContextFlyout>
+                    <mtu:TextMenuFlyout />
+                </TextBox.ContextFlyout>
+            </TextBox>
+
+            <ToggleButton x:Name="RecentSortToggle"
+                          x:Uid="RecentSortToggle"
+                          Grid.Column="1"
+                          Width="32"
+                          Height="32"
+                          Padding="0"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Checked="OnRecentSortToggleChecked"
+                          Unchecked="OnRecentSortToggleUnchecked">
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          FontSize="12"
+                          Glyph="&#xE81C;" />
+            </ToggleButton>
+        </Grid>
 
         <StackPanel Grid.Row="1"
                     Margin="8,0,8,4"
@@ -86,11 +109,14 @@
 
         <ListView x:Name="VerticalTabList"
                   Grid.Row="2"
+                  AllowDrop="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   Padding="4,0,4,4"
                   HorizontalAlignment="Stretch"
                   VerticalAlignment="Stretch"
-                  IsItemClickEnabled="True"
-                  ItemClick="OnVerticalTabItemClick"
+                  CanDragItems="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
+                  CanReorderItems="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
+                  DragItemsCompleted="OnVerticalTabDragItemsCompleted"
+                  DragItemsStarting="OnVerticalTabDragItemsStarting"
                   ItemsSource="{x:Bind FilteredTabs, Mode=OneWay}"
                   SelectionChanged="OnVerticalTabSelectionChanged"
                   SelectionMode="Single">

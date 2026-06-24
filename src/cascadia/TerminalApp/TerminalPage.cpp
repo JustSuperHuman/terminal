@@ -346,6 +346,15 @@ namespace winrt::TerminalApp::implementation
                 page->_SetFocusedTab(tab);
             }
         });
+        tabRowImpl->VerticalTabMoveRequested = [weakThis{ get_weak() }](const auto& tab, const uint32_t targetIndex) {
+            if (auto page{ weakThis.get() })
+            {
+                if (const auto currentIndex{ page->_GetTabIndex(tab) })
+                {
+                    page->_TryMoveTab(*currentIndex, static_cast<int32_t>(targetIndex));
+                }
+            }
+        };
 
         // Set the initial workspace name from the window name.
         // Use raw WindowName() so unnamed windows show no text.
@@ -2024,8 +2033,13 @@ namespace winrt::TerminalApp::implementation
     //   TitleChanged event.
     // Arguments:
     // - tab: the Tab to update the title for.
-    void TerminalPage::_UpdateTitle(const Tab& tab)
+    void TerminalPage::_UpdateTitle(const winrt::TerminalApp::Tab& tab)
     {
+        if (_tabRow)
+        {
+            winrt::get_self<implementation::TabRowControl>(_tabRow)->NotifyTabTitleUpdated(tab);
+        }
+
         if (tab == _GetFocusedTab())
         {
             TitleChanged.raise(*this, nullptr);

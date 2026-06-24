@@ -398,7 +398,7 @@ namespace winrt::TerminalApp::implementation
         void _HookupKeyBindings(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap) noexcept;
         void _RegisterActionCallbacks();
 
-        void _UpdateTitle(const Tab& tab);
+        void _UpdateTitle(const winrt::TerminalApp::Tab& tab);
         void _UpdateTabIcon(Tab& tab);
         void _UpdateTabView();
         void _UpdateTabWidthMode();
