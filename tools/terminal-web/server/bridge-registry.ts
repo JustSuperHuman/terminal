@@ -144,24 +144,15 @@ export class BridgeRegistry extends EventEmitter {
     send(session.socket, { type: "input", sessionId: id, data });
   }
 
-  resize(id: string, cols: number, rows: number): void {
+  resize(id: string, _cols: number, _rows: number): void {
     const session = this.requireSession(id);
-    const nextCols = clampCols(cols);
-    const nextRows = clampRows(rows);
-
-    if (session.summary.cols === nextCols && session.summary.rows === nextRows) {
+    if (session.summary.status !== "running") {
       return;
     }
 
-    session.summary = {
-      ...session.summary,
-      cols: nextCols,
-      rows: nextRows,
-      updatedAt: new Date().toISOString()
-    };
-    session.headless.resize(nextCols, nextRows);
-    send(session.socket, { type: "resize", sessionId: id, cols: nextCols, rows: nextRows });
-    this.emit("session", session.summary);
+    // A bridged session is already hosted by a real terminal window. Browser
+    // and mobile clients must not resize that child PTY, or the host tab
+    // reflows to the smallest attached viewport.
   }
 
   kill(id: string): void {

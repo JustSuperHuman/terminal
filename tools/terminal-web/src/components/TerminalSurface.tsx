@@ -13,6 +13,41 @@ function getTerminalFontSize() {
   return window.matchMedia("(max-width: 640px)").matches ? 12 : 13;
 }
 
+function isMobileTerminalViewport() {
+  return window.matchMedia("(max-width: 640px)").matches;
+}
+
+function clampTerminalDimension(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(Math.floor(value), max));
+}
+
+function setTerminalFontSize(term: Terminal, size: number) {
+  const nextSize = Math.round(size * 100) / 100;
+  const currentSize = Number(term.options.fontSize ?? getTerminalFontSize());
+  if (Math.abs(currentSize - nextSize) > 0.05) {
+    term.options.fontSize = nextSize;
+  }
+}
+
+function measureCellWidth(host: HTMLElement, term: Terminal) {
+  const fontSize = Number(term.options.fontSize ?? getTerminalFontSize());
+  const probe = document.createElement("span");
+  probe.textContent = "M".repeat(120);
+  probe.style.fontFamily = String(term.options.fontFamily ?? "monospace");
+  probe.style.fontSize = `${fontSize}px`;
+  probe.style.lineHeight = String(term.options.lineHeight ?? 1.22);
+  probe.style.position = "absolute";
+  probe.style.visibility = "hidden";
+  probe.style.whiteSpace = "pre";
+  probe.style.pointerEvents = "none";
+
+  host.appendChild(probe);
+  const width = probe.getBoundingClientRect().width / 120;
+  probe.remove();
+
+  return Number.isFinite(width) && width > 0 ? width : fontSize * 0.62;
+}
+
 interface TerminalSurfaceProps {
   session?: TerminalSessionSummary;
   targetId?: string;
@@ -28,8 +63,80 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
   const activeTargetRef = useRef<string | undefined>(targetId);
+  const activeSessionRef = useRef<TerminalSessionSummary | undefined>(session);
   const subscribedTargetRef = useRef<string | undefined>();
+  const layoutFrameRef = useRef<number | undefined>();
   const [scrollState, setScrollState] = useState({ canScroll: false, atBottom: true });
+
+  function isBridgedSession() {
+    return activeSessionRef.current?.source === "bridged";
+  }
+
+  function applyTerminalLayout() {
+    const term = terminalRef.current;
+    const fit = fitRef.current;
+    const host = hostRef.current;
+    if (!term || !fit || !host) {
+      return;
+    }
+
+    const bridgedSession = activeSessionRef.current?.source === "bridged" ? activeSessionRef.current : undefined;
+    if (bridgedSession) {
+      const cols = clampTerminalDimension(bridgedSession.cols, 20, 400);
+      const rows = clampTerminalDimension(bridgedSession.rows, 8, 200);
+      const shell = host.parentElement;
+      const parentWidth = host.parentElement?.clientWidth ?? host.clientWidth;
+      const baseFontSize = getTerminalFontSize();
+      const mobile = isMobileTerminalViewport();
+
+      if (mobile) {
+        setTerminalFontSize(term, baseFontSize);
+        const baseWidth = Math.ceil(cols * measureCellWidth(host, term)) + 4;
+        const fittedFontSize = baseWidth > parentWidth ? baseFontSize * (parentWidth / baseWidth) : baseFontSize;
+        setTerminalFontSize(term, Math.max(9, Math.min(baseFontSize, fittedFontSize)));
+      } else {
+        setTerminalFontSize(term, baseFontSize);
+      }
+
+      const contentWidth = Math.ceil(cols * measureCellWidth(host, term)) + 4;
+      const width = Math.max(parentWidth, contentWidth);
+      const scaleX = mobile && width > parentWidth ? parentWidth / width : 1;
+
+      host.style.width = `${width}px`;
+      host.style.minWidth = scaleX < 1 ? "0" : "100%";
+      host.style.transform = scaleX < 1 ? `scaleX(${scaleX})` : "";
+      host.style.transformOrigin = "left top";
+      if (shell) {
+        shell.style.overflowX = scaleX < 1 ? "hidden" : "";
+        if (scaleX < 1) {
+          shell.scrollLeft = 0;
+        }
+      }
+      term.resize(cols, rows);
+      return;
+    }
+
+    host.style.width = "";
+    host.style.minWidth = "";
+    host.style.transform = "";
+    host.style.transformOrigin = "";
+    if (host.parentElement) {
+      host.parentElement.style.overflowX = "";
+    }
+    setTerminalFontSize(term, getTerminalFontSize());
+    fit.fit();
+  }
+
+  function scheduleTerminalLayout() {
+    if (layoutFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(layoutFrameRef.current);
+    }
+
+    layoutFrameRef.current = window.requestAnimationFrame(() => {
+      layoutFrameRef.current = undefined;
+      applyTerminalLayout();
+    });
+  }
 
   function updateScrollState() {
     const buffer = terminalRef.current?.buffer.active;
@@ -46,6 +153,11 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
   useEffect(() => {
     activeTargetRef.current = targetId;
   }, [targetId]);
+
+  useEffect(() => {
+    activeSessionRef.current = session;
+    scheduleTerminalLayout();
+  }, [session?.id, session?.source, session?.cols, session?.rows]);
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -96,33 +208,22 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     fitRef.current = fit;
     serializeRef.current = serialize;
 
-    let fitFrame: number | undefined;
-    function scheduleFit() {
-      if (fitFrame) {
-        window.cancelAnimationFrame(fitFrame);
-      }
-      fitFrame = window.requestAnimationFrame(() => {
-        fitFrame = undefined;
-        fit.fit();
-      });
-    }
-
     const resizeObserver = new ResizeObserver(() => {
-      scheduleFit();
+      scheduleTerminalLayout();
       window.setTimeout(updateScrollState, 0);
     });
     resizeObserver.observe(hostRef.current);
-    window.addEventListener("resize", scheduleFit);
-    window.visualViewport?.addEventListener("resize", scheduleFit);
+    window.addEventListener("resize", scheduleTerminalLayout);
+    window.visualViewport?.addEventListener("resize", scheduleTerminalLayout);
 
     const mobileQuery = window.matchMedia("(max-width: 640px)");
     const onMobileQueryChange = () => {
       term.options.fontSize = getTerminalFontSize();
-      scheduleFit();
+      scheduleTerminalLayout();
     };
     mobileQuery.addEventListener("change", onMobileQueryChange);
 
-    document.fonts?.ready.then(() => scheduleFit()).catch(() => undefined);
+    document.fonts?.ready.then(() => scheduleTerminalLayout()).catch(() => undefined);
 
     const viewport = hostRef.current.querySelector<HTMLElement>(".xterm-viewport");
     viewport?.addEventListener("scroll", updateScrollState, { passive: true });
@@ -195,23 +296,24 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
       const activeTargetId = activeTargetRef.current;
-      if (activeTargetId) {
+      if (activeTargetId && !isBridgedSession()) {
         terminalSocket.send({ type: "resize", sessionId: activeTargetId, cols, rows });
       }
     });
 
-    scheduleFit();
-    window.setTimeout(scheduleFit, 60);
-    window.setTimeout(scheduleFit, 240);
+    scheduleTerminalLayout();
+    window.setTimeout(scheduleTerminalLayout, 60);
+    window.setTimeout(scheduleTerminalLayout, 240);
     window.setTimeout(updateScrollState, 0);
 
     return () => {
-      if (fitFrame) {
-        window.cancelAnimationFrame(fitFrame);
+      if (layoutFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(layoutFrameRef.current);
+        layoutFrameRef.current = undefined;
       }
       resizeObserver.disconnect();
-      window.removeEventListener("resize", scheduleFit);
-      window.visualViewport?.removeEventListener("resize", scheduleFit);
+      window.removeEventListener("resize", scheduleTerminalLayout);
+      window.visualViewport?.removeEventListener("resize", scheduleTerminalLayout);
       mobileQuery.removeEventListener("change", onMobileQueryChange);
       viewport?.removeEventListener("scroll", updateScrollState);
       hostRef.current?.removeEventListener("wheel", onWheel);
@@ -244,7 +346,7 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
             term.write(chunk.data);
           }
         }
-        window.setTimeout(() => fitRef.current?.fit(), 0);
+        window.setTimeout(scheduleTerminalLayout, 0);
         window.setTimeout(updateScrollState, 0);
       }
 
@@ -275,8 +377,10 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
     window.setTimeout(() => {
-      fitRef.current?.fit();
-      terminalSocket.send({ type: "resize", sessionId: targetId, cols: term.cols, rows: term.rows });
+      applyTerminalLayout();
+      if (!isBridgedSession()) {
+        terminalSocket.send({ type: "resize", sessionId: targetId, cols: term.cols, rows: term.rows });
+      }
       if (acceptsInput) {
         term.focus();
       }
@@ -316,8 +420,8 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
   return (
     <div className="relative min-h-0 flex-1 bg-terminal">
-      <div className="terminal-shell h-full w-full">
-        <div ref={hostRef} className="terminal-frame h-full w-full" />
+      <div className={`terminal-shell h-full w-full ${session?.source === "bridged" ? "terminal-shell-fixed" : ""}`}>
+        <div ref={hostRef} className={`terminal-frame h-full ${session?.source === "bridged" ? "terminal-frame-fixed" : "w-full"}`} />
       </div>
       {scrollState.canScroll ? (
         <div className="absolute bottom-3 right-3 z-10 flex rounded-md border bg-background/90 p-0.5 shadow-sm backdrop-blur">

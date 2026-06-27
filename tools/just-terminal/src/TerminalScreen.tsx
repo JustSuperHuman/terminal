@@ -55,12 +55,12 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     };
   }, [endpoint.id]);
 
-  function upsertSession(session: TerminalSessionSummary) {
+  const upsertSession = useCallback((session: TerminalSessionSummary) => {
     setSessions((current) => {
       const exists = current.some((item) => item.id === session.id);
       return exists ? current.map((item) => (item.id === session.id ? session : item)) : [...current, session];
     });
-  }
+  }, []);
 
   useEffect(() => {
     const offStatus = terminalSocket.onStatus(setSocketStatus);
@@ -95,7 +95,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       offStatus();
       offMessage();
     };
-  }, []);
+  }, [upsertSession]);
 
   const activeSession = useMemo(() => sessions.find((item) => item.id === activeId), [sessions, activeId]);
 
@@ -116,6 +116,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       const options = { ...(spec ?? {}), ...(activeCwd ? { cwd: activeCwd } : {}) };
       try {
         const session = await createSessionApi(endpoint, options);
+        upsertSession(session);
         selectSession(session.id);
         if (activeCwd) {
           rememberCwd(endpoint.id, activeCwd).then(setRecentCwds);
@@ -124,7 +125,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         terminalSocket.send({ type: "create", ...options });
       }
     },
-    [endpoint, selectSession, activeCwd]
+    [endpoint, selectSession, activeCwd, upsertSession]
   );
 
   const killSession = useCallback((id: string) => {
@@ -186,14 +187,17 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           <TerminalView
             ref={terminalRef}
             targetId={activeId}
-            sessionStatus={activeSession?.status}
+            session={activeSession}
             socketStatus={socketStatus}
           />
           <SessionSwitcher sessions={sessions} activeId={activeId} unread={unread} onSelect={selectSession} />
         </View>
-        <View style={{ paddingBottom: insets.bottom, backgroundColor: colors.surface }}>
-          <CommandBar targetId={activeId} sessionStatus={activeSession?.status} socketStatus={socketStatus} />
-        </View>
+        <CommandBar
+          targetId={activeId}
+          sessionStatus={activeSession?.status}
+          socketStatus={socketStatus}
+          bottomInset={insets.bottom}
+        />
       </KeyboardAvoidingView>
 
       <SessionsDrawer

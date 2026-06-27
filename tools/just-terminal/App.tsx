@@ -16,7 +16,7 @@ function Splash() {
   return (
     <View style={styles.splash}>
       <View style={styles.splashMark}>
-        <JustGainsMark size={40} />
+        <JustGainsMark size={96} color={colors.foreground} />
       </View>
     </View>
   );
@@ -107,12 +107,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   splashMark: {
-    width: 76,
-    height: 76,
-    borderRadius: 18,
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.border,
-    borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
   },

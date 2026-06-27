@@ -1,6 +1,7 @@
 import http from "node:http";
+import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -18,8 +19,10 @@ import type {
   HostTerminalProcess,
   ServerInfo,
   ServerMessage,
+  TerminalProfile,
   TerminalHostPeer,
-  TerminalSessionExport
+  TerminalSessionExport,
+  TerminalSessionSummary
 } from "./types.js";
 
 const startedAt = new Date().toISOString();
@@ -54,6 +57,24 @@ interface PendingOutput {
 }
 
 type HeartbeatWebSocket = WebSocket & { isAlive?: boolean };
+
+interface CreateSessionOptions {
+  title?: string;
+  profileId?: string;
+  shell?: string;
+  args?: string[];
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+}
+
+interface ResolvedSessionCommand {
+  profile?: TerminalProfile;
+  title: string;
+  shell: string;
+  args: string[];
+  cwd: string;
+}
 
 const MAX_BUFFERED_OUTPUT_BYTES = 128 * 1024;
 let pendingOutputs = new Map<string, PendingOutput>();
@@ -158,6 +179,17 @@ function getWebSocketHeartbeatMs(): number {
   const raw = process.env.TERMINAL_WEB_WS_HEARTBEAT_MS ?? "5000";
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 3000 ? Math.floor(parsed) : 5000;
+}
+
+function getDesktopCreateTimeoutMs(): number {
+  const raw = process.env.TERMINAL_WEB_DESKTOP_CREATE_TIMEOUT_MS ?? "8000";
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1000 ? Math.floor(parsed) : 8000;
+}
+
+function getSessionCreateMode(): "auto" | "desktop" | "managed" {
+  const mode = (process.env.TERMINAL_WEB_CREATE_MODE ?? "auto").toLowerCase();
+  return mode === "desktop" || mode === "managed" ? mode : "auto";
 }
 
 function installWebSocketHeartbeat(target: WebSocketServer): void {
@@ -303,6 +335,236 @@ function getBridgeCommands(): BridgeCommandInfo {
     codex: hasCodex ? bridgeCommand("Codex", "codex") : undefined,
     claude: hasClaude ? bridgeCommand("Claude", "claude") : undefined
   };
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeCreateSessionOptions(value: any): CreateSessionOptions {
+  const options: CreateSessionOptions = {};
+  options.title = optionalString(value?.title);
+  options.profileId = optionalString(value?.profileId);
+  options.shell = optionalString(value?.shell);
+  options.cwd = optionalString(value?.cwd);
+
+  if (Array.isArray(value?.args)) {
+    options.args = value.args.map((arg: unknown) => String(arg));
+  }
+
+  const cols = Number(value?.cols);
+  const rows = Number(value?.rows);
+  if (Number.isFinite(cols)) {
+    options.cols = Math.floor(cols);
+  }
+  if (Number.isFinite(rows)) {
+    options.rows = Math.floor(rows);
+  }
+
+  return options;
+}
+
+function resolveCreateCommand(options: CreateSessionOptions): ResolvedSessionCommand {
+  const requestedProfile = options.profileId
+    ? manager.profiles.find((candidate) => candidate.id === options.profileId)
+    : undefined;
+  const fallbackProfile = requestedProfile ?? manager.profiles[0];
+  const explicitShell = options.shell;
+  const shell = explicitShell ?? fallbackProfile?.shell;
+
+  if (!shell) {
+    throw new Error("No terminal shell profile is available.");
+  }
+
+  return {
+    profile: fallbackProfile,
+    title: options.title ?? (explicitShell ? path.basename(shell) : fallbackProfile?.label ?? "Terminal"),
+    shell,
+    args: options.args ?? (explicitShell ? [] : fallbackProfile?.args ?? []),
+    cwd: options.cwd ?? process.cwd()
+  };
+}
+
+function quotePowerShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function desktopBridgeScript(command: ResolvedSessionCommand): string {
+  const serverUrl = `http://127.0.0.1:${serverInfo.port}`;
+  const parts = [
+    "& npm",
+    "--prefix",
+    quotePowerShellLiteral(process.cwd()),
+    "run",
+    "bridge",
+    "--",
+    "--server",
+    quotePowerShellLiteral(serverUrl),
+    "--title",
+    quotePowerShellLiteral(command.title),
+    "--cwd",
+    quotePowerShellLiteral(command.cwd),
+    "--",
+    quotePowerShellLiteral(command.shell),
+    ...command.args.map(quotePowerShellLiteral)
+  ];
+  return parts.join(" ");
+}
+
+function buildWindowsTerminalNewTabArgs(command: ResolvedSessionCommand): string[] {
+  return [
+    "-w",
+    "0",
+    "new-tab",
+    "--title",
+    command.title,
+    "--startingDirectory",
+    command.cwd,
+    "--",
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    desktopBridgeScript(command)
+  ];
+}
+
+function hasTerminalWebRootNear(executablePath: string): boolean {
+  let cursor = path.dirname(executablePath);
+  for (let depth = 0; depth < 14 && cursor; depth += 1) {
+    if (existsSync(path.join(cursor, "tools", "terminal-web", "package.json"))) {
+      return true;
+    }
+
+    const parent = path.dirname(cursor);
+    if (parent === cursor) {
+      break;
+    }
+    cursor = parent;
+  }
+  return false;
+}
+
+function windowsTerminalHostRank(host: HostTerminalProcess): number {
+  const executable = host.executablePath?.toLowerCase() ?? "";
+  let rank = 0;
+
+  if (host.executablePath && hasTerminalWebRootNear(host.executablePath)) {
+    rank -= 100;
+  }
+  if (executable.includes("\\terminal-portable-")) {
+    rank -= 50;
+  }
+  if (executable.includes("\\src\\cascadia\\")) {
+    rank -= 25;
+  }
+  if (executable.includes("\\windowsapps\\")) {
+    rank += 25;
+  }
+
+  return rank;
+}
+
+function getPreferredWindowsTerminalHost(): HostTerminalProcess | undefined {
+  return hostProcesses
+    .filter((host) => host.name.toLowerCase() === "windowsterminal.exe" && host.executablePath)
+    .sort((a, b) => {
+      const rank = windowsTerminalHostRank(a) - windowsTerminalHostRank(b);
+      return rank !== 0 ? rank : a.pid - b.pid;
+    })[0];
+}
+
+function waitForNextBridgeSession(beforeIds: Set<string>, timeoutMs: number) {
+  let cleanup = () => undefined;
+  const promise = new Promise<TerminalSessionSummary>((resolve, reject) => {
+    const onSession = (session: TerminalSessionSummary) => {
+      if (session.source === "bridged" && !beforeIds.has(session.id)) {
+        cleanup();
+        resolve(session);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for the desktop tab to register with terminal-web after ${timeoutMs} ms.`));
+    }, timeoutMs);
+    timer.unref?.();
+
+    cleanup = () => {
+      clearTimeout(timer);
+      bridgeRegistry.off("session", onSession);
+    };
+
+    bridgeRegistry.on("session", onSession);
+    for (const session of bridgeRegistry.listSessions()) {
+      onSession(session);
+    }
+  });
+
+  return { promise, cancel: cleanup };
+}
+
+async function createDesktopTerminalSession(options: CreateSessionOptions): Promise<TerminalSessionSummary | undefined> {
+  if (process.platform !== "win32") {
+    return undefined;
+  }
+
+  await refreshHostProcesses();
+  const host = getPreferredWindowsTerminalHost();
+  if (!host?.executablePath) {
+    return undefined;
+  }
+
+  const command = resolveCreateCommand(options);
+  const beforeIds = new Set(bridgeRegistry.listSessions().map((session) => session.id));
+  const waiter = waitForNextBridgeSession(beforeIds, getDesktopCreateTimeoutMs());
+  const args = buildWindowsTerminalNewTabArgs(command);
+
+  try {
+    const child = spawn(host.executablePath, args, {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        TERMINAL_WEB_ROOT: process.cwd(),
+        TERMINAL_WEB_SERVER: `http://127.0.0.1:${serverInfo.port}`
+      }
+    });
+
+    child.unref();
+    return await Promise.race([
+      waiter.promise,
+      new Promise<TerminalSessionSummary>((_resolve, reject) => {
+        child.once("error", reject);
+      })
+    ]);
+  } catch (error) {
+    waiter.cancel();
+    throw new Error(
+      `Could not open a bridged Windows Terminal tab via ${host.executablePath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+async function createSession(options: CreateSessionOptions): Promise<TerminalSessionSummary> {
+  const mode = getSessionCreateMode();
+  if (mode !== "managed") {
+    const session = await createDesktopTerminalSession(options);
+    if (session) {
+      return session;
+    }
+
+    if (mode === "desktop") {
+      throw new Error("No running Windows Terminal host was found for desktop session creation.");
+    }
+  }
+
+  return manager.createSession(options);
 }
 
 function send(ws: WebSocket, message: ServerMessage): void {
@@ -494,9 +756,9 @@ app.get("/api/bootstrap", (_req, res) => {
   });
 });
 
-app.post("/api/sessions", (req, res) => {
+app.post("/api/sessions", async (req, res) => {
   try {
-    const session = manager.createSession(req.body ?? {});
+    const session = await createSession(normalizeCreateSessionOptions(req.body ?? {}));
     res.status(201).json(session);
   } catch (error) {
     res.status(400).json({
@@ -673,7 +935,7 @@ wss.on("connection", (ws) => {
           manager.resize(message.sessionId, message.cols, message.rows);
           break;
         case "create":
-          manager.createSession(message);
+          await createSession(normalizeCreateSessionOptions(message));
           break;
         case "rename":
           if (peerProxy.isPeerTarget(message.sessionId)) {

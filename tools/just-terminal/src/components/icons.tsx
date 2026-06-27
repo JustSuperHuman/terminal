@@ -1,10 +1,24 @@
 import type { ReactElement } from "react";
-import Svg, { Path } from "react-native-svg";
+import Svg, { G, Path } from "react-native-svg";
 import { colors } from "../theme";
 
 interface IconProps {
   size?: number;
   color?: string;
+}
+
+// Power-plug mark (Lucide "plug") — stroke glyph, tinted by connection state.
+export function PlugIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M12 22v-5" />
+        <Path d="M9 8V2" />
+        <Path d="M15 8V2" />
+        <Path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+      </G>
+    </Svg>
+  );
 }
 
 // JustGains leaf mark — the glyph from JustGains-Admin's `just-gains-logo-gray.svg`

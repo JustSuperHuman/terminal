@@ -8,10 +8,11 @@
 //                   | { type: "fit" } | { type: "focus" } | { type: "blur" }
 //                   | { type: "scrollToBottom" }
 //                   | { type: "fontSize", value }
+//                   | { type: "session", source, cols, rows }
 //   Web -> Native : window.ReactNativeWebView.postMessage(JSON.stringify(...))
 //                   { type: "ready", cols, rows }
 //                   | { type: "input", data }
-//                   | { type: "resize", cols, rows }
+//                   | { type: "resize", cols, rows }  // managed sessions only
 //                   | { type: "scroll", atBottom, canScroll }
 //                   | { type: "log", message }
 
@@ -19,10 +20,10 @@ const XTERM_VERSION = "5.5.0";
 const FIT_VERSION = "0.10.0";
 
 const THEME = {
-  background: "#06080d",
+  background: "#05070a",
   foreground: "#d1d9df",
   cursor: "#37bca5",
-  cursorAccent: "#06080d",
+  cursorAccent: "#05070a",
   selectionBackground: "#263444",
   black: "#0e1218",
   red: "#e36c61",
@@ -50,8 +51,8 @@ export const TERMINAL_HTML = `<!doctype html>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@${XTERM_VERSION}/css/xterm.min.css" />
     <style>
       html, body { margin: 0; height: 100%; background: ${THEME.background}; overflow: hidden; }
-      #root { position: absolute; inset: 0; padding: 10px; box-sizing: border-box; }
-      .xterm { height: 100%; }
+      #root { position: absolute; inset: 0; padding: 10px; box-sizing: border-box; overflow: hidden; }
+      .xterm { height: 100%; transform-origin: left top; }
       .xterm-viewport { overflow-y: auto !important; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; background-color: transparent !important; }
       #fallback { color: #89949d; font-family: -apple-system, system-ui, sans-serif; font-size: 13px; padding: 16px; }
     </style>
@@ -67,6 +68,9 @@ export const TERMINAL_HTML = `<!doctype html>
         var ready = false;
         var term = null;
         var fit = null;
+        var fixedCols = null;
+        var fixedRows = null;
+        var suppressResize = false;
 
         function post(obj) {
           if (window.ReactNativeWebView) {
@@ -76,6 +80,37 @@ export const TERMINAL_HTML = `<!doctype html>
 
         function fontSizeForWidth() {
           return window.innerWidth <= 480 ? 12 : 13;
+        }
+
+        function clampDimension(value, min, max) {
+          var number = Math.floor(Number(value));
+          if (!Number.isFinite(number)) { return null; }
+          return Math.max(min, Math.min(number, max));
+        }
+
+        function setTerminalFontSize(size) {
+          var next = Math.round(size * 100) / 100;
+          if (Math.abs(Number(term.options.fontSize || fontSizeForWidth()) - next) > 0.05) {
+            term.options.fontSize = next;
+          }
+        }
+
+        function measureCellWidth() {
+          var root = document.getElementById("root");
+          var probe = document.createElement("span");
+          var fontSize = Number(term.options.fontSize || fontSizeForWidth());
+          probe.textContent = "M".repeat(120);
+          probe.style.fontFamily = String(term.options.fontFamily || "monospace");
+          probe.style.fontSize = fontSize + "px";
+          probe.style.lineHeight = String(term.options.lineHeight || 1.22);
+          probe.style.position = "absolute";
+          probe.style.visibility = "hidden";
+          probe.style.whiteSpace = "pre";
+          probe.style.pointerEvents = "none";
+          root.appendChild(probe);
+          var width = probe.getBoundingClientRect().width / 120;
+          probe.remove();
+          return Number.isFinite(width) && width > 0 ? width : fontSize * 0.62;
         }
 
         function reportScroll() {
@@ -91,18 +126,65 @@ export const TERMINAL_HTML = `<!doctype html>
           try { fit.fit(); } catch (e) {}
         }
 
+        function applyLayout() {
+          if (!term) { return; }
+          var root = document.getElementById("root");
+          var xterm = root.querySelector(".xterm");
+          var cols = clampDimension(fixedCols, 20, 400);
+          var rows = clampDimension(fixedRows, 8, 200);
+
+          if (cols && rows) {
+            var available = Math.max(80, root.clientWidth - 20);
+            var baseFontSize = fontSizeForWidth();
+
+            setTerminalFontSize(baseFontSize);
+            var baseWidth = Math.ceil(cols * measureCellWidth()) + 4;
+            var fittedFontSize = baseWidth > available ? baseFontSize * (available / baseWidth) : baseFontSize;
+            setTerminalFontSize(Math.max(9, Math.min(baseFontSize, fittedFontSize)));
+
+            var contentWidth = Math.ceil(cols * measureCellWidth()) + 4;
+            var scaleX = contentWidth > available ? available / contentWidth : 1;
+
+            if (xterm) {
+              xterm.style.width = Math.max(available, contentWidth) + "px";
+              xterm.style.minWidth = "0";
+              xterm.style.transform = scaleX < 1 ? "scaleX(" + scaleX + ")" : "";
+            }
+
+            suppressResize = true;
+            try { term.resize(cols, rows); } catch (e) {}
+            suppressResize = false;
+            return;
+          }
+
+          fixedCols = null;
+          fixedRows = null;
+          if (xterm) {
+            xterm.style.width = "";
+            xterm.style.minWidth = "";
+            xterm.style.transform = "";
+          }
+          setTerminalFontSize(fontSizeForWidth());
+          doFit();
+        }
+
         function handle(msg) {
           if (!term) { pending.push(msg); return; }
           switch (msg.type) {
             case "reset": term.reset(); break;
             case "write": term.write(msg.data); setTimeout(reportScroll, 0); break;
-            case "fit": doFit(); break;
+            case "fit": applyLayout(); break;
             case "focus": term.focus(); break;
             case "blur": term.blur(); break;
             case "scrollToBottom": term.scrollToBottom(); setTimeout(reportScroll, 0); break;
             case "fontSize":
               term.options.fontSize = msg.value;
-              doFit();
+              applyLayout();
+              break;
+            case "session":
+              fixedCols = msg.source === "bridged" ? msg.cols : null;
+              fixedRows = msg.source === "bridged" ? msg.rows : null;
+              applyLayout();
               break;
           }
         }
@@ -141,26 +223,30 @@ export const TERMINAL_HTML = `<!doctype html>
             term.loadAddon(fit);
           }
           term.open(root);
-          doFit();
+          applyLayout();
 
           term.onData(function (data) { post({ type: "input", data: data }); });
-          term.onResize(function (size) { post({ type: "resize", cols: size.cols, rows: size.rows }); });
+          term.onResize(function (size) {
+            if (!suppressResize && !fixedCols && !fixedRows) {
+              post({ type: "resize", cols: size.cols, rows: size.rows });
+            }
+          });
 
           var vp = document.querySelector(".xterm-viewport");
           if (vp) { vp.addEventListener("scroll", reportScroll, { passive: true }); }
 
-          window.addEventListener("resize", function () { doFit(); setTimeout(reportScroll, 0); });
+          window.addEventListener("resize", function () { applyLayout(); setTimeout(reportScroll, 0); });
           if (window.visualViewport) {
-            window.visualViewport.addEventListener("resize", function () { doFit(); });
+            window.visualViewport.addEventListener("resize", function () { applyLayout(); });
           }
 
           ready = true;
           for (var i = 0; i < pending.length; i++) { handle(pending[i]); }
           pending = [];
 
-          setTimeout(doFit, 60);
+          setTimeout(applyLayout, 60);
           setTimeout(function () {
-            doFit();
+            applyLayout();
             post({ type: "ready", cols: term.cols, rows: term.rows });
             reportScroll();
           }, 120);

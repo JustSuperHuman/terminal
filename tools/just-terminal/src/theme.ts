@@ -20,19 +20,19 @@ export const colors = {
   destructiveForeground: "#fff3f3",
   warning: "#ffbf00",
 
-  // Surfaces (warm neutrals, darkened for an app shell)
-  background: "#14171c",
-  surface: "#1b2027",
-  surfaceAlt: "#222831", // neutral-950-ish elevated
-  surfaceHi: "#2c333d",
-  sidebar: "#11141a",
-  sidebarActive: "#222a34",
-  terminal: "#0b0d11",
-  input: "#1b2027",
+  // Surfaces (warm neutrals, deep-dark app shell)
+  background: "#0b0d11",
+  surface: "#121519",
+  surfaceAlt: "#191d23", // elevated chips
+  surfaceHi: "#232830",
+  sidebar: "#080a0d",
+  sidebarActive: "#181e26",
+  terminal: "#05070a",
+  input: "#121519",
 
   // Lines
-  border: "#2e3640",
-  borderStrong: "#475466", // neutral-700
+  border: "#222831",
+  borderStrong: "#39444f", // neutral-700
 
   // Text (neutrals)
   foreground: "#f6f8fa", // neutral-50
@@ -42,7 +42,7 @@ export const colors = {
   faint: "#6d8199", // neutral-500
   terminalForeground: "#e6ecf1",
 
-  overlay: "rgba(8, 10, 13, 0.68)",
+  overlay: "rgba(4, 5, 7, 0.74)",
 } as const;
 
 export const radius = {

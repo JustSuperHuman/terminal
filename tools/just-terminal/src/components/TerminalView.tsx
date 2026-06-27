@@ -2,7 +2,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardR
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
-import type { ServerMessage, SessionStatus } from "../types";
+import type { ServerMessage, TerminalSessionSummary } from "../types";
 import { TERMINAL_HTML } from "../terminalHtml";
 import { colors, font, radius } from "../theme";
 
@@ -12,7 +12,7 @@ export interface TerminalViewHandle {
 
 interface TerminalViewProps {
   targetId?: string;
-  sessionStatus?: SessionStatus;
+  session?: TerminalSessionSummary;
   socketStatus: SocketStatus;
 }
 
@@ -22,20 +22,17 @@ interface WebDims {
 }
 
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
-  { targetId, sessionStatus, socketStatus },
+  { targetId, session, socketStatus },
   ref
 ) {
   const webRef = useRef<WebView | null>(null);
   const webReadyRef = useRef(false);
   const [webReady, setWebReady] = useState(false);
   const activeTargetRef = useRef<string | undefined>(targetId);
+  const activeSessionRef = useRef<TerminalSessionSummary | undefined>(session);
   const subscribedTargetRef = useRef<string | undefined>(undefined);
   const dimsRef = useRef<WebDims | undefined>(undefined);
   const [scroll, setScroll] = useState({ canScroll: false, atBottom: true });
-
-  useEffect(() => {
-    activeTargetRef.current = targetId;
-  }, [targetId]);
 
   const postToWeb = useCallback((message: Record<string, unknown>) => {
     if (!webRef.current) {
@@ -45,6 +42,22 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     // Double-encode so arbitrary terminal bytes survive as a JS string literal.
     webRef.current.injectJavaScript(`window.onHostMessage(${JSON.stringify(json)});true;`);
   }, []);
+
+  useEffect(() => {
+    activeTargetRef.current = targetId;
+  }, [targetId]);
+
+  useEffect(() => {
+    activeSessionRef.current = session;
+    if (webReadyRef.current) {
+      postToWeb({
+        type: "session",
+        source: session?.source,
+        cols: session?.cols,
+        rows: session?.rows,
+      });
+    }
+  }, [postToWeb, session?.id, session?.source, session?.cols, session?.rows]);
 
   useImperativeHandle(
     ref,
@@ -86,11 +99,17 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       postToWeb({ type: "reset" });
       subscribedTargetRef.current = targetId;
     }
+    postToWeb({
+      type: "session",
+      source: session?.source,
+      cols: session?.cols,
+      rows: session?.rows,
+    });
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
-    if (dimsRef.current) {
+    if (dimsRef.current && session?.source !== "bridged") {
       terminalSocket.send({ type: "resize", sessionId: targetId, cols: dimsRef.current.cols, rows: dimsRef.current.rows });
     }
-  }, [webReady, socketStatus, targetId, postToWeb]);
+  }, [webReady, socketStatus, targetId, postToWeb, session?.source, session?.cols, session?.rows]);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     let message: Record<string, unknown>;
@@ -106,6 +125,12 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         dimsRef.current = { cols: Number(message.cols), rows: Number(message.rows) };
         webReadyRef.current = true;
         setWebReady(true);
+        postToWeb({
+          type: "session",
+          source: activeSessionRef.current?.source,
+          cols: activeSessionRef.current?.cols,
+          rows: activeSessionRef.current?.rows,
+        });
         break;
       }
       case "input": {
@@ -118,7 +143,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         const cols = Number(message.cols);
         const rows = Number(message.rows);
         dimsRef.current = { cols, rows };
-        if (target) {
+        if (target && activeSessionRef.current?.source !== "bridged") {
           terminalSocket.send({ type: "resize", sessionId: target, cols, rows });
         }
         break;
@@ -130,7 +155,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       default:
         break;
     }
-  }, []);
+  }, [postToWeb]);
 
   return (
     <View style={styles.container}>

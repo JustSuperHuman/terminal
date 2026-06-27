@@ -44,7 +44,7 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
       >
         <View style={styles.brand}>
           <View style={styles.brandMark}>
-            <JustGainsMark size={32} />
+            <JustGainsMark size={96} color={colors.foreground} />
           </View>
           <Text style={styles.title}>
             Just<Text style={styles.titleAccent}>Terminal</Text>
@@ -166,15 +166,9 @@ const styles = StyleSheet.create({
     marginBottom: 26,
   },
   brandMark: {
-    width: 60,
-    height: 60,
-    borderRadius: radius.lg,
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.border,
-    borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 16,
+    marginBottom: 20,
   },
   title: {
     color: colors.foreground,

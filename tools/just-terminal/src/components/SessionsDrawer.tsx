@@ -3,6 +3,7 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import type { TerminalProfile, TerminalSessionSummary } from "../types";
 import { colors, font, radius } from "../theme";
 import { BottomSheet } from "./BottomSheet";
+import { SwipeableRow } from "./SwipeableRow";
 import { JustGainsMark, agentGlyph } from "./icons";
 
 export interface CreateSpec {
@@ -55,8 +56,8 @@ function shortPath(path: string, max = 26): string {
   return `…${path.slice(path.length - (max - 1))}`;
 }
 
+// Agents are surfaced through Quick launch; the drawer lists shells/custom only.
 const profileGroups: Array<{ id: TerminalProfile["group"]; label: string }> = [
-  { id: "agent", label: "Agents" },
   { id: "shell", label: "Shells" },
   { id: "custom", label: "Custom" },
 ];
@@ -83,6 +84,7 @@ export function SessionsDrawer({
   const [editingTitle, setEditingTitle] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
   const [cwdSheetOpen, setCwdSheetOpen] = useState(false);
+  const [hiddenIds, setHiddenIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!visible) {
@@ -92,6 +94,16 @@ export function SessionsDrawer({
       setCwdSheetOpen(false);
     }
   }, [visible]);
+
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => !hiddenIds.includes(session.id)),
+    [sessions, hiddenIds]
+  );
+
+  function deleteSession(id: string) {
+    setHiddenIds((current) => (current.includes(id) ? current : [...current, id]));
+    onKill(id);
+  }
 
   const sections = useMemo(
     () =>
@@ -144,7 +156,7 @@ export function SessionsDrawer({
         <View style={styles.header}>
           <View style={styles.brandRow}>
             <View style={styles.brandMark}>
-              <JustGainsMark size={22} />
+              <JustGainsMark size={30} color={colors.foreground} />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.brandTitle}>JustTerminal</Text>
@@ -161,103 +173,94 @@ export function SessionsDrawer({
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
           <View style={styles.sectionHead}>
             <Text style={styles.sectionTitle}>Sessions</Text>
-            <Pressable onPress={() => onCreate()} hitSlop={8} style={({ pressed }) => [styles.newBtn, pressed && styles.newBtnPressed]}>
-              <Text style={styles.newBtnText}>+ New</Text>
+            <Pressable onPress={() => onCreate()} hitSlop={10} style={({ pressed }) => [styles.newBtn, pressed && styles.newBtnPressed]}>
+              <Text style={styles.newBtnText}>+</Text>
             </Pressable>
           </View>
 
-          {sessions.length === 0 ? (
+          {visibleSessions.length === 0 ? (
             <Text style={styles.empty}>No sessions yet</Text>
           ) : (
-            sessions.map((session) => {
+            visibleSessions.map((session) => {
               const selected = session.id === activeId;
               const unreadCount = unread[session.id] ?? 0;
               const editing = editingId === session.id;
               return (
-                <View key={session.id} style={[styles.sessionRow, selected && styles.sessionRowActive]}>
-                  {selected ? <View style={styles.activeBar} /> : null}
-                  {editing ? (
-                    <View style={styles.editRow}>
-                      <TextInput
-                        value={editingTitle}
-                        onChangeText={setEditingTitle}
-                        autoFocus
-                        style={styles.editInput}
-                        placeholderTextColor={colors.faint}
-                        onSubmitEditing={() => commitRename(session.id)}
-                      />
-                      <Pressable onPress={() => commitRename(session.id)} hitSlop={8} style={styles.iconBtn}>
-                        <Text style={styles.iconGlyphPrimary}>✓</Text>
-                      </Pressable>
-                      <Pressable onPress={() => setEditingId(undefined)} hitSlop={8} style={styles.iconBtn}>
-                        <Text style={styles.iconGlyph}>✕</Text>
-                      </Pressable>
-                    </View>
-                  ) : (
-                    <>
-                      <Pressable style={styles.sessionMain} onPress={() => onSelect(session.id)}>
-                        <View
-                          style={[
-                            styles.statusDot,
-                            { backgroundColor: session.status === "running" ? colors.success : colors.faint },
-                          ]}
+                <SwipeableRow key={session.id} enabled={!editing} onDelete={() => deleteSession(session.id)}>
+                  <View style={[styles.sessionRow, selected && styles.sessionRowActive]}>
+                    {selected ? <View style={styles.activeBar} /> : null}
+                    {editing ? (
+                      <View style={styles.editRow}>
+                        <TextInput
+                          value={editingTitle}
+                          onChangeText={setEditingTitle}
+                          autoFocus
+                          style={styles.editInput}
+                          placeholderTextColor={colors.faint}
+                          onSubmitEditing={() => commitRename(session.id)}
                         />
-                        <View style={{ flex: 1 }}>
-                          <View style={styles.titleLine}>
-                            <Text style={[styles.sessionTitle, selected && styles.sessionTitleActive]} numberOfLines={1}>
-                              {session.title}
-                            </Text>
-                            {unreadCount > 0 ? (
-                              <View style={styles.badge}>
-                                <Text style={styles.badgeText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
-                              </View>
-                            ) : null}
-                          </View>
-                          <Text style={styles.sessionSub} numberOfLines={1}>
-                            {session.source === "bridged" ? "bridge · " : ""}
-                            {shellName(session)} · {timeLabel(session.updatedAt)}
-                          </Text>
-                        </View>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => {
-                          setEditingId(session.id);
-                          setEditingTitle(session.title);
-                        }}
-                        hitSlop={8}
-                        style={styles.iconBtn}
-                      >
-                        <Text style={styles.iconGlyph}>✎</Text>
-                      </Pressable>
-                      {session.status === "running" ? (
-                        <Pressable onPress={() => onKill(session.id)} hitSlop={8} style={styles.iconBtn}>
-                          <View style={styles.killSquare} />
+                        <Pressable onPress={() => commitRename(session.id)} hitSlop={8} style={styles.iconBtn}>
+                          <Text style={styles.iconGlyphPrimary}>✓</Text>
                         </Pressable>
-                      ) : null}
-                    </>
-                  )}
-                </View>
+                        <Pressable onPress={() => setEditingId(undefined)} hitSlop={8} style={styles.iconBtn}>
+                          <Text style={styles.iconGlyph}>✕</Text>
+                        </Pressable>
+                      </View>
+                    ) : (
+                      <>
+                        <Pressable style={styles.sessionMain} onPress={() => onSelect(session.id)}>
+                          <View
+                            style={[
+                              styles.statusDot,
+                              { backgroundColor: session.status === "running" ? colors.success : colors.faint },
+                            ]}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <View style={styles.titleLine}>
+                              <Text style={[styles.sessionTitle, selected && styles.sessionTitleActive]} numberOfLines={1}>
+                                {session.title}
+                              </Text>
+                              {unreadCount > 0 ? (
+                                <View style={styles.badge}>
+                                  <Text style={styles.badgeText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            <Text style={styles.sessionSub} numberOfLines={1}>
+                              {session.source === "bridged" ? "bridge · " : ""}
+                              {shellName(session)} · {timeLabel(session.updatedAt)}
+                            </Text>
+                          </View>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => {
+                            setEditingId(session.id);
+                            setEditingTitle(session.title);
+                          }}
+                          hitSlop={8}
+                          style={styles.iconBtn}
+                        >
+                          <Text style={styles.iconGlyph}>✎</Text>
+                        </Pressable>
+                      </>
+                    )}
+                  </View>
+                </SwipeableRow>
               );
             })
           )}
 
           {/* Working-directory chooser opens in a bottom sheet */}
-          <View style={styles.cwdLauncherWrap}>
-            <Text style={styles.sectionTitle}>Working directory</Text>
-            <Pressable
-              onPress={() => setCwdSheetOpen(true)}
-              style={({ pressed }) => [styles.cwdLauncher, pressed && styles.cwdLauncherPressed]}
-            >
-              <Text style={styles.cwdFolder}>▸</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.cwdLauncherLabel}>New session in</Text>
-                <Text style={styles.cwdLauncherValue} numberOfLines={1} ellipsizeMode="head">
-                  {activeCwd ?? "Host default"}
-                </Text>
-              </View>
-              <Text style={styles.cwdLauncherChevron}>⌄</Text>
-            </Pressable>
-          </View>
+          <Pressable
+            onPress={() => setCwdSheetOpen(true)}
+            style={({ pressed }) => [styles.cwdLauncher, pressed && styles.cwdLauncherPressed]}
+          >
+            <Text style={styles.cwdLauncherLabel}>New session in</Text>
+            <Text style={styles.cwdLauncherValue} numberOfLines={1} ellipsizeMode="head">
+              {activeCwd ?? "Host default"}
+            </Text>
+            <Text style={styles.cwdLauncherChevron}>⌄</Text>
+          </Pressable>
 
           {availableQuickLaunches.length > 0 ? (
             <View style={styles.launchSection}>
@@ -273,9 +276,6 @@ export function SessionsDrawer({
                     <Text style={styles.launchLabel} numberOfLines={1}>
                       {entry.label}
                     </Text>
-                    <Text style={styles.launchDesc} numberOfLines={1}>
-                      {entry.flag}
-                    </Text>
                   </View>
                   <Text style={styles.launchPlus}>+</Text>
                 </Pressable>
@@ -286,29 +286,25 @@ export function SessionsDrawer({
           {sections.map((section) => (
             <View key={section.id} style={styles.launchSection}>
               <Text style={styles.sectionTitle}>{section.label}</Text>
-              {section.profiles.map((profile) => {
-                const glyph = section.id === "agent" ? agentGlyph(profile.id, 18) : null;
-                return (
-                  <Pressable
-                    key={profile.id}
-                    style={({ pressed }) => [styles.launchRow, pressed && styles.launchRowPressed]}
-                    onPress={() => onCreate({ profileId: profile.id })}
-                  >
-                    {glyph ? <View style={styles.launchIcon}>{glyph}</View> : null}
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.launchLabel} numberOfLines={1}>
-                        {profile.label}
+              {section.profiles.map((profile) => (
+                <Pressable
+                  key={profile.id}
+                  style={({ pressed }) => [styles.launchRow, pressed && styles.launchRowPressed]}
+                  onPress={() => onCreate({ profileId: profile.id })}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.launchLabel} numberOfLines={1}>
+                      {profile.label}
+                    </Text>
+                    {profile.description ? (
+                      <Text style={styles.launchDesc} numberOfLines={1}>
+                        {profile.description}
                       </Text>
-                      {profile.description ? (
-                        <Text style={styles.launchDesc} numberOfLines={1}>
-                          {profile.description}
-                        </Text>
-                      ) : null}
-                    </View>
-                    <Text style={styles.launchPlus}>+</Text>
-                  </Pressable>
-                );
-              })}
+                    ) : null}
+                  </View>
+                  <Text style={styles.launchPlus}>+</Text>
+                </Pressable>
+              ))}
             </View>
           ))}
         </ScrollView>
@@ -324,7 +320,6 @@ export function SessionsDrawer({
         <Text style={styles.sheetHint}>Choose where new terminals start on {serverHost ?? "this host"}.</Text>
 
         <View style={styles.cwdInputRow}>
-          <Text style={styles.cwdFolder}>▸</Text>
           <TextInput
             value={cwdDraft}
             onChangeText={setCwdDraft}
@@ -407,10 +402,6 @@ const styles = StyleSheet.create({
   brandMark: {
     width: 38,
     height: 38,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.border,
-    borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -448,20 +439,23 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
   newBtn: {
+    width: 30,
+    height: 30,
+    alignItems: "center",
+    justifyContent: "center",
     backgroundColor: colors.surfaceAlt,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: radius.pill,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
   },
   newBtnPressed: {
     backgroundColor: colors.surfaceHi,
   },
   newBtnText: {
     color: colors.primary,
-    fontSize: 12,
-    fontFamily: font.bold,
+    fontSize: 20,
+    fontFamily: font.regular,
+    marginTop: -2,
   },
   empty: {
     color: colors.mutedForeground,
@@ -574,48 +568,38 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontFamily: font.bold,
   },
-  killSquare: {
-    width: 13,
-    height: 13,
-    borderRadius: 3,
-    backgroundColor: colors.destructive,
-  },
-  // working-directory launcher
-  cwdLauncherWrap: {
-    marginTop: 16,
-    gap: 6,
-    paddingHorizontal: 6,
-  },
+  // working-directory launcher (compact single row)
   cwdLauncher: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 11,
+    gap: 10,
+    marginTop: 16,
+    marginHorizontal: 6,
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: radius.md,
     paddingHorizontal: 13,
-    paddingVertical: 11,
+    paddingVertical: 10,
   },
   cwdLauncherPressed: {
     backgroundColor: colors.surfaceHi,
   },
   cwdLauncherLabel: {
     color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.bold,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
+    fontSize: 12.5,
+    fontFamily: font.semibold,
   },
   cwdLauncherValue: {
+    flex: 1,
+    textAlign: "right",
     color: colors.foreground,
-    fontSize: 13.5,
+    fontSize: 12.5,
     fontFamily: font.mono,
-    marginTop: 2,
   },
   cwdLauncherChevron: {
     color: colors.mutedForeground,
-    fontSize: 16,
+    fontSize: 14,
     fontFamily: font.bold,
   },
   // bottom-sheet content
@@ -625,11 +609,6 @@ const styles = StyleSheet.create({
     fontFamily: font.regular,
     lineHeight: 18,
     marginBottom: 14,
-  },
-  cwdFolder: {
-    color: colors.primary,
-    fontSize: 14,
-    fontFamily: font.bold,
   },
   cwdInputRow: {
     flexDirection: "row",
@@ -716,12 +695,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.sidebarActive,
   },
   launchIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.border,
-    borderWidth: 1,
+    width: 26,
+    height: 26,
     alignItems: "center",
     justifyContent: "center",
   },
