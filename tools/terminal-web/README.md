@@ -31,7 +31,9 @@ Use `--host 0.0.0.0` only on trusted networks. The web UI can send input to loca
 shells. When bound to all interfaces, remote API and WebSocket clients require
 an access token by default, while loopback clients stay open for local tools,
 peer discovery, and bridge commands. The sidebar shows copyable tokenized
-network URLs for the active host.
+network URLs for the active host. If no token is configured, the generated
+network token is saved in `.terminal-web-token` so mobile clients keep working
+after host restarts.
 
 Set a stable token with:
 
@@ -62,6 +64,20 @@ PTY. Use `--no-mirror` for automation or tests where local echo is noisy.
 If the web host restarts or the bridge WebSocket drops, the bridge keeps the
 child PTY running, reconnects with the same session id, and replays a bounded
 ANSI buffer so the UI can recover recent terminal state.
+
+## Windows Terminal Dev Auto-Bridge
+
+The local WindowsTerminalDev build auto-wraps new ConPTY tabs with the bridge
+when it can find this package at `tools/terminal-web`. New tabs opened in that
+dev host appear as bridged sessions in the web UI and can be switched to from
+the sidebar. Tabs that were already running before the patched dev host started,
+or tabs opened in a different Windows Terminal install, cannot be attached
+retroactively.
+
+Set `TERMINAL_WEB_SERVER` to point bridged tabs at another host, set
+`TERMINAL_WEB_ROOT` if the package cannot be found by walking up from
+`WindowsTerminal.exe`, or set `TERMINAL_WEB_AUTO_BRIDGE=0` to disable the
+wrapper.
 
 ## Input Model
 

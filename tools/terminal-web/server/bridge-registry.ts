@@ -168,7 +168,13 @@ export class BridgeRegistry extends EventEmitter {
     const session = this.requireSession(id);
     if (session.summary.status === "running") {
       send(session.socket, { type: "kill", sessionId: id });
+      return;
     }
+
+    this.sessions.delete(id);
+    this.socketSessions.get(session.socket)?.delete(id);
+    session.headless.dispose();
+    this.emit("sessions", this.listSessions());
   }
 
   rename(id: string, title: string): TerminalSessionSummary {

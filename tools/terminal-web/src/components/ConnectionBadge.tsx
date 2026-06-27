@@ -7,7 +7,7 @@ export function ConnectionBadge({ status }: { status: SocketStatus }) {
   return (
     <Badge variant={open ? "secondary" : "warning"} className="gap-1.5">
       {open ? <Wifi className="h-3.5 w-3.5" aria-hidden="true" /> : <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />}
-      {open ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
+      {open ? "Connected" : status === "connecting" ? "Connecting" : "Offline"}
     </Badge>
   );
 }

@@ -11,6 +11,13 @@ export function getAccessToken(): string | undefined {
   return window.localStorage.getItem(storageKey) ?? undefined;
 }
 
+export function setAccessToken(token: string): void {
+  const trimmed = token.trim();
+  if (trimmed) {
+    window.localStorage.setItem(storageKey, trimmed);
+  }
+}
+
 export function accessTokenHeaders(): HeadersInit {
   const token = getAccessToken();
   return token ? { "x-terminal-web-token": token } : {};

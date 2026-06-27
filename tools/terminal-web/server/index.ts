@@ -1,5 +1,6 @@
 import http from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -118,7 +119,27 @@ function getAccessToken(host: string): string | undefined {
     return configured;
   }
 
-  return isAllInterfacesHost(host) || !isLoopbackHost(host) ? randomBytes(24).toString("base64url") : undefined;
+  if (!isAllInterfacesHost(host) && isLoopbackHost(host)) {
+    return undefined;
+  }
+
+  const tokenPath = path.resolve(process.cwd(), ".terminal-web-token");
+  try {
+    const saved = readFileSync(tokenPath, "utf8").trim();
+    if (saved) {
+      return saved;
+    }
+  } catch {
+    // Missing or unreadable token files are recovered by generating a new token.
+  }
+
+  const generated = randomBytes(24).toString("base64url");
+  try {
+    writeFileSync(tokenPath, `${generated}\n`, { mode: 0o600 });
+  } catch (error) {
+    console.warn("Could not persist terminal web access token:", error instanceof Error ? error.message : String(error));
+  }
+  return generated;
 }
 
 function getDiscoveryIntervalMs(): number {
@@ -474,8 +495,15 @@ app.get("/api/bootstrap", (_req, res) => {
 });
 
 app.post("/api/sessions", (req, res) => {
-  const session = manager.createSession(req.body ?? {});
-  res.status(201).json(session);
+  try {
+    const session = manager.createSession(req.body ?? {});
+    res.status(201).json(session);
+  } catch (error) {
+    res.status(400).json({
+      message: "Terminal session could not be created.",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 app.patch("/api/sessions/:id", (req, res) => {

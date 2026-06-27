@@ -1668,6 +1668,226 @@ namespace winrt::TerminalApp::implementation
         return Utils::EvaluateStartingDirectory(_WindowProperties.VirtualWorkingDirectory(), path);
     }
 
+    namespace
+    {
+        static std::wstring _terminalWebGetEnvironmentVariable(const wchar_t* name)
+        {
+            const auto required = GetEnvironmentVariableW(name, nullptr, 0);
+            if (required == 0)
+            {
+                return {};
+            }
+
+            std::wstring value(required, L'\0');
+            const auto written = GetEnvironmentVariableW(name, value.data(), gsl::narrow_cast<DWORD>(value.size()));
+            if (written == 0 || written >= value.size())
+            {
+                return {};
+            }
+
+            value.resize(written);
+            return value;
+        }
+
+        static std::wstring _terminalWebToLower(std::wstring_view value)
+        {
+            std::wstring result{ value };
+            std::transform(result.begin(), result.end(), result.begin(), [](const wchar_t ch) {
+                return gsl::narrow_cast<wchar_t>(std::towlower(ch));
+            });
+            return result;
+        }
+
+        static bool _terminalWebIsDisabled()
+        {
+            const auto setting = _terminalWebToLower(_terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_AUTO_BRIDGE"));
+            return setting == L"0" || setting == L"false" || setting == L"off";
+        }
+
+        static bool _terminalWebIsBridgeCommandline(const std::wstring_view commandline)
+        {
+            const auto lower = _terminalWebToLower(commandline);
+            return lower.find(L"terminal-web") != std::wstring::npos &&
+                   lower.find(L"bridge") != std::wstring::npos;
+        }
+
+        static bool _terminalWebPackageExists(const std::filesystem::path& terminalWebRoot)
+        {
+            std::error_code ec;
+            return std::filesystem::is_regular_file(terminalWebRoot / L"package.json", ec);
+        }
+
+        static std::optional<std::filesystem::path> _terminalWebRoot()
+        {
+            const auto configuredRoot = _terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_ROOT");
+            if (!configuredRoot.empty())
+            {
+                std::filesystem::path root{ configuredRoot };
+                if (_terminalWebPackageExists(root))
+                {
+                    return root;
+                }
+            }
+
+            std::filesystem::path cursor = wil::GetModuleFileNameW<std::wstring>(nullptr);
+            cursor = cursor.parent_path();
+
+            for (auto depth = 0; depth < 12 && !cursor.empty(); ++depth)
+            {
+                const auto candidate = cursor / L"tools" / L"terminal-web";
+                if (_terminalWebPackageExists(candidate))
+                {
+                    return candidate;
+                }
+
+                const auto parent = cursor.parent_path();
+                if (parent == cursor)
+                {
+                    break;
+                }
+                cursor = parent;
+            }
+
+            return std::nullopt;
+        }
+
+        static std::wstring _terminalWebPowerShellQuote(std::wstring_view value)
+        {
+            std::wstring result;
+            result.reserve(value.size() + 2);
+            result.push_back(L'\'');
+            for (const auto ch : value)
+            {
+                result.push_back(ch);
+                if (ch == L'\'')
+                {
+                    result.push_back(L'\'');
+                }
+            }
+            result.push_back(L'\'');
+            return result;
+        }
+
+        static std::wstring _terminalWebCommandLineQuote(std::wstring_view value)
+        {
+            if (!value.empty() && value.find_first_of(L" \t\n\v\"") == std::wstring_view::npos)
+            {
+                return std::wstring{ value };
+            }
+
+            std::wstring result;
+            result.push_back(L'"');
+
+            auto backslashes = 0;
+            for (const auto ch : value)
+            {
+                if (ch == L'\\')
+                {
+                    ++backslashes;
+                    continue;
+                }
+
+                if (ch == L'"')
+                {
+                    result.append(backslashes * 2 + 1, L'\\');
+                    result.push_back(ch);
+                }
+                else
+                {
+                    result.append(backslashes, L'\\');
+                    result.push_back(ch);
+                }
+                backslashes = 0;
+            }
+
+            result.append(backslashes * 2, L'\\');
+            result.push_back(L'"');
+            return result;
+        }
+
+        static std::vector<std::wstring> _terminalWebSplitCommandline(const std::wstring& commandline)
+        {
+            auto argc = 0;
+            wil::unique_any<LPWSTR*, decltype(&::LocalFree), ::LocalFree> argv{ CommandLineToArgvW(commandline.c_str(), &argc) };
+            std::vector<std::wstring> args;
+            if (!argv || argc == 0)
+            {
+                return args;
+            }
+
+            args.reserve(argc);
+            for (auto i = 0; i < argc; ++i)
+            {
+                args.emplace_back(argv.get()[i]);
+            }
+            return args;
+        }
+
+        static std::optional<winrt::hstring> _terminalWebBridgeCommandline(const Profile& profile,
+                                                                           const IControlSettings& settings,
+                                                                           const std::wstring& workingDirectory)
+        {
+            if (_terminalWebIsDisabled())
+            {
+                return std::nullopt;
+            }
+
+            const std::wstring originalCommandline{ std::wstring_view{ settings.Commandline() } };
+            if (originalCommandline.empty() || _terminalWebIsBridgeCommandline(originalCommandline))
+            {
+                return std::nullopt;
+            }
+
+            const auto originalArgs = _terminalWebSplitCommandline(originalCommandline);
+            if (originalArgs.empty())
+            {
+                return std::nullopt;
+            }
+
+            const auto terminalWebRoot = _terminalWebRoot();
+            if (!terminalWebRoot)
+            {
+                return std::nullopt;
+            }
+
+            auto server = _terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_SERVER");
+            if (server.empty())
+            {
+                server = L"http://127.0.0.1:10001";
+            }
+
+            std::wstring title{ std::wstring_view{ settings.StartingTitle() } };
+            if (title.empty() && profile)
+            {
+                title = std::wstring{ std::wstring_view{ profile.Name() } };
+            }
+            if (title.empty())
+            {
+                title = L"Windows Terminal";
+            }
+
+            std::wstring script;
+            script.append(L"& npm --prefix ");
+            script.append(_terminalWebPowerShellQuote(terminalWebRoot->wstring()));
+            script.append(L" run bridge -- --server ");
+            script.append(_terminalWebPowerShellQuote(server));
+            script.append(L" --title ");
+            script.append(_terminalWebPowerShellQuote(title));
+            script.append(L" --cwd ");
+            script.append(_terminalWebPowerShellQuote(workingDirectory));
+            script.append(L" --");
+            for (const auto& arg : originalArgs)
+            {
+                script.push_back(L' ');
+                script.append(_terminalWebPowerShellQuote(arg));
+            }
+
+            std::wstring commandline{ L"powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command " };
+            commandline.append(_terminalWebCommandLineQuote(script));
+            return winrt::hstring{ commandline };
+        }
+    }
+
     // Method Description:
     // - Creates a new connection based on the profile settings
     // Arguments:
@@ -1738,8 +1958,14 @@ namespace winrt::TerminalApp::implementation
             // process until later, on another thread, after we've already
             // restored the CWD to its original value.
             auto newWorkingDirectory{ _evaluatePathForCwd(settings.StartingDirectory()) };
+            auto commandline{ settings.Commandline() };
+            if (const auto bridgeCommandline = _terminalWebBridgeCommandline(profile, settings, newWorkingDirectory))
+            {
+                commandline = *bridgeCommandline;
+            }
+
             connection = TerminalConnection::ConptyConnection{};
-            valueSet = TerminalConnection::ConptyConnection::CreateSettings(settings.Commandline(),
+            valueSet = TerminalConnection::ConptyConnection::CreateSettings(commandline,
                                                                             newWorkingDirectory,
                                                                             settings.StartingTitle(),
                                                                             settingsInternal->ReloadEnvironmentVariables(),

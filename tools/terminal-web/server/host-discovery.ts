@@ -34,6 +34,9 @@ function isNoisyHelperProcess(name: string, commandLine?: string): boolean {
   const lowerName = name.toLowerCase();
   const lowerCommand = commandLine?.toLowerCase() ?? "";
 
+  if (lowerName === "conhost.exe" && !commandLine) {
+    return true;
+  }
   if (lowerName === "chrome-native-host.exe") {
     return true;
   }
@@ -96,13 +99,15 @@ export async function discoverHostTerminals(): Promise<HostTerminalProcess[]> {
       const script = [
         "$names = @('WindowsTerminal.exe','OpenConsole.exe','conhost.exe','pwsh.exe','powershell.exe','cmd.exe','bash.exe','wsl.exe')",
         "$items = Get-CimInstance Win32_Process | Where-Object { $names -contains $_.Name -or ($_.CommandLine -match '(?i)\\b(codex|claude)\\b') }",
-        "$items | Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Depth 3"
+        "$items = $items | Where-Object { -not ($_.Name -eq 'conhost.exe' -and [string]::IsNullOrWhiteSpace($_.CommandLine)) }",
+        "$items = $items | Sort-Object @{Expression={ if ($_.Name -eq 'WindowsTerminal.exe') { 0 } elseif ($_.Name -eq 'OpenConsole.exe') { 1 } else { 2 } }}, ProcessId",
+        "$items | Select-Object -First 200 ProcessId,ParentProcessId,Name,@{Name='CommandLine';Expression={ if ($_.CommandLine -and $_.CommandLine.Length -gt 900) { $_.CommandLine.Substring(0, 900) + '...' } else { $_.CommandLine } }},ExecutablePath | ConvertTo-Json -Depth 3"
       ].join("; ");
 
       const { stdout } = await execFileAsync(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        { timeout: 4000, windowsHide: true, maxBuffer: 1024 * 1024 }
+        { timeout: 8000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 }
       );
       return parseJsonList(stdout);
     }

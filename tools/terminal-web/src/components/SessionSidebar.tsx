@@ -7,7 +7,7 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getPeerSessionTargetId } from "@/lib/session-targets";
 import { cn } from "@/lib/utils";
-import type { BridgeCommandInfo, HostTerminalProcess, ServerInfo, TerminalHostPeer, TerminalProfile, TerminalSessionSummary } from "@/lib/types";
+import type { BridgeCommandInfo, CreateSessionOptions, HostTerminalProcess, ServerInfo, TerminalHostPeer, TerminalProfile, TerminalSessionSummary } from "@/lib/types";
 
 interface SessionSidebarProps {
   sessions: TerminalSessionSummary[];
@@ -19,10 +19,11 @@ interface SessionSidebarProps {
   profiles: TerminalProfile[];
   unread: Record<string, number>;
   onSelectSession: (targetId: string) => void;
-  onCreateSession: (profileId?: string) => void;
+  onCreateSession: (options?: CreateSessionOptions) => void;
   onRefreshHost: () => void;
   onCopyBridgeCommand: (command: string) => void;
   onRenameSession: (targetId: string, title: string) => void;
+  onKillSession: (targetId: string) => void;
 }
 
 function timeLabel(value: string) {
@@ -34,6 +35,10 @@ function timeLabel(value: string) {
 
 function shellName(session: TerminalSessionSummary) {
   return session.shell.split(/[\\/]/).pop() ?? session.shell;
+}
+
+function executableName(value?: string) {
+  return value?.split(/[\\/]/).pop() ?? value;
 }
 
 function profileSections(profiles: TerminalProfile[], query = "") {
@@ -127,6 +132,45 @@ function bridgeCommandForHostProcess(process: HostTerminalProcess, bridgeCommand
   return bridgeCommands.shell;
 }
 
+function defaultArgsForProcessName(name: string): string[] | undefined {
+  if (name === "pwsh.exe" || name === "powershell.exe") {
+    return ["-NoLogo"];
+  }
+  return undefined;
+}
+
+function launchSpecForHostProcess(
+  process: HostTerminalProcess,
+  profiles: TerminalProfile[]
+): { label: string; options: CreateSessionOptions } | undefined {
+  const matchedProfile = profileForHostProcess(process, profiles);
+  if (matchedProfile) {
+    return {
+      label: matchedProfile.label,
+      options: { profileId: matchedProfile.id }
+    };
+  }
+
+  const name = process.name.toLowerCase();
+  if (!process.executablePath || ["windowsterminal.exe", "openconsole.exe", "conhost.exe"].includes(name)) {
+    return undefined;
+  }
+
+  if (!/(pwsh|powershell|cmd|wsl|bash|zsh|fish|codex|claude)/i.test(`${process.name} ${process.commandLine ?? ""}`)) {
+    return undefined;
+  }
+
+  const label = executableName(process.executablePath) ?? process.name;
+  return {
+    label,
+    options: {
+      title: label,
+      shell: process.executablePath,
+      args: defaultArgsForProcessName(name)
+    }
+  };
+}
+
 function displayAccessUrl(value: string) {
   const parsed = new URL(value);
   return parsed.host;
@@ -145,7 +189,8 @@ export function SessionSidebar({
   onCreateSession,
   onRefreshHost,
   onCopyBridgeCommand,
-  onRenameSession
+  onRenameSession,
+  onKillSession
 }: SessionSidebarProps) {
   const [query, setQuery] = useState("");
   const [editingTargetId, setEditingTargetId] = useState<string | undefined>();
@@ -329,6 +374,17 @@ export function SessionSidebar({
                       </TooltipTrigger>
                       <TooltipContent>Rename</TooltipContent>
                     </Tooltip>
+                    {session.status === "exited" ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => onKillSession(session.id)}>
+                            <X className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span className="sr-only">Close {session.title}</span>
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Close exited session</TooltipContent>
+                      </Tooltip>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -354,7 +410,7 @@ export function SessionSidebar({
                       key={profile.id}
                       type="button"
                       className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-sidebar-active/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      onClick={() => onCreateSession(profile.id)}
+                      onClick={() => onCreateSession({ profileId: profile.id })}
                     >
                       <span className="min-w-0 flex-1">
                         <span className="block truncate">{profile.label}</span>
@@ -543,6 +599,17 @@ export function SessionSidebar({
                               </TooltipTrigger>
                               <TooltipContent>Rename</TooltipContent>
                             </Tooltip>
+                            {session.status === "exited" ? (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => onKillSession(targetId)}>
+                                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                    <span className="sr-only">Close {session.title}</span>
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Close exited session</TooltipContent>
+                              </Tooltip>
+                            ) : null}
                           </>
                         )}
                       </div>
@@ -577,7 +644,7 @@ export function SessionSidebar({
 
         <div className="space-y-1 pb-3">
           {visibleHostProcesses.map((item) => {
-            const matchedProfile = profileForHostProcess(item, profiles);
+            const launchSpec = launchSpecForHostProcess(item, profiles);
             const bridgeCommand = bridgeCommandForHostProcess(item, bridgeCommands);
             return (
               <div key={`${item.pid}-${item.name}`} className="flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-muted-foreground">
@@ -591,7 +658,7 @@ export function SessionSidebar({
                     {item.commandLine ?? item.reason}
                   </span>
                 </span>
-                {matchedProfile ? (
+                {launchSpec ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -599,13 +666,13 @@ export function SessionSidebar({
                         variant="ghost"
                         size="iconSm"
                         className="h-7 w-7 shrink-0"
-                        onClick={() => onCreateSession(matchedProfile.id)}
+                        onClick={() => onCreateSession(launchSpec.options)}
                       >
                         <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span className="sr-only">Start managed {matchedProfile.label}</span>
+                        <span className="sr-only">Start managed {launchSpec.label}</span>
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>Start managed {matchedProfile.label}</TooltipContent>
+                    <TooltipContent>Start managed {launchSpec.label}</TooltipContent>
                   </Tooltip>
                 ) : null}
                 {bridgeCommand ? (

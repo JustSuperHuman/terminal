@@ -60,6 +60,17 @@ function cleanTitle(value: string): string {
   return value.trim().replace(/\s+/g, " ").slice(0, 80);
 }
 
+function windowsPtyOptions() {
+  if (process.platform !== "win32") {
+    return {};
+  }
+
+  return {
+    useConpty: true,
+    useConptyDll: process.env.TERMINAL_WEB_CONPTY_DLL !== "off"
+  };
+}
+
 export class TerminalManager extends EventEmitter {
   private readonly sessions = new Map<string, ManagedTerminalSession>();
   readonly profiles = getShellProfiles();
@@ -91,6 +102,7 @@ export class TerminalManager extends EventEmitter {
       cols,
       rows,
       cwd,
+      ...windowsPtyOptions(),
       env: {
         ...process.env,
         TERM: "xterm-256color",
@@ -227,7 +239,12 @@ export class TerminalManager extends EventEmitter {
     const session = this.requireSession(id);
     if (session.status === "running") {
       session.pty.kill();
+      return;
     }
+
+    this.sessions.delete(id);
+    session.headless.dispose();
+    this.emit("sessions", this.listSessions());
   }
 
   rename(id: string, title: string): TerminalSessionSummary {

@@ -1,0 +1,33 @@
+{
+  "name": "just-terminal",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo-google-fonts/montserrat": "^0.4.2",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~56.0.12",
+    "expo-font": "~56.0.7",
+    "expo-haptics": "~56.0.3",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4",
+    "react-native-webview": "13.16.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "build": "bunx eas-cli@latest build --platform ios --profile production",
+    "build:preview": "bunx eas-cli@latest build --platform ios --profile preview",
+    "build:configure": "bunx eas-cli@latest build:configure"
+  },
+  "private": true
+}

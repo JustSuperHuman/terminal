@@ -76,9 +76,14 @@
 
   .terminal-frame .xterm-viewport {
     background-color: transparent;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   .terminal-frame .xterm-screen {
-    height: 100%;
+    min-height: 100%;
   }
 }

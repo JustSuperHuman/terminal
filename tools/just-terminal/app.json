@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "JustTerminal",
+    "slug": "just-terminal",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#10141a",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.justsuperhuman.justterminal"
+    },
+    "android": {
+      "package": "com.justsuperhuman.justterminal",
+      "adaptiveIcon": {
+        "backgroundColor": "#10141a",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "softwareKeyboardLayoutMode": "resize",
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}

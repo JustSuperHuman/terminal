@@ -1,8 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
+import { ArrowDownToLine, ChevronDown, ChevronUp } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { terminalSocket, type SocketStatus } from "@/lib/terminal-socket";
 import type { ServerMessage, TerminalSessionSummary } from "@/lib/types";
 
@@ -26,6 +29,19 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
   const serializeRef = useRef<SerializeAddon | null>(null);
   const activeTargetRef = useRef<string | undefined>(targetId);
   const subscribedTargetRef = useRef<string | undefined>();
+  const [scrollState, setScrollState] = useState({ canScroll: false, atBottom: true });
+
+  function updateScrollState() {
+    const buffer = terminalRef.current?.buffer.active;
+    if (!buffer) {
+      setScrollState({ canScroll: false, atBottom: true });
+      return;
+    }
+
+    const canScroll = buffer.baseY > 0;
+    const atBottom = buffer.viewportY >= buffer.baseY;
+    setScrollState({ canScroll, atBottom });
+  }
 
   useEffect(() => {
     activeTargetRef.current = targetId;
@@ -93,6 +109,7 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
     const resizeObserver = new ResizeObserver(() => {
       scheduleFit();
+      window.setTimeout(updateScrollState, 0);
     });
     resizeObserver.observe(hostRef.current);
     window.addEventListener("resize", scheduleFit);
@@ -106,6 +123,68 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     mobileQuery.addEventListener("change", onMobileQueryChange);
 
     document.fonts?.ready.then(() => scheduleFit()).catch(() => undefined);
+
+    const viewport = hostRef.current.querySelector<HTMLElement>(".xterm-viewport");
+    viewport?.addEventListener("scroll", updateScrollState, { passive: true });
+
+    function scrollLines(lines: number) {
+      if (lines === 0) {
+        return;
+      }
+      term.scrollLines(lines);
+      updateScrollState();
+    }
+
+    const onWheel = (event: WheelEvent) => {
+      if (term.buffer.active.baseY === 0) {
+        return;
+      }
+      const lines = Math.sign(event.deltaY) * Math.max(1, Math.ceil(Math.abs(event.deltaY) / 48));
+      scrollLines(lines);
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    };
+
+    let touchY: number | undefined;
+    let touchRemainder = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        touchY = undefined;
+        touchRemainder = 0;
+        return;
+      }
+      touchY = event.touches[0].clientY;
+      touchRemainder = 0;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (touchY === undefined || event.touches.length !== 1 || term.buffer.active.baseY === 0) {
+        return;
+      }
+      const nextY = event.touches[0].clientY;
+      touchRemainder += touchY - nextY;
+      touchY = nextY;
+
+      const lineHeight = Math.max(Number(term.options.fontSize) * Number(term.options.lineHeight ?? 1), 12);
+      const lines = Math.trunc(touchRemainder / lineHeight);
+      if (lines !== 0) {
+        touchRemainder -= lines * lineHeight;
+        scrollLines(lines);
+      }
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+    };
+    const onTouchEnd = () => {
+      touchY = undefined;
+      touchRemainder = 0;
+    };
+
+    hostRef.current.addEventListener("wheel", onWheel, { passive: false });
+    hostRef.current.addEventListener("touchstart", onTouchStart, { passive: true });
+    hostRef.current.addEventListener("touchmove", onTouchMove, { passive: false });
+    hostRef.current.addEventListener("touchend", onTouchEnd, { passive: true });
+    hostRef.current.addEventListener("touchcancel", onTouchEnd, { passive: true });
 
     const dataDisposable = term.onData((data) => {
       const activeTargetId = activeTargetRef.current;
@@ -124,6 +203,7 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     scheduleFit();
     window.setTimeout(scheduleFit, 60);
     window.setTimeout(scheduleFit, 240);
+    window.setTimeout(updateScrollState, 0);
 
     return () => {
       if (fitFrame) {
@@ -133,6 +213,12 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
       window.removeEventListener("resize", scheduleFit);
       window.visualViewport?.removeEventListener("resize", scheduleFit);
       mobileQuery.removeEventListener("change", onMobileQueryChange);
+      viewport?.removeEventListener("scroll", updateScrollState);
+      hostRef.current?.removeEventListener("wheel", onWheel);
+      hostRef.current?.removeEventListener("touchstart", onTouchStart);
+      hostRef.current?.removeEventListener("touchmove", onTouchMove);
+      hostRef.current?.removeEventListener("touchend", onTouchEnd);
+      hostRef.current?.removeEventListener("touchcancel", onTouchEnd);
       dataDisposable.dispose();
       resizeDisposable.dispose();
       term.dispose();
@@ -159,10 +245,12 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
           }
         }
         window.setTimeout(() => fitRef.current?.fit(), 0);
+        window.setTimeout(updateScrollState, 0);
       }
 
       if (message.type === "output" && message.sessionId === activeTargetRef.current) {
         term.write(message.data);
+        window.setTimeout(updateScrollState, 0);
       }
     });
     return off;
@@ -212,11 +300,58 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     }
   }, [copySignal]);
 
+  function scrollPage(direction: -1 | 1) {
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+    term.scrollLines(direction * Math.max(term.rows - 2, 1));
+    window.setTimeout(updateScrollState, 0);
+  }
+
+  function scrollToBottom() {
+    terminalRef.current?.scrollToBottom();
+    window.setTimeout(updateScrollState, 0);
+  }
+
   return (
     <div className="relative min-h-0 flex-1 bg-terminal">
       <div className="terminal-shell h-full w-full">
         <div ref={hostRef} className="terminal-frame h-full w-full" />
       </div>
+      {scrollState.canScroll ? (
+        <div className="absolute bottom-3 right-3 z-10 flex rounded-md border bg-background/90 p-0.5 shadow-sm backdrop-blur">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7" onClick={() => scrollPage(-1)}>
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="sr-only">Scroll terminal up</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Scroll up</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7" onClick={() => scrollPage(1)}>
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="sr-only">Scroll terminal down</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Scroll down</TooltipContent>
+          </Tooltip>
+          {!scrollState.atBottom ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7" onClick={scrollToBottom}>
+                  <ArrowDownToLine className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">Jump to latest terminal output</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Jump to latest</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </div>
+      ) : null}
       {socketStatus !== "open" ? (
         <div className="pointer-events-none absolute right-4 top-4 rounded-md border bg-background/90 px-2.5 py-1.5 text-xs text-muted-foreground shadow-sm">
           Reconnecting terminal
