@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --radius: 8px;
+    --background: 0.19 0.014 255;
+    --foreground: 0.91 0.012 244;
+    --border: 0.31 0.018 250;
+    --input: 0.27 0.017 250;
+    --ring: 0.72 0.118 178;
+    --primary: 0.72 0.118 178;
+    --primary-foreground: 0.17 0.019 210;
+    --secondary: 0.26 0.019 256;
+    --secondary-foreground: 0.88 0.012 244;
+    --muted: 0.24 0.014 252;
+    --muted-foreground: 0.66 0.018 244;
+    --accent: 0.64 0.14 48;
+    --accent-foreground: 0.17 0.019 210;
+    --destructive: 0.62 0.18 27;
+    --destructive-foreground: 0.94 0.012 40;
+    --sidebar: 0.16 0.014 260;
+    --sidebar-foreground: 0.84 0.013 244;
+    --sidebar-active: 0.24 0.026 245;
+    --terminal: 0.135 0.011 258;
+    --terminal-foreground: 0.88 0.012 244;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    margin: 0;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+
+  button,
+  input,
+  textarea {
+    letter-spacing: 0;
+  }
+}
+
+@layer components {
+  .terminal-shell {
+    box-sizing: border-box;
+    overflow: hidden;
+    padding: 10px;
+  }
+
+  @media (min-width: 640px) {
+    .terminal-shell {
+      padding: 14px;
+    }
+  }
+
+  .terminal-frame {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .terminal-frame .xterm {
+    height: 100%;
+    width: 100%;
+  }
+
+  .terminal-frame .xterm-viewport {
+    background-color: transparent;
+  }
+
+  .terminal-frame .xterm-screen {
+    height: 100%;
+  }
+}

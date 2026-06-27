@@ -2,6 +2,10 @@
   "private": true,
   "scripts": {
     "build": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./build-dev-terminal.ps1",
-    "update": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/update-dev-terminal.ps1"
+    "update": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/update-dev-terminal.ps1",
+    "terminal-web": "npm --prefix ./tools/terminal-web run dev",
+    "terminal-web:bridge": "npm --prefix ./tools/terminal-web run bridge",
+    "terminal-web:build": "npm --prefix ./tools/terminal-web run build",
+    "terminal-web:start": "npm --prefix ./tools/terminal-web run start"
   }
 }
