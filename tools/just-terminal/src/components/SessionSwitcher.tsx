@@ -24,6 +24,16 @@ interface SessionSwitcherProps {
   activeId?: string;
   unread: Record<string, number>;
   onSelect: (id: string) => void;
+  // Quick tap on the grip opens the full (tappable) session list — slide is for
+  // power users, tap is the discoverable path.
+  onRequestList?: () => void;
+  // Live-switch the terminal to the scrubbed session while still dragging, so the
+  // user sees the destination before releasing (committed via onSelect, reverted
+  // to the start on cancel).
+  onPreview?: (id: string) => void;
+  // Fired true while scrubbing so the host can suppress the launch skeleton (we
+  // want to see real terminal content flip during the scrub, not a placeholder).
+  onScrubbingChange?: (scrubbing: boolean) => void;
 }
 
 function shellName(session: TerminalSessionSummary) {
@@ -38,7 +48,15 @@ const tick = () => Haptics.selectionAsync().catch(() => {});
 const thud = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const confirm = () => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
-export function SessionSwitcher({ sessions, activeId, unread, onSelect }: SessionSwitcherProps) {
+export function SessionSwitcher({
+  sessions,
+  activeId,
+  unread,
+  onSelect,
+  onRequestList,
+  onPreview,
+  onScrubbingChange,
+}: SessionSwitcherProps) {
   const [active, setActive] = useState(false);
   const [selected, setSelected] = useState(0);
   const [containerH, setContainerH] = useState(0);
@@ -46,6 +64,15 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
   // The PanResponder is created once; it reads live values through refs.
   const sessionsRef = useRef(sessions);
   const activeIdRef = useRef(activeId);
+  const anchorSessionIdRef = useRef<string | undefined>(undefined);
+  const onRequestListRef = useRef(onRequestList);
+  const onPreviewRef = useRef(onPreview);
+  const onScrubbingChangeRef = useRef(onScrubbingChange);
+  useEffect(() => {
+    onRequestListRef.current = onRequestList;
+    onPreviewRef.current = onPreview;
+    onScrubbingChangeRef.current = onScrubbingChange;
+  }, [onRequestList, onPreview, onScrubbingChange]);
   const selectedRef = useRef(0);
   const anchorIndexRef = useRef(0);
   const activeRef = useRef(false);
@@ -70,6 +97,11 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
       setSelected(next);
       tick();
       Animated.spring(pos, { toValue: next, useNativeDriver: true, speed: 22, bounciness: 5 }).start();
+      // Live-switch the terminal behind the picker to the scrubbed session.
+      const previewId = sessionsRef.current[next]?.id;
+      if (previewId) {
+        onPreviewRef.current?.(previewId);
+      }
     },
     [pos]
   );
@@ -81,11 +113,13 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
     }
     const start = Math.max(0, list.findIndex((item) => item.id === activeIdRef.current));
     anchorIndexRef.current = start;
+    anchorSessionIdRef.current = list[start]?.id;
     selectedRef.current = start;
     setSelected(start);
     pos.setValue(start);
     activeRef.current = true;
     setActive(true);
+    onScrubbingChangeRef.current?.(true);
     thud();
     Animated.timing(fade, { toValue: 1, duration: 130, useNativeDriver: true }).start();
   }, [fade, pos]);
@@ -100,10 +134,18 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
         return;
       }
       activeRef.current = false;
+      onScrubbingChangeRef.current?.(false);
       const target = sessionsRef.current[selectedRef.current];
-      if (commit && target && target.id !== activeIdRef.current) {
-        confirm();
+      if (commit && target) {
+        // The terminal was already previewed to `target`; finalize (clears unread,
+        // closes the drawer). Only celebrate when it's an actual change.
+        if (target.id !== anchorSessionIdRef.current) {
+          confirm();
+        }
         onSelect(target.id);
+      } else if (!commit && anchorSessionIdRef.current) {
+        // Cancelled mid-scrub: snap the terminal back to where we started.
+        onPreviewRef.current?.(anchorSessionIdRef.current);
       }
       Animated.timing(fade, { toValue: 0, duration: 120, useNativeDriver: true }).start(() => {
         if (!activeRef.current) {
@@ -156,7 +198,15 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
         const next = Math.min(count - 1, Math.max(0, anchorIndexRef.current + steps));
         handlers.current.moveSelection(next);
       },
-      onPanResponderRelease: () => handlers.current.finish(true),
+      onPanResponderRelease: () => {
+        // A quick tap (no hold-to-activate, no slide) never entered scrub mode —
+        // treat it as "open the session list" so switching is discoverable.
+        const wasActive = activeRef.current;
+        handlers.current.finish(true);
+        if (!wasActive) {
+          onRequestListRef.current?.();
+        }
+      },
       onPanResponderTerminate: () => handlers.current.finish(false),
     })
   ).current;
@@ -170,14 +220,26 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
   // Slide the whole column so the selected card lands on the centre frame.
   const listTranslate = Animated.subtract(centerY - ROW_HEIGHT / 2, Animated.multiply(pos, ROW_HEIGHT));
 
+  // Idle, only the 26px edge strip overlays the terminal — the rest of the
+  // surface is left clear so taps reach the WebView (Android does not reliably
+  // pass taps through a full-screen pointerEvents="box-none" view). The picker
+  // overlay is mounted only while actively scrubbing.
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="box-none" onLayout={onLayout}>
-      <View style={styles.strip} pointerEvents={hasMany ? "auto" : "none"} {...responder.panHandlers}>
+    <>
+      <View
+        style={styles.strip}
+        pointerEvents={hasMany ? "auto" : "none"}
+        onLayout={onLayout}
+        accessibilityRole="button"
+        accessibilityLabel={`Switch terminal · ${sessions.length} sessions. Tap to list, hold and slide to scrub.`}
+        {...responder.panHandlers}
+      >
         {hasMany && !active ? (
           <View style={styles.grip}>
             <View style={styles.gripDot} />
             <View style={styles.gripDot} />
             <View style={styles.gripDot} />
+            <Text style={styles.gripCount}>{sessions.length}</Text>
           </View>
         ) : null}
       </View>
@@ -253,7 +315,7 @@ export function SessionSwitcher({ sessions, activeId, unread, onSelect }: Sessio
           </View>
         </Animated.View>
       ) : null}
-    </View>
+    </>
   );
 }
 
@@ -281,8 +343,16 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: "rgba(255, 191, 0, 0.5)",
   },
+  gripCount: {
+    marginTop: 4,
+    color: "rgba(255, 191, 0, 0.85)",
+    fontSize: 10,
+    fontFamily: font.bold,
+  },
   overlay: {
-    backgroundColor: "rgba(8, 10, 13, 0.82)",
+    // Translucent so the live terminal preview is visible behind the picker as
+    // the user scrubs between sessions.
+    backgroundColor: "rgba(8, 10, 13, 0.5)",
   },
   topHint: {
     position: "absolute",

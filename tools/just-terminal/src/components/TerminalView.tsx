@@ -1,19 +1,35 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { PanResponder, Pressable, StyleSheet, Text, type LayoutChangeEvent, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
 import type { ServerMessage, TerminalSessionSummary } from "../types";
 import { TERMINAL_HTML } from "../terminalHtml";
 import { colors, font, radius } from "../theme";
+import { TerminalLoading } from "./TerminalLoading";
+
+// Hard cap on how long the launch skeleton lingers if a session never prints.
+const LOADING_FALLBACK_MS = 4000;
+
+const SESSION_SWITCH_EDGE_WIDTH = 34;
+const SCROLL_GESTURE_THRESHOLD = 7;
 
 export interface TerminalViewHandle {
+  fitToViewport: () => void;
   focusTerminal: () => void;
+  resizeForMobileInput: () => void;
 }
 
 interface TerminalViewProps {
   targetId?: string;
   session?: TerminalSessionSummary;
   socketStatus: SocketStatus;
+  // While the session switcher is scrubbing we live-preview each session; hide
+  // the launch skeleton so the real terminal content is visible as it flips.
+  suppressLoading?: boolean;
+  // Pixels the keyboard occludes at the bottom. We shift the terminal view up by
+  // this much (instead of resizing it) so the input stays visible above the
+  // keyboard.
+  keyboardInset?: number;
 }
 
 interface WebDims {
@@ -21,18 +37,40 @@ interface WebDims {
   rows: number;
 }
 
+interface HostLayout {
+  width: number;
+  height: number;
+}
+
+function parseWebDims(cols: unknown, rows: unknown): WebDims | undefined {
+  const nextCols = Math.floor(Number(cols));
+  const nextRows = Math.floor(Number(rows));
+  if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows)) {
+    return undefined;
+  }
+  return { cols: nextCols, rows: nextRows };
+}
+
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
-  { targetId, session, socketStatus },
+  { targetId, session, socketStatus, suppressLoading = false, keyboardInset = 0 },
   ref
 ) {
   const webRef = useRef<WebView | null>(null);
+  const containerRef = useRef<View | null>(null);
   const webReadyRef = useRef(false);
   const [webReady, setWebReady] = useState(false);
   const activeTargetRef = useRef<string | undefined>(targetId);
   const activeSessionRef = useRef<TerminalSessionSummary | undefined>(session);
+  const keyboardInsetRef = useRef<number>(keyboardInset);
   const subscribedTargetRef = useRef<string | undefined>(undefined);
-  const dimsRef = useRef<WebDims | undefined>(undefined);
+  const hostLayoutRef = useRef<HostLayout | undefined>(undefined);
+  const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
+  const fitTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const scrollGestureLastDyRef = useRef(0);
   const [scroll, setScroll] = useState({ canScroll: false, atBottom: true });
+  // Whether the active session has painted anything yet — drives the launch skeleton.
+  const [rendered, setRendered] = useState(false);
+  const loadingFallbackRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const postToWeb = useCallback((message: Record<string, unknown>) => {
     if (!webRef.current) {
@@ -43,28 +81,200 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     webRef.current.injectJavaScript(`window.onHostMessage(${JSON.stringify(json)});true;`);
   }, []);
 
+  const clearFitTimers = useCallback(() => {
+    for (const timer of fitTimersRef.current) {
+      clearTimeout(timer);
+    }
+    fitTimersRef.current = [];
+  }, []);
+
+  const recordHostSize = useCallback((rawWidth: number, rawHeight: number) => {
+    const width = Math.round(rawWidth);
+    const height = Math.round(rawHeight);
+    if (width <= 0 || height <= 0) {
+      return false;
+    }
+    const current = hostLayoutRef.current;
+    if (current?.width === width && current.height === height) {
+      return true;
+    }
+    hostLayoutRef.current = { width, height };
+    return true;
+  }, []);
+
+  const recordHostLayout = useCallback((layout: LayoutChangeEvent["nativeEvent"]["layout"] | undefined) => {
+    if (!layout) {
+      return false;
+    }
+    return recordHostSize(layout.width, layout.height);
+  }, [recordHostSize]);
+
+  const measureHostLayout = useCallback(
+    (onMeasured: () => void) => {
+      const container = containerRef.current;
+      if (!container) {
+        onMeasured();
+        return;
+      }
+      container.measure((_x, _y, width, height) => {
+        recordHostSize(width, height);
+        onMeasured();
+      });
+    },
+    [recordHostSize]
+  );
+
+  const postHostLayout = useCallback(() => {
+    const layout = hostLayoutRef.current;
+    if (!layout) {
+      return;
+    }
+    postToWeb({ type: "hostLayout", width: layout.width, height: layout.height });
+  }, [postToWeb]);
+
+  // Forward a measured size to the PTY (the WebView reflows to fit and reports
+  // its size here). Deduped so we don't spam identical resizes.
+  const forwardResize = useCallback((dims?: WebDims) => {
+    if (!dims) {
+      return;
+    }
+    const target = activeTargetRef.current;
+    const session = activeSessionRef.current;
+    if (!target || !session || terminalSocket.currentStatus !== "open") {
+      return;
+    }
+    if (session.cols === dims.cols && session.rows === dims.rows) {
+      return;
+    }
+    const last = lastResizeRef.current;
+    if (last?.sessionId === target && last.cols === dims.cols && last.rows === dims.rows) {
+      return;
+    }
+    lastResizeRef.current = { sessionId: target, cols: dims.cols, rows: dims.rows };
+    terminalSocket.send({ type: "resize", sessionId: target, cols: dims.cols, rows: dims.rows });
+  }, []);
+
+  const postSession = useCallback(() => {
+    postToWeb({ type: "session" });
+  }, [postToWeb]);
+
+  const requestTerminalFit = useCallback(
+    (event?: LayoutChangeEvent) => {
+      recordHostLayout(event?.nativeEvent.layout);
+      if (!webReadyRef.current) {
+        return;
+      }
+      const fitToMeasuredLayout = () => {
+        postHostLayout();
+        postToWeb({ type: "fit" });
+      };
+      measureHostLayout(fitToMeasuredLayout);
+      clearFitTimers();
+      fitTimersRef.current = [
+        setTimeout(() => measureHostLayout(fitToMeasuredLayout), 80),
+        setTimeout(() => measureHostLayout(fitToMeasuredLayout), 220),
+      ];
+    },
+    [clearFitTimers, measureHostLayout, postHostLayout, postToWeb, recordHostLayout]
+  );
+
+  const scrollResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponder: (event, gesture) => {
+        // Leave multi-touch (pinch-zoom / two-finger pan) to the WebView.
+        if (gesture.numberActiveTouches > 1) {
+          return false;
+        }
+        if (event.nativeEvent.locationX <= SESSION_SWITCH_EDGE_WIDTH) {
+          return false;
+        }
+        const absDx = Math.abs(gesture.dx);
+        const absDy = Math.abs(gesture.dy);
+        return absDy >= SCROLL_GESTURE_THRESHOLD && absDy > absDx * 1.15;
+      },
+      onMoveShouldSetPanResponderCapture: (event, gesture) => {
+        if (gesture.numberActiveTouches > 1) {
+          return false;
+        }
+        if (event.nativeEvent.locationX <= SESSION_SWITCH_EDGE_WIDTH) {
+          return false;
+        }
+        const absDx = Math.abs(gesture.dx);
+        const absDy = Math.abs(gesture.dy);
+        return absDy >= SCROLL_GESTURE_THRESHOLD && absDy > absDx * 1.15;
+      },
+      onPanResponderGrant: () => {
+        scrollGestureLastDyRef.current = 0;
+      },
+      onPanResponderMove: (_event, gesture) => {
+        const deltaY = scrollGestureLastDyRef.current - gesture.dy;
+        scrollGestureLastDyRef.current = gesture.dy;
+        if (Math.abs(deltaY) >= 0.5) {
+          postToWeb({ type: "scrollBy", deltaY });
+        }
+      },
+      onPanResponderRelease: () => {
+        scrollGestureLastDyRef.current = 0;
+      },
+      onPanResponderTerminate: () => {
+        scrollGestureLastDyRef.current = 0;
+      },
+      onPanResponderTerminationRequest: () => true,
+    })
+  ).current;
+
   useEffect(() => {
     activeTargetRef.current = targetId;
+    lastResizeRef.current = undefined;
+    // Re-arm the launch skeleton for the newly selected session until it paints.
+    if (loadingFallbackRef.current) {
+      clearTimeout(loadingFallbackRef.current);
+      loadingFallbackRef.current = undefined;
+    }
+    if (targetId) {
+      setRendered(false);
+      loadingFallbackRef.current = setTimeout(() => setRendered(true), LOADING_FALLBACK_MS);
+    } else {
+      setRendered(true);
+    }
+    return () => {
+      if (loadingFallbackRef.current) {
+        clearTimeout(loadingFallbackRef.current);
+        loadingFallbackRef.current = undefined;
+      }
+    };
   }, [targetId]);
 
   useEffect(() => {
     activeSessionRef.current = session;
     if (webReadyRef.current) {
-      postToWeb({
-        type: "session",
-        source: session?.source,
-        cols: session?.cols,
-        rows: session?.rows,
-      });
+      postSession();
     }
-  }, [postToWeb, session?.id, session?.source, session?.cols, session?.rows]);
+  }, [postSession, session?.id, session?.source, session?.cols, session?.rows]);
+
+  useEffect(() => {
+    keyboardInsetRef.current = keyboardInset;
+    if (webReadyRef.current) {
+      postToWeb({ type: "keyboardInset", height: keyboardInset });
+    }
+  }, [keyboardInset, postToWeb]);
+
+  useEffect(() => {
+    return () => {
+      clearFitTimers();
+    };
+  }, [clearFitTimers]);
 
   useImperativeHandle(
     ref,
     () => ({
+      fitToViewport: requestTerminalFit,
       focusTerminal: () => postToWeb({ type: "focus" }),
+      resizeForMobileInput: () => requestTerminalFit(),
     }),
-    [postToWeb]
+    [postToWeb, requestTerminalFit]
   );
 
   // Render snapshots/output for the active session into the WebView.
@@ -77,14 +287,19 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         postToWeb({ type: "reset" });
         if (message.screen) {
           postToWeb({ type: "write", data: message.screen });
+          setRendered(true);
         } else {
           for (const chunk of message.chunks) {
             postToWeb({ type: "write", data: chunk.data });
+          }
+          if (message.chunks.length > 0) {
+            setRendered(true);
           }
         }
       }
       if (message.type === "output" && message.sessionId === activeTargetRef.current) {
         postToWeb({ type: "write", data: message.data });
+        setRendered(true);
       }
     });
     return off;
@@ -99,17 +314,9 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       postToWeb({ type: "reset" });
       subscribedTargetRef.current = targetId;
     }
-    postToWeb({
-      type: "session",
-      source: session?.source,
-      cols: session?.cols,
-      rows: session?.rows,
-    });
+    postSession();
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
-    if (dimsRef.current && session?.source !== "bridged") {
-      terminalSocket.send({ type: "resize", sessionId: targetId, cols: dimsRef.current.cols, rows: dimsRef.current.rows });
-    }
-  }, [webReady, socketStatus, targetId, postToWeb, session?.source, session?.cols, session?.rows]);
+  }, [webReady, socketStatus, targetId, postToWeb, postSession]);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     let message: Record<string, unknown>;
@@ -122,15 +329,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     const target = activeTargetRef.current;
     switch (message.type) {
       case "ready": {
-        dimsRef.current = { cols: Number(message.cols), rows: Number(message.rows) };
         webReadyRef.current = true;
         setWebReady(true);
-        postToWeb({
-          type: "session",
-          source: activeSessionRef.current?.source,
-          cols: activeSessionRef.current?.cols,
-          rows: activeSessionRef.current?.rows,
-        });
+        postToWeb({ type: "keyboardInset", height: keyboardInsetRef.current });
+        postSession();
+        requestTerminalFit();
         break;
       }
       case "input": {
@@ -139,12 +342,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         }
         break;
       }
-      case "resize": {
-        const cols = Number(message.cols);
-        const rows = Number(message.rows);
-        dimsRef.current = { cols, rows };
-        if (target && activeSessionRef.current?.source !== "bridged") {
-          terminalSocket.send({ type: "resize", sessionId: target, cols, rows });
+      case "resize":
+      case "viewport": {
+        const dims = parseWebDims(message.cols, message.rows);
+        if (dims) {
+          forwardResize(dims);
         }
         break;
       }
@@ -152,13 +354,25 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         setScroll({ canScroll: Boolean(message.canScroll), atBottom: Boolean(message.atBottom) });
         break;
       }
+      case "log": {
+        // Surface engine diagnostics in the Metro/dev console.
+        // eslint-disable-next-line no-console
+        console.log("[terminal]", message.message);
+        break;
+      }
       default:
         break;
     }
-  }, [postToWeb]);
+  }, [forwardResize, postSession, postToWeb, requestTerminalFit]);
 
   return (
-    <View style={styles.container}>
+    <View
+      ref={containerRef}
+      collapsable={false}
+      style={styles.container}
+      onLayout={requestTerminalFit}
+      {...scrollResponder.panHandlers}
+    >
       <WebView
         ref={webRef}
         source={{ html: TERMINAL_HTML }}
@@ -169,8 +383,12 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         setSupportMultipleWindows={false}
         overScrollMode="never"
         scrollEnabled={false}
+        bounces={false}
+        showsVerticalScrollIndicator={false}
+        showsHorizontalScrollIndicator={false}
         automaticallyAdjustContentInsets={false}
         keyboardDisplayRequiresUserAction={false}
+        hideKeyboardAccessoryView
         style={styles.web}
         containerStyle={styles.web}
         androidLayerType="hardware"
@@ -187,6 +405,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
           <Text style={styles.jumpText}>↓ Latest</Text>
         </Pressable>
       ) : null}
+
+      {socketStatus === "open" && targetId && !rendered && !suppressLoading ? <TerminalLoading session={session} /> : null}
 
       {socketStatus !== "open" ? (
         <View style={styles.reconnect} pointerEvents="none">
@@ -210,6 +430,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     bottom: 12,
     right: 12,
+    zIndex: 1,
     backgroundColor: colors.primary,
     borderRadius: radius.pill,
     paddingHorizontal: 14,
@@ -232,6 +453,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 10,
     right: 10,
+    zIndex: 2,
     backgroundColor: colors.surface,
     borderColor: colors.borderStrong,
     borderWidth: 1,

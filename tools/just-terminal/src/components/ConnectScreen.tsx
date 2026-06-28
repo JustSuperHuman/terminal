@@ -34,6 +34,12 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
 
   const canConnect = address.trim().length > 0 && !connecting;
 
+  function submit() {
+    if (canConnect) {
+      onConnect(address, token, label);
+    }
+  }
+
   return (
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <ScrollView
@@ -62,6 +68,9 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
+            returnKeyType="go"
+            onSubmitEditing={submit}
+            accessibilityLabel="Server address"
             style={styles.input}
             editable={!connecting}
           />
@@ -77,6 +86,7 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
                 autoCapitalize="none"
                 autoCorrect={false}
                 secureTextEntry
+                accessibilityLabel="Access token (optional)"
                 style={styles.input}
                 editable={!connecting}
               />
@@ -90,6 +100,9 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
                 placeholderTextColor={colors.faint}
                 autoCapitalize="none"
                 autoCorrect={false}
+                returnKeyType="go"
+                onSubmitEditing={submit}
+                accessibilityLabel="Server label (optional)"
                 style={styles.input}
                 editable={!connecting}
               />
@@ -104,7 +117,10 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
 
           <Pressable
             disabled={!canConnect}
-            onPress={() => onConnect(address, token, label)}
+            onPress={submit}
+            accessibilityRole="button"
+            accessibilityLabel="Connect"
+            accessibilityState={{ disabled: !canConnect, busy: connecting }}
             style={({ pressed }) => [styles.connect, !canConnect && styles.connectDisabled, pressed && styles.connectPressed]}
           >
             {connecting ? (
@@ -114,9 +130,11 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
             )}
           </Pressable>
 
-          <Pressable onPress={() => setAddress(EMULATOR_HOST)} style={styles.hintChip} disabled={connecting}>
-            <Text style={styles.hintChipText}>Use emulator host · {EMULATOR_HOST}</Text>
-          </Pressable>
+          {__DEV__ ? (
+            <Pressable onPress={() => setAddress(EMULATOR_HOST)} style={styles.hintChip} disabled={connecting}>
+              <Text style={styles.hintChipText}>Use emulator host · {EMULATOR_HOST}</Text>
+            </Pressable>
+          ) : null}
         </View>
 
         {servers.length > 0 ? (

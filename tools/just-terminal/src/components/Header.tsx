@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { SocketStatus } from "../lib/socket";
 import { colors, font, radius } from "../theme";
@@ -30,9 +30,23 @@ export function Header({ title, meta, socketStatus, canKill, onMenu, onFocus, on
   const status = statusInfo(socketStatus);
   const insets = useSafeAreaInsets();
   const [infoOpen, setInfoOpen] = useState(false);
+
+  function confirmKill() {
+    Alert.alert("End session?", `“${title}” will stop running. This can't be undone.`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "End session", style: "destructive", onPress: onKill },
+    ]);
+  }
+
   return (
     <View style={styles.container}>
-      <Pressable onPress={onMenu} hitSlop={8} style={({ pressed }) => [styles.chip, pressed && styles.chipPressed]}>
+      <Pressable
+        onPress={onMenu}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityLabel="Open sessions menu"
+        style={({ pressed }) => [styles.chip, pressed && styles.chipPressed]}
+      >
         <View style={styles.menuLine} />
         <View style={[styles.menuLine, styles.menuLineMid]} />
         <View style={styles.menuLine} />
@@ -42,7 +56,7 @@ export function Header({ title, meta, socketStatus, canKill, onMenu, onFocus, on
         <Text style={styles.title} numberOfLines={1}>
           {title}
         </Text>
-        <Text style={styles.meta} numberOfLines={1}>
+        <Text style={styles.meta} numberOfLines={1} ellipsizeMode="head">
           {meta}
         </Text>
       </View>
@@ -69,16 +83,31 @@ export function Header({ title, meta, socketStatus, canKill, onMenu, onFocus, on
       </Modal>
 
       <View style={styles.actions}>
-        <Pressable onPress={onFocus} hitSlop={6} style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed]}>
+        <Pressable
+          onPress={onFocus}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="Show keyboard"
+          style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed]}
+        >
           <Text style={styles.iconGlyph}>⌨</Text>
         </Pressable>
-        <Pressable onPress={onNew} hitSlop={6} style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed]}>
+        <Pressable
+          onPress={onNew}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel="New session"
+          style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed]}
+        >
           <Text style={styles.iconPlus}>+</Text>
         </Pressable>
         <Pressable
-          onPress={onKill}
+          onPress={confirmKill}
           hitSlop={6}
           disabled={!canKill}
+          accessibilityRole="button"
+          accessibilityLabel="End session"
+          accessibilityState={{ disabled: !canKill }}
           style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed, !canKill && styles.disabled]}
         >
           <View style={styles.killSquare} />

@@ -1,11 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, StyleSheet, View } from "react-native";
+import {
+  AppState,
+  Keyboard,
+  Platform,
+  StyleSheet,
+  type KeyboardEvent,
+  type KeyboardMetrics,
+  type LayoutChangeEvent,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { BlurTargetView } from "expo-blur";
 import { CommandBar } from "./components/CommandBar";
 import { Header } from "./components/Header";
 import { SessionsDrawer, type CreateSpec } from "./components/SessionsDrawer";
 import { SessionSwitcher } from "./components/SessionSwitcher";
 import { TerminalView, type TerminalViewHandle } from "./components/TerminalView";
+import { TerminalEmptyState } from "./components/TerminalEmptyState";
+import { useDictation } from "./useDictation";
 import { createSession as createSessionApi } from "./lib/api";
 import type { ServerEndpoint } from "./lib/endpoint";
 import { terminalSocket, type SocketStatus } from "./lib/socket";
@@ -18,13 +31,55 @@ interface TerminalScreenProps {
   onDisconnect: () => void;
 }
 
+function dockedKeyboardHeight(metrics: KeyboardMetrics | undefined | null, windowHeight: number): number {
+  if (Platform.OS === "android") {
+    // Android is configured with softwareKeyboardLayoutMode="resize"; adding a
+    // manual keyboard offset here can double-count the system-resized viewport.
+    return 0;
+  }
+
+  if (!metrics || metrics.height <= 0) {
+    return 0;
+  }
+
+  const keyboardBottom = metrics.screenY + metrics.height;
+  const overlapsBottomEdge = keyboardBottom >= windowHeight - 24;
+  if (!overlapsBottomEdge) {
+    return 0;
+  }
+
+  const overlapHeight = Math.max(0, windowHeight - metrics.screenY);
+  return Math.round(Math.min(metrics.height, overlapHeight));
+}
+
+function keyboardVisibleFromMetrics(metrics: KeyboardMetrics | undefined | null, windowHeight: number): boolean {
+  if (!metrics || metrics.height <= 0) {
+    return false;
+  }
+  if (Platform.OS === "android") {
+    return true;
+  }
+
+  return dockedKeyboardHeight(metrics, windowHeight) > 0;
+}
+
 function shellName(session?: TerminalSessionSummary) {
   if (!session) return "";
   return session.shell.split(/[\\/]/).pop() ?? session.shell;
 }
 
+function selectPreferredSessionId(sessions: TerminalSessionSummary[], currentId?: string): string | undefined {
+  const current = sessions.find((session) => session.id === currentId);
+  if (current?.status === "running") {
+    return current.id;
+  }
+
+  return sessions.find((session) => session.status === "running")?.id ?? current?.id ?? sessions[0]?.id;
+}
+
 export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const [sessions, setSessions] = useState<TerminalSessionSummary[]>([]);
   const [profiles, setProfiles] = useState<TerminalProfile[]>([]);
   const [serverInfo, setServerInfo] = useState<ServerInfo | undefined>();
@@ -34,12 +89,108 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [recentCwds, setRecentCwds] = useState<string[]>([]);
   const [activeCwd, setActiveCwd] = useState<string | undefined>(undefined);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [commandBarHeight, setCommandBarHeight] = useState(0);
+  // True while the session switcher is being scrubbed (live terminal preview).
+  const [scrubbing, setScrubbing] = useState(false);
   const activeIdRef = useRef<string | undefined>(activeId);
   const terminalRef = useRef<TerminalViewHandle | null>(null);
+  const blurTargetRef = useRef<View | null>(null);
+  const settleFrameRef = useRef<number | undefined>(undefined);
+  const settleTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+
+  const syncTerminalToInput = useCallback(() => {
+    terminalRef.current?.fitToViewport();
+    terminalRef.current?.resizeForMobileInput();
+  }, []);
+
+  const clearTerminalSettle = useCallback(() => {
+    if (settleFrameRef.current !== undefined) {
+      cancelAnimationFrame(settleFrameRef.current);
+      settleFrameRef.current = undefined;
+    }
+    for (const timer of settleTimersRef.current) {
+      clearTimeout(timer);
+    }
+    settleTimersRef.current = [];
+  }, []);
+
+  const settleTerminalToInput = useCallback(() => {
+    clearTerminalSettle();
+    syncTerminalToInput();
+    settleFrameRef.current = requestAnimationFrame(() => {
+      settleFrameRef.current = undefined;
+      syncTerminalToInput();
+    });
+    settleTimersRef.current = [80, 180, Platform.OS === "ios" ? 320 : 220].map((delay) =>
+      setTimeout(syncTerminalToInput, delay)
+    );
+  }, [clearTerminalSettle, syncTerminalToInput]);
+
+  const syncKeyboardMetrics = useCallback(() => {
+    const metrics = Keyboard.metrics();
+    const nextHeight = dockedKeyboardHeight(metrics, windowHeight);
+    setKeyboardHeight(nextHeight);
+    setKeyboardVisible(keyboardVisibleFromMetrics(metrics, windowHeight));
+    settleTerminalToInput();
+  }, [settleTerminalToInput, windowHeight]);
 
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    setActiveId((current) => {
+      const preferred = selectPreferredSessionId(sessions, current);
+      return preferred === current ? current : preferred;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    settleTerminalToInput();
+  }, [keyboardHeight, keyboardVisible, commandBarHeight, settleTerminalToInput]);
+
+  useEffect(() => clearTerminalSettle, [clearTerminalSettle]);
+
+  useEffect(() => {
+    const applyKeyboardFrame = (event: KeyboardEvent) => {
+      Keyboard.scheduleLayoutAnimation(event);
+      const nextHeight = dockedKeyboardHeight(event.endCoordinates, windowHeight);
+      setKeyboardHeight(nextHeight);
+      setKeyboardVisible(keyboardVisibleFromMetrics(event.endCoordinates, windowHeight));
+      settleTerminalToInput();
+    };
+
+    const hideKeyboard = (event?: KeyboardEvent) => {
+      if (event) {
+        Keyboard.scheduleLayoutAnimation(event);
+      }
+      setKeyboardHeight(0);
+      setKeyboardVisible(false);
+      settleTerminalToInput();
+    };
+
+    syncKeyboardMetrics();
+
+    const showSub = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillChangeFrame" : "keyboardDidShow", applyKeyboardFrame);
+    const frameSettledSub =
+      Platform.OS === "ios" ? Keyboard.addListener("keyboardDidChangeFrame", applyKeyboardFrame) : undefined;
+    const hideSub = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide", hideKeyboard);
+    const appStateSub = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        requestAnimationFrame(syncKeyboardMetrics);
+        settleTerminalToInput();
+      }
+    });
+
+    return () => {
+      showSub.remove();
+      frameSettledSub?.remove();
+      hideSub.remove();
+      appStateSub.remove();
+    };
+  }, [settleTerminalToInput, syncKeyboardMetrics, windowHeight]);
 
   useEffect(() => {
     let mounted = true;
@@ -98,6 +249,20 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   }, [upsertSession]);
 
   const activeSession = useMemo(() => sessions.find((item) => item.id === activeId), [sessions, activeId]);
+
+  // On-device voice dictation: recognized phrases are injected into the active
+  // session as input (no auto-Enter — the user reviews, then runs).
+  const injectDictatedText = useCallback((text: string) => {
+    const id = activeIdRef.current;
+    if (id) {
+      terminalSocket.send({ type: "input", sessionId: id, data: `${text} ` });
+    }
+  }, []);
+
+  const dictation = useDictation({
+    onText: injectDictatedText,
+    enabled: socketStatus === "open" && activeSession?.status === "running",
+  });
 
   const selectSession = useCallback((id: string) => {
     setActiveId(id);
@@ -162,6 +327,17 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     : socketStatus === "open"
       ? "No active session"
       : "Connecting…";
+  const commandBarBottom = keyboardHeight;
+  // The terminal stays full-size when the keyboard appears (no resize). Reserve
+  // only the constant tools-bar height; the keyboard is handled by shifting the
+  // terminal view up (keyboardInset) so the input stays visible.
+  const terminalBottomInset = commandBarHeight;
+  const keyboardInset = keyboardVisible ? keyboardHeight + 28 : 0;
+
+  const handleCommandBarLayout = useCallback((event: LayoutChangeEvent) => {
+    const nextHeight = Math.round(event.nativeEvent.layout.height);
+    setCommandBarHeight((current) => (current === nextHeight ? current : nextHeight));
+  }, []);
 
   return (
     <View style={styles.root}>
@@ -172,33 +348,66 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           socketStatus={socketStatus}
           canKill={Boolean(activeSession && activeSession.status === "running")}
           onMenu={() => setDrawerOpen(true)}
-          onFocus={() => terminalRef.current?.focusTerminal()}
+          onFocus={() => {
+            terminalRef.current?.focusTerminal();
+            settleTerminalToInput();
+          }}
           onNew={() => createSession()}
           onKill={() => activeId && killSession(activeId)}
         />
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        keyboardVerticalOffset={insets.top}
-      >
-        <View style={styles.terminalWrap}>
-          <TerminalView
-            ref={terminalRef}
+      <View style={styles.body}>
+        <BlurTargetView ref={blurTargetRef} style={styles.blurTarget}>
+          <View style={[styles.terminalWrap, { marginBottom: terminalBottomInset }]}>
+            <TerminalView
+              ref={terminalRef}
+              targetId={activeId}
+              session={activeSession}
+              socketStatus={socketStatus}
+              suppressLoading={scrubbing}
+              keyboardInset={keyboardInset}
+            />
+            <SessionSwitcher
+              sessions={sessions}
+              activeId={activeId}
+              unread={unread}
+              onSelect={selectSession}
+              onRequestList={() => setDrawerOpen(true)}
+              onPreview={(id) => setActiveId(id)}
+              onScrubbingChange={setScrubbing}
+            />
+            {socketStatus === "open" && sessions.length === 0 ? (
+              <TerminalEmptyState
+                profiles={profiles}
+                onCreate={createSession}
+                onOpenMenu={() => setDrawerOpen(true)}
+              />
+            ) : null}
+          </View>
+        </BlurTargetView>
+        <View style={[styles.commandBarDock, { bottom: commandBarBottom }]} onLayout={handleCommandBarLayout}>
+          <CommandBar
             targetId={activeId}
-            session={activeSession}
+            sessionStatus={activeSession?.status}
             socketStatus={socketStatus}
+            bottomInset={keyboardVisible ? 0 : insets.bottom}
+            keyboardVisible={keyboardVisible}
+            blurTarget={blurTargetRef}
+            dictation={{
+              status: dictation.status,
+              active: dictation.active,
+              level: dictation.level,
+              speaking: dictation.speaking,
+              lastText: dictation.lastText,
+              downloadPercent: dictation.downloadPercent,
+              error: dictation.error,
+              modelLabel: dictation.modelLabel,
+              onToggle: dictation.toggle,
+            }}
           />
-          <SessionSwitcher sessions={sessions} activeId={activeId} unread={unread} onSelect={selectSession} />
         </View>
-        <CommandBar
-          targetId={activeId}
-          sessionStatus={activeSession?.status}
-          socketStatus={socketStatus}
-          bottomInset={insets.bottom}
-        />
-      </KeyboardAvoidingView>
+      </View>
 
       <SessionsDrawer
         visible={drawerOpen}
@@ -227,11 +436,21 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  flex: {
+  body: {
+    flex: 1,
+    position: "relative",
+    backgroundColor: colors.background,
+  },
+  blurTarget: {
     flex: 1,
   },
   terminalWrap: {
     flex: 1,
     overflow: "hidden",
+  },
+  commandBarDock: {
+    position: "absolute",
+    left: 0,
+    right: 0,
   },
 });

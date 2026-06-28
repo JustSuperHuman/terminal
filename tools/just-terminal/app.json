@@ -9,10 +9,15 @@
     "backgroundColor": "#10141a",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.justsuperhuman.justterminal"
+      "bundleIdentifier": "com.justsuperhuman.justterminal",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSMicrophoneUsageDescription": "JustTerminal uses the microphone for on-device voice dictation into the command line. Audio is transcribed locally and never leaves your device."
+      }
     },
     "android": {
       "package": "com.justsuperhuman.justterminal",
+      "permissions": ["android.permission.RECORD_AUDIO"],
       "adaptiveIcon": {
         "backgroundColor": "#10141a",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -26,7 +31,26 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-font"
-    ]
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0b0d11",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#0b0d11",
+            "image": "./assets/splash-icon.png"
+          }
+        }
+      ],
+      "@kesha-antonov/react-native-background-downloader"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1826b20f-48dc-4b2e-9cd4-4375ff5b80d7"
+      }
+    }
   }
 }

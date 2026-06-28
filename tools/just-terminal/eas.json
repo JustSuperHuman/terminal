@@ -6,10 +6,11 @@
   "build": {
     "development": {
       "developmentClient": true,
+      "distribution": "internal"
+    },
+    "production-internal": {
       "distribution": "internal",
-      "ios": {
-        "simulator": true
-      }
+      "autoIncrement": true
     },
     "preview": {
       "distribution": "internal"

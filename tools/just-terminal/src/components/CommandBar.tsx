@@ -1,75 +1,116 @@
-import { useEffect, useRef, useState } from "react";
-import { LayoutAnimation, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useEffect, useState, type RefObject } from "react";
+import { LayoutAnimation, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { BlurView } from "expo-blur";
+import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
 import { loadKeysExpanded, saveKeysExpanded } from "../lib/storage";
 import type { SessionStatus } from "../types";
+import type { DictationUiStatus } from "../useDictation";
+import { MicIcon } from "./icons";
 import { colors, font, radius } from "../theme";
 
-// Frosted-glass palette for the command bar, in the spirit of JustGains-Mobile's
-// GlassSurface (BlurView + sheen + translucent raised controls). Uses expo-blur
-// rather than the native blur lib so it works in Expo Go.
-const GLASS_TINT = "rgba(10, 12, 16, 0.40)"; // darkens the blur for text legibility
+// Frosted-glass palette for the tools bar, in the spirit of JustGains-Mobile's
+// GlassSurface (BlurView + sheen + translucent raised controls).
+const GLASS_TINT = "rgba(10, 12, 16, 0.40)";
 const GLASS_RAISED = "rgba(255, 255, 255, 0.055)";
 const GLASS_RAISED_BORDER = "rgba(255, 255, 255, 0.09)";
 const GLASS_PRESSED = "rgba(255, 255, 255, 0.13)";
-const GLASS_BORDER = "rgba(255, 255, 255, 0.10)"; // hairline tracing the glass sheet
+const GLASS_BORDER = "rgba(255, 255, 255, 0.10)";
 const SHEEN_TOP = "rgba(255, 255, 255, 0.08)";
 const SHEEN_MID = "rgba(255, 255, 255, 0.015)";
 const SHEEN_BOTTOM = "rgba(255, 255, 255, 0)";
 const ACCENT_GLASS = "rgba(245, 45, 45, 0.12)";
 const ACCENT_GLASS_BORDER = "rgba(245, 45, 45, 0.34)";
+const MIC_ACTIVE_BG = "rgba(255, 191, 0, 0.16)";
+const MIC_ACTIVE_BORDER = "rgba(255, 191, 0, 0.40)";
+const MIC_ERROR_BG = "rgba(245, 45, 45, 0.14)";
+const METER_TRACK = "rgba(255, 255, 255, 0.08)";
 const GLASS_RADIUS = 24;
 
-type ComposerMode = "line" | "paste";
+type ControlKey = { label: string; value: string; accent?: boolean; a11y?: string };
+
+// Live voice-dictation state + control, supplied by `useDictation`. Omitted (or
+// status "unsupported") hides the mic — e.g. in Expo Go where the native speech
+// module isn't linked.
+export interface DictationControl {
+  status: DictationUiStatus;
+  active: boolean;
+  level: number;
+  speaking: boolean;
+  lastText?: string;
+  downloadPercent?: number;
+  error?: string;
+  modelLabel: string;
+  onToggle: () => void;
+}
 
 interface CommandBarProps {
   targetId?: string;
   sessionStatus?: SessionStatus;
   socketStatus: SocketStatus;
   bottomInset?: number;
+  keyboardVisible?: boolean;
+  // Ref to the BlurTargetView behind the bar; required for real blur on Android.
+  blurTarget?: RefObject<View | null>;
+  dictation?: DictationControl;
 }
 
-const HISTORY_LIMIT = 60;
-
-// Esc/Tab live in the always-visible handle row (used most often); the rest stay
-// in the collapsible row.
-const quickKeys: Array<{ label: string; value: string }> = [
-  { label: "Esc", value: "\x1b" },
-  { label: "Tab", value: "\t" },
+// Typing and pasting now happen directly in the terminal (the soft keyboard
+// follows a tap), so this bar is purely a control-key accessory. The arrows the
+// user reaches for most — Up/Down for shell history and TUI navigation — live in
+// the always-visible row; the rest stay in the collapsible row.
+const visibleKeys: ControlKey[] = [
+  { label: "Esc", value: "\x1b", a11y: "Escape" },
+  { label: "Tab", value: "\t", a11y: "Tab" },
+  { label: "↑", value: "\x1b[A", a11y: "Up arrow" },
+  { label: "↓", value: "\x1b[B", a11y: "Down arrow" },
+  { label: "^C", value: "\x03", accent: true, a11y: "Control C, interrupt" },
 ];
 
-const controlKeys: Array<{ label: string; value: string; accent?: boolean }> = [
-  { label: "←", value: "\x1b[D" },
-  { label: "↑", value: "\x1b[A" },
-  { label: "↓", value: "\x1b[B" },
-  { label: "→", value: "\x1b[C" },
-  { label: "^C", value: "\x03", accent: true },
-  { label: "^D", value: "\x04" },
-  { label: "^L", value: "\x0c" },
-  { label: "^Z", value: "\x1a" },
+const expandedKeys: ControlKey[] = [
+  { label: "←", value: "\x1b[D", a11y: "Left arrow" },
+  { label: "→", value: "\x1b[C", a11y: "Right arrow" },
+  { label: "Home", value: "\x1b[H", a11y: "Home" },
+  { label: "End", value: "\x1b[F", a11y: "End" },
+  { label: "^D", value: "\x04", a11y: "Control D" },
+  { label: "^L", value: "\x0c", a11y: "Control L, clear" },
+  { label: "^Z", value: "\x1a", a11y: "Control Z, suspend" },
 ];
 
-function normalizeLineInput(value: string): string {
-  return `${value.replace(/\r?\n/g, "\r")}\r`;
+// One-line status shown above the keys while dictation is engaged.
+function describeDictation(d: DictationControl): string {
+  switch (d.status) {
+    case "checking":
+      return "Preparing…";
+    case "downloading":
+      return `Downloading ${d.modelLabel} · ${d.downloadPercent ?? 0}%`;
+    case "loading":
+      return "Loading speech model…";
+    case "recognizing":
+      return d.lastText ? `“${d.lastText}”` : "Transcribing…";
+    case "listening":
+      return d.speaking ? "Listening…" : d.lastText ? `“${d.lastText}”` : "Listening — speak now";
+    case "error":
+      return d.error ?? "Dictation unavailable";
+    default:
+      return "";
+  }
 }
 
-function bracketedPaste(value: string): string {
-  return `\x1b[200~${value.replace(/\r\n/g, "\n")}\x1b[201~`;
-}
-
-export function CommandBar({ targetId, sessionStatus, socketStatus, bottomInset = 0 }: CommandBarProps) {
-  const [value, setValue] = useState("");
-  const [mode, setMode] = useState<ComposerMode>("line");
+export function CommandBar({
+  targetId,
+  sessionStatus,
+  socketStatus,
+  bottomInset = 0,
+  keyboardVisible = false,
+  blurTarget,
+  dictation,
+}: CommandBarProps) {
   const [expanded, setExpanded] = useState(true);
-  const inputRef = useRef<TextInput | null>(null);
-  const draftsRef = useRef<Record<string, string>>({});
-  const [historyByTarget, setHistoryByTarget] = useState<Record<string, string[]>>({});
-  const [historyIndex, setHistoryIndex] = useState<number | undefined>();
 
   const disabled = !targetId || sessionStatus !== "running" || socketStatus !== "open";
-  const history = targetId ? historyByTarget[targetId] ?? [] : [];
+  const showExpandedKeys = expanded && !keyboardVisible;
 
   useEffect(() => {
     loadKeysExpanded().then(setExpanded);
@@ -84,77 +125,96 @@ export function CommandBar({ targetId, sessionStatus, socketStatus, bottomInset 
     });
   }
 
-  function send(data: string) {
+  function send(key: ControlKey) {
     if (disabled || !targetId) {
       return;
     }
-    terminalSocket.send({ type: "input", sessionId: targetId, data });
-  }
-
-  function updateValue(next: string) {
-    setValue(next);
-    if (targetId) {
-      draftsRef.current[targetId] = next;
-    }
-  }
-
-  function rememberHistory(entry: string) {
-    if (!targetId || mode !== "line" || !entry.trim()) {
-      return;
-    }
-    setHistoryByTarget((current) => {
-      const existing = current[targetId] ?? [];
-      const next = [...existing.filter((item) => item !== entry), entry].slice(-HISTORY_LIMIT);
-      return { ...current, [targetId]: next };
-    });
-  }
-
-  function submit() {
-    if (!value || disabled) {
-      return;
-    }
-    const sent = value;
-    send(mode === "line" ? normalizeLineInput(value) : bracketedPaste(value));
-    rememberHistory(sent);
-    updateValue("");
-    setHistoryIndex(undefined);
-  }
-
-  function recall(direction: -1 | 1) {
-    if (history.length === 0) {
-      return;
-    }
-    if (historyIndex === undefined) {
-      if (direction > 0) {
-        return;
-      }
-      const index = history.length - 1;
-      setHistoryIndex(index);
-      updateValue(history[index]);
-      return;
-    }
-    const next = historyIndex + direction;
-    if (next < 0) {
-      setHistoryIndex(0);
-      updateValue(history[0]);
-    } else if (next >= history.length) {
-      setHistoryIndex(undefined);
-      updateValue("");
+    // A control key is a deliberate, discrete action — give it a tactile tap.
+    // The interrupt (^C) gets a heavier hit so it feels consequential.
+    if (key.accent) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     } else {
-      setHistoryIndex(next);
-      updateValue(history[next]);
+      Haptics.selectionAsync().catch(() => {});
     }
+    terminalSocket.send({ type: "input", sessionId: targetId, data: key.value });
   }
 
-  const canPrev = !disabled && history.length > 0;
-  const canNext = !disabled && historyIndex !== undefined;
+  function renderKey(key: ControlKey, compact: boolean) {
+    return (
+      <Pressable
+        key={key.label}
+        disabled={disabled}
+        onPress={() => send(key)}
+        accessibilityRole="button"
+        accessibilityLabel={key.a11y ?? key.label}
+        accessibilityState={{ disabled }}
+        style={({ pressed }) => [
+          styles.key,
+          compact && styles.keyCompact,
+          key.accent && styles.keyAccent,
+          disabled && styles.faded,
+          pressed && styles.keyPressed,
+        ]}
+      >
+        <Text style={[styles.keyText, key.accent && styles.keyTextAccent, disabled && styles.keyTextDisabled]}>
+          {key.label}
+        </Text>
+      </Pressable>
+    );
+  }
+
+  function renderMic(d: DictationControl) {
+    // The mic can always be turned OFF; it's only blocked from turning ON when
+    // there's no running session to inject the transcription into.
+    const canToggle = !disabled || d.active;
+    const danger = d.status === "error";
+    const glow = d.active && (d.status === "listening" || d.status === "recognizing");
+    const iconColor = danger ? colors.destructive : d.active ? colors.primary : colors.secondaryForeground;
+    return (
+      <Pressable
+        onPress={() => {
+          if (!canToggle) {
+            return;
+          }
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+          d.onToggle();
+        }}
+        disabled={!canToggle}
+        accessibilityRole="button"
+        accessibilityLabel={d.active ? "Stop voice dictation" : "Start voice dictation"}
+        accessibilityState={{ disabled: !canToggle, selected: d.active }}
+        style={({ pressed }) => [
+          styles.mic,
+          d.active && styles.micActive,
+          // Mic glows with the live input level while listening/transcribing.
+          glow && { backgroundColor: `rgba(255, 191, 0, ${0.16 + Math.min(0.5, d.level * 0.6)})` },
+          danger && styles.micError,
+          !canToggle && styles.faded,
+          pressed && styles.keyPressed,
+        ]}
+      >
+        <MicIcon size={16} color={iconColor} />
+      </Pressable>
+    );
+  }
+
+  const showMic = Boolean(dictation && dictation.status !== "unsupported");
+  const showDictationStrip = Boolean(
+    dictation && dictation.status !== "idle" && dictation.status !== "unsupported"
+  );
+  const meterPercent = dictation
+    ? dictation.status === "downloading"
+      ? Math.max(0, Math.min(100, dictation.downloadPercent ?? 0))
+      : Math.round(Math.max(0, Math.min(1, dictation.level)) * 100)
+    : 0;
 
   return (
-    <View style={[styles.container, { paddingBottom: 8 + bottomInset }]}>
+    <View style={[styles.container, keyboardVisible && styles.containerKeyboard, { paddingBottom: 8 + bottomInset }]}>
       <BlurView
         intensity={Platform.OS === "ios" ? 74 : 40}
         tint="systemChromeMaterialDark"
         blurMethod="dimezisBlurView"
+        blurTarget={blurTarget}
         style={StyleSheet.absoluteFill}
       />
       <View style={[StyleSheet.absoluteFill, styles.glassTint]} pointerEvents="none" />
@@ -167,106 +227,42 @@ export function CommandBar({ targetId, sessionStatus, socketStatus, bottomInset 
         pointerEvents="none"
       />
 
+      {showDictationStrip && dictation ? (
+        <View style={styles.dictationStrip}>
+          <View style={styles.dictationMeterTrack}>
+            <View style={[styles.dictationMeterFill, { width: `${meterPercent}%` }]} />
+          </View>
+          <Text
+            style={[styles.dictationText, dictation.status === "error" && styles.dictationTextError]}
+            numberOfLines={1}
+          >
+            {describeDictation(dictation)}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.handleRow}>
-        <Pressable onPress={toggleExpanded} hitSlop={6} style={({ pressed }) => [styles.handle, pressed && styles.pressed]}>
+        {showMic && dictation ? renderMic(dictation) : null}
+        <Pressable
+          onPress={toggleExpanded}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel={expanded ? "Hide extra keys" : "Show extra keys"}
+          accessibilityState={{ expanded }}
+          style={({ pressed }) => [styles.handle, pressed && styles.pressed]}
+        >
           <Text style={styles.handleGlyph}>{expanded ? "⌄" : "⌃"}</Text>
           <Text style={styles.handleText}>Keys</Text>
         </Pressable>
 
-        <View style={styles.quickKeys}>
-          {quickKeys.map((key) => (
-            <Pressable
-              key={key.label}
-              disabled={disabled}
-              onPress={() => send(key.value)}
-              style={({ pressed }) => [styles.quickKey, disabled && styles.faded, pressed && styles.keyPressed]}
-            >
-              <Text style={[styles.quickKeyText, disabled && styles.keyTextDisabled]}>{key.label}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <View style={styles.handleSpacer} />
-
-        <View style={styles.modeToggle}>
-          {(["line", "paste"] as ComposerMode[]).map((item) => (
-            <Pressable key={item} onPress={() => setMode(item)} style={[styles.modeItem, mode === item && styles.modeItemActive]}>
-              <Text style={[styles.modeText, mode === item && styles.modeTextActive]}>{item === "line" ? "Line" : "Paste"}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <View style={styles.histGroup}>
-          <Pressable disabled={!canPrev} onPress={() => recall(-1)} style={({ pressed }) => [styles.histBtn, pressed && styles.pressed, !canPrev && styles.faded]}>
-            <Text style={styles.histText}>⌃↑</Text>
-          </Pressable>
-          <Pressable disabled={!canNext} onPress={() => recall(1)} style={({ pressed }) => [styles.histBtn, pressed && styles.pressed, !canNext && styles.faded]}>
-            <Text style={styles.histText}>⌃↓</Text>
-          </Pressable>
+        <View style={styles.visibleKeys}>
+          {visibleKeys.map((key) => renderKey(key, keyboardVisible))}
         </View>
       </View>
 
-      {expanded ? (
-        <View style={styles.keyRow}>
-          {controlKeys.map((key) => (
-            <Pressable
-              key={key.label}
-              disabled={disabled}
-              onPress={() => send(key.value)}
-              style={({ pressed }) => [
-                styles.key,
-                key.accent && styles.keyAccent,
-                disabled && styles.faded,
-                pressed && styles.keyPressed,
-              ]}
-            >
-              <Text style={[styles.keyText, key.accent && styles.keyTextAccent, disabled && styles.keyTextDisabled]}>{key.label}</Text>
-            </Pressable>
-          ))}
-        </View>
+      {showExpandedKeys ? (
+        <View style={styles.keyRow}>{expandedKeys.map((key) => renderKey(key, false))}</View>
       ) : null}
-
-      <View style={styles.inputRow}>
-        <TextInput
-          ref={inputRef}
-          value={value}
-          onChangeText={(text) => {
-            updateValue(text);
-            setHistoryIndex(undefined);
-          }}
-          editable={!disabled}
-          placeholder={
-            !targetId
-              ? "No terminal selected"
-              : socketStatus !== "open"
-                ? "Reconnecting…"
-                : mode === "line"
-                  ? "Send to terminal"
-                  : "Paste to terminal"
-          }
-          placeholderTextColor={colors.faint}
-          multiline
-          autoCapitalize="none"
-          autoCorrect={false}
-          autoComplete="off"
-          spellCheck={false}
-          blurOnSubmit={mode === "line"}
-          returnKeyType="send"
-          onSubmitEditing={() => {
-            if (mode === "line") {
-              submit();
-            }
-          }}
-          style={styles.input}
-        />
-        <Pressable
-          disabled={disabled || !value}
-          onPress={submit}
-          style={({ pressed }) => [styles.send, (disabled || !value) && styles.sendDisabled, pressed && styles.sendPressed]}
-        >
-          <Text style={styles.sendText}>Send</Text>
-        </Pressable>
-      </View>
     </View>
   );
 }
@@ -285,8 +281,39 @@ const styles = StyleSheet.create({
     paddingTop: 11,
     gap: 8,
   },
+  containerKeyboard: {
+    paddingTop: 8,
+    gap: 6,
+  },
   glassTint: {
     backgroundColor: GLASS_TINT,
+  },
+  dictationStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    paddingHorizontal: 2,
+  },
+  dictationMeterTrack: {
+    width: 56,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: METER_TRACK,
+    overflow: "hidden",
+  },
+  dictationMeterFill: {
+    height: "100%",
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+  },
+  dictationText: {
+    flex: 1,
+    color: colors.secondaryForeground,
+    fontFamily: font.medium,
+    fontSize: 12,
+  },
+  dictationTextError: {
+    color: colors.destructive,
   },
   handleRow: {
     flexDirection: "row",
@@ -304,26 +331,6 @@ const styles = StyleSheet.create({
     borderColor: GLASS_RAISED_BORDER,
     borderWidth: 1,
   },
-  quickKeys: {
-    flexDirection: "row",
-    gap: 5,
-  },
-  quickKey: {
-    minWidth: 44,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.md,
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
-    borderWidth: 1,
-  },
-  quickKeyText: {
-    color: colors.secondaryForeground,
-    fontFamily: font.mono,
-    fontSize: 13,
-  },
   handleGlyph: {
     color: colors.primary,
     fontSize: 12,
@@ -334,51 +341,30 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     fontFamily: font.semibold,
   },
-  handleSpacer: {
-    flex: 1,
-  },
-  modeToggle: {
-    flexDirection: "row",
-    backgroundColor: GLASS_RAISED,
-    borderRadius: radius.pill,
-    borderColor: GLASS_RAISED_BORDER,
-    borderWidth: 1,
-    padding: 2,
-  },
-  modeItem: {
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: radius.pill,
-  },
-  modeItemActive: {
-    backgroundColor: colors.primary,
-  },
-  modeText: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.bold,
-  },
-  modeTextActive: {
-    color: colors.primaryForeground,
-  },
-  histGroup: {
-    flexDirection: "row",
-    gap: 4,
-  },
-  histBtn: {
-    minWidth: 38,
-    height: 30,
+  mic: {
+    width: 42,
+    height: 34,
     alignItems: "center",
     justifyContent: "center",
+    borderRadius: radius.md,
     backgroundColor: GLASS_RAISED,
     borderColor: GLASS_RAISED_BORDER,
     borderWidth: 1,
-    borderRadius: radius.md,
   },
-  histText: {
-    color: colors.secondaryForeground,
-    fontFamily: font.mono,
-    fontSize: 12,
+  micActive: {
+    backgroundColor: MIC_ACTIVE_BG,
+    borderColor: MIC_ACTIVE_BORDER,
+  },
+  micError: {
+    backgroundColor: MIC_ERROR_BG,
+    borderColor: ACCENT_GLASS_BORDER,
+  },
+  visibleKeys: {
+    flex: 1,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    flexWrap: "nowrap",
+    gap: 6,
   },
   keyRow: {
     flexDirection: "row",
@@ -386,7 +372,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   key: {
-    minWidth: 42,
+    minWidth: 44,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: GLASS_RAISED,
@@ -395,6 +381,11 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     paddingHorizontal: 10,
     paddingVertical: 8,
+  },
+  keyCompact: {
+    minWidth: 40,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
   keyAccent: {
     backgroundColor: ACCENT_GLASS,
@@ -413,44 +404,6 @@ const styles = StyleSheet.create({
   },
   keyTextDisabled: {
     color: colors.faint,
-  },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-  },
-  input: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 124,
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    color: colors.foreground,
-    fontFamily: font.mono,
-    fontSize: 14,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-  },
-  send: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingHorizontal: 18,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sendDisabled: {
-    opacity: 0.4,
-  },
-  sendPressed: {
-    backgroundColor: colors.primaryDim,
-  },
-  sendText: {
-    color: colors.primaryForeground,
-    fontFamily: font.extrabold,
-    fontSize: 14,
   },
   pressed: {
     backgroundColor: GLASS_PRESSED,

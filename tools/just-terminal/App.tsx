@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
+import * as SplashScreen from "expo-splash-screen";
 import { StyleSheet, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { JustGainsMark } from "./src/components/icons";
 import { ConnectScreen } from "./src/components/ConnectScreen";
 import { TerminalScreen } from "./src/TerminalScreen";
 import { buildEndpoint, type ServerEndpoint } from "./src/lib/endpoint";
@@ -12,15 +12,9 @@ import { forgetServer, loadServers, rememberServer } from "./src/lib/storage";
 import { useAppFonts } from "./src/useAppFonts";
 import { colors } from "./src/theme";
 
-function Splash() {
-  return (
-    <View style={styles.splash}>
-      <View style={styles.splashMark}>
-        <JustGainsMark size={96} color={colors.foreground} />
-      </View>
-    </View>
-  );
-}
+// Hold the native splash (branded chevron on the app background) until the JS is
+// mounted and fonts are ready, so launch never flashes a blank/unstyled frame.
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export default function App() {
   const fontsLoaded = useAppFonts();
@@ -72,13 +66,24 @@ export default function App() {
     forgetServer(id).then(setServers);
   }, []);
 
+  // Reveal the app (dismiss the native splash) only once the first real frame
+  // has laid out, so there's no flash between splash and content.
+  const onLayoutRootView = useCallback(() => {
+    if (fontsLoaded) {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [fontsLoaded]);
+
+  // Keep the native splash up until fonts are ready.
+  if (!fontsLoaded) {
+    return null;
+  }
+
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <View style={styles.root}>
-        {!fontsLoaded ? (
-          <Splash />
-        ) : endpoint ? (
+      <View style={styles.root} onLayout={onLayoutRootView}>
+        {endpoint ? (
           <TerminalScreen endpoint={endpoint} onDisconnect={onDisconnect} />
         ) : (
           <ConnectScreen
@@ -99,15 +104,5 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: colors.background,
-  },
-  splash: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.background,
-  },
-  splashMark: {
-    alignItems: "center",
-    justifyContent: "center",
   },
 });

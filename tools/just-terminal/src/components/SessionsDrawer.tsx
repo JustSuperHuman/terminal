@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { TerminalProfile, TerminalSessionSummary } from "../types";
+import { resolveQuickLaunches } from "../lib/launchers";
 import { colors, font, radius } from "../theme";
 import { BottomSheet } from "./BottomSheet";
 import { SwipeableRow } from "./SwipeableRow";
@@ -31,11 +32,6 @@ interface SessionsDrawerProps {
   onSetCwd: (cwd?: string) => void;
   onForgetCwd: (cwd: string) => void;
 }
-
-const quickLaunches: Array<{ profileId: string; label: string; flag: string; args: string[] }> = [
-  { profileId: "codex", label: "Codex", flag: "--yolo", args: ["--yolo"] },
-  { profileId: "claude", label: "Claude", flag: "--dangerously-skip-permissions", args: ["--dangerously-skip-permissions"] },
-];
 
 function shellName(session: TerminalSessionSummary) {
   return session.shell.split(/[\\/]/).pop() ?? session.shell;
@@ -85,6 +81,9 @@ export function SessionsDrawer({
   const [cwdDraft, setCwdDraft] = useState("");
   const [cwdSheetOpen, setCwdSheetOpen] = useState(false);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
+  // While a session row is being swiped to delete, lock the list's vertical
+  // scroll so the two gestures don't fight.
+  const [rowSwiping, setRowSwiping] = useState(false);
 
   useEffect(() => {
     if (!visible) {
@@ -116,16 +115,7 @@ export function SessionsDrawer({
     [profiles]
   );
 
-  const availableQuickLaunches = useMemo(
-    () =>
-      quickLaunches
-        .map((entry) => {
-          const profile = profiles.find((candidate) => candidate.id === entry.profileId);
-          return profile ? { ...entry, shell: profile.shell } : undefined;
-        })
-        .filter((entry): entry is (typeof quickLaunches)[number] & { shell: string } => Boolean(entry)),
-    [profiles]
-  );
+  const availableQuickLaunches = useMemo(() => resolveQuickLaunches(profiles), [profiles]);
 
   function commitRename(id: string) {
     if (editingTitle.trim()) {
@@ -170,7 +160,12 @@ export function SessionsDrawer({
           </Pressable>
         </View>
 
-        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          style={styles.body}
+          contentContainerStyle={styles.bodyContent}
+          keyboardShouldPersistTaps="handled"
+          scrollEnabled={!rowSwiping}
+        >
           <View style={styles.sectionHead}>
             <Text style={styles.sectionTitle}>Sessions</Text>
             <Pressable onPress={() => onCreate()} hitSlop={10} style={({ pressed }) => [styles.newBtn, pressed && styles.newBtnPressed]}>
@@ -186,7 +181,12 @@ export function SessionsDrawer({
               const unreadCount = unread[session.id] ?? 0;
               const editing = editingId === session.id;
               return (
-                <SwipeableRow key={session.id} enabled={!editing} onDelete={() => deleteSession(session.id)}>
+                <SwipeableRow
+                  key={session.id}
+                  enabled={!editing}
+                  onDelete={() => deleteSession(session.id)}
+                  onSwipeStateChange={setRowSwiping}
+                >
                   <View style={[styles.sessionRow, selected && styles.sessionRowActive]}>
                     {selected ? <View style={styles.activeBar} /> : null}
                     {editing ? (
@@ -271,7 +271,7 @@ export function SessionsDrawer({
                   style={({ pressed }) => [styles.launchRow, pressed && styles.launchRowPressed]}
                   onPress={() => onCreate({ shell: entry.shell, args: entry.args, title: entry.label })}
                 >
-                  <View style={styles.launchIcon}>{agentGlyph(entry.profileId, 18)}</View>
+                  <View style={styles.launchIcon}>{agentGlyph(entry.profileId, 24)}</View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.launchLabel} numberOfLines={1}>
                       {entry.label}
@@ -695,8 +695,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.sidebarActive,
   },
   launchIcon: {
-    width: 26,
-    height: 26,
+    width: 32,
+    height: 32,
     alignItems: "center",
     justifyContent: "center",
   },
