@@ -327,6 +327,30 @@ export const TERMINAL_HTML = `<!doctype html>
           if (out) { post({ type: "input", data: out }); }
         }
 
+        function clearCanvas() {
+          // Wipe the canvas to the background colour before a repaint. On real
+          // GPU-backed Android WebViews, term.reset() + a forced re-render don't
+          // always flush blanked cells, so the previous session's frame bleeds
+          // through when switching to a session with less content. Painting the
+          // backing store directly clears those stale pixels. No-op for a WebGL
+          // canvas (getContext('2d') returns null), where forceRepaint() covers it.
+          try {
+            var canvas = getCanvas();
+            if (!canvas) { return; }
+            var ctx = canvas.getContext("2d");
+            if (ctx) {
+              ctx.setTransform(1, 0, 0, 1, 0, 0);
+              ctx.fillStyle = theme.background;
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+            } else {
+              // ghostty-web renders via WebGL, where getContext('2d') is null.
+              // Reassigning the canvas size resets (clears) the drawing buffer
+              // without dropping GL programs/textures; forceRepaint() redraws.
+              canvas.width = canvas.width;
+            }
+          } catch (e) {}
+        }
+
         function forceRepaint() {
           // term.reset() clears the canvas, but on some GPU-backed WebView
           // canvases a bare clearRect isn't flushed until something draws — which
@@ -343,7 +367,18 @@ export const TERMINAL_HTML = `<!doctype html>
         function handle(msg) {
           if (!term) { pending.push(msg); return; }
           switch (msg.type) {
-            case "reset": try { term.reset(); } catch (e) {} resetZoom(); forceRepaint(); applyCanvasTransform(); break;
+            case "reset":
+              try {
+                term.reset();
+                // term.reset() alone leaves the previous session's cells in
+                // ghostty-web's grid, so they bleed through when switching to a
+                // session with shorter lines. Drive an explicit hard clear through
+                // the VT parser: leave the alternate screen (alt-screen TUIs like
+                // Claude/Codex), erase scrollback + the whole screen, home cursor.
+                term.write("\\x1b[?1049l\\x1b[3J\\x1b[2J\\x1b[H");
+              } catch (e) {}
+              resetZoom(); clearCanvas(); forceRepaint(); applyCanvasTransform();
+              break;
             case "write": try { term.write(msg.data); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "fit": applyLayout(); break;
             case "focus": try { term.focus(); } catch (e) {} break;

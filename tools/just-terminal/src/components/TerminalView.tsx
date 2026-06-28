@@ -415,6 +415,15 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
           <Text style={styles.reconnectText}>Reconnecting…</Text>
         </View>
       ) : null}
+
+      {socketStatus === "open" && session?.status === "exited" ? (
+        <View style={styles.exited} pointerEvents="none">
+          <View style={styles.exitedDot} />
+          <Text style={styles.exitedText}>
+            Session ended{typeof session.exitCode === "number" ? ` · exit ${session.exitCode}` : ""}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -464,6 +473,32 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
   },
   reconnectText: {
+    color: colors.mutedForeground,
+    fontSize: 11,
+    fontFamily: font.semibold,
+  },
+  exited: {
+    position: "absolute",
+    top: 10,
+    left: 10,
+    zIndex: 2,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    backgroundColor: colors.surface,
+    borderColor: colors.borderStrong,
+    borderWidth: 1,
+    borderRadius: radius.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+  },
+  exitedDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: colors.destructive,
+  },
+  exitedText: {
     color: colors.mutedForeground,
     fontSize: 11,
     fontFamily: font.semibold,
