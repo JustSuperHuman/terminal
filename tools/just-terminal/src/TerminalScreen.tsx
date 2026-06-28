@@ -347,11 +347,14 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       ? "No active session"
       : "Connecting…";
   const commandBarBottom = keyboardHeight;
-  // The terminal stays full-size when the keyboard appears (no resize). Reserve
-  // only the constant tools-bar height; the keyboard is handled by shifting the
-  // terminal view up (keyboardInset) so the input stays visible.
-  const terminalBottomInset = commandBarHeight;
-  const keyboardInset = keyboardVisible ? keyboardHeight + 28 : 0;
+  // When the keyboard opens, shrink the terminal so it sits fully ABOVE the
+  // command bar + keyboard and reflows to fewer rows. The old approach shifted
+  // the whole canvas up by the keyboard height instead, which slid the top rows
+  // up under the fixed header with no way to scroll them back (alt-screen TUIs
+  // like Claude/Codex have no scrollback). Reserving the keyboard height as
+  // bottom inset keeps every row on screen between the header and the keyboard.
+  const terminalBottomInset = commandBarHeight + (keyboardVisible ? keyboardHeight : 0);
+  const keyboardInset = 0;
 
   const handleCommandBarLayout = useCallback((event: LayoutChangeEvent) => {
     const nextHeight = Math.round(event.nativeEvent.layout.height);
