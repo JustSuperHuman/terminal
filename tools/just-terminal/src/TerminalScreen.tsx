@@ -42,7 +42,11 @@ function dockedKeyboardHeight(metrics: KeyboardMetrics | undefined | null, windo
   // occluded height ourselves. On Android the keyboard is docked at the bottom,
   // so its reported height is the full inset.
   if (Platform.OS === "android") {
-    return Math.round(metrics.height);
+    // Use the occluded span (window bottom minus the keyboard's top edge) so the
+    // command bar clears the whole keyboard including its suggestion strip, which
+    // `height` alone can omit. Fall back to height if screenY looks unset.
+    const occluded = Math.round(windowHeight - metrics.screenY);
+    return occluded > metrics.height ? occluded : Math.round(metrics.height);
   }
 
   const keyboardBottom = metrics.screenY + metrics.height;
