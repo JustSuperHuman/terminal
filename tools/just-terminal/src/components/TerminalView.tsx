@@ -16,6 +16,7 @@ const SCROLL_GESTURE_THRESHOLD = 7;
 export interface TerminalViewHandle {
   fitToViewport: () => void;
   focusTerminal: () => void;
+  blurTerminal: () => void;
   resizeForMobileInput: () => void;
 }
 
@@ -272,6 +273,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     () => ({
       fitToViewport: requestTerminalFit,
       focusTerminal: () => postToWeb({ type: "focus" }),
+      blurTerminal: () => postToWeb({ type: "blur" }),
       resizeForMobileInput: () => requestTerminalFit(),
     }),
     [postToWeb, requestTerminalFit]

@@ -347,7 +347,17 @@ export const TERMINAL_HTML = `<!doctype html>
             case "write": try { term.write(msg.data); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "fit": applyLayout(); break;
             case "focus": try { term.focus(); } catch (e) {} break;
-            case "blur": try { term.blur(); } catch (e) {} break;
+            case "blur":
+              // Dismiss the soft keyboard. ghostty's hidden textarea holds the
+              // input connection, so term.blur() alone doesn't always tear it
+              // down on Android — blur the textarea and the active element too.
+              try {
+                term.blur();
+                if (term.textarea && term.textarea.blur) { term.textarea.blur(); }
+                var activeEl = document.activeElement;
+                if (activeEl && activeEl.blur && activeEl !== document.body) { activeEl.blur(); }
+              } catch (e) {}
+              break;
             case "scrollToBottom": try { term.scrollToBottom(); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "scrollBy": scrollByDelta(Number(msg.deltaY)); break;
             case "fontSize":

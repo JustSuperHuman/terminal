@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { LayoutAnimation, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { BlurView } from "expo-blur";
 import * as Haptics from "expo-haptics";
@@ -28,6 +28,10 @@ const MIC_ERROR_BG = "rgba(245, 45, 45, 0.14)";
 const METER_TRACK = "rgba(255, 255, 255, 0.08)";
 const GLASS_RADIUS = 24;
 
+// After a hold-to-dictate ends, the transcript is armed to "submit" (Enter) once
+// this countdown elapses — tapping Retry first cancels it so you can redo/edit.
+const ARM_SECONDS = 3;
+
 type ControlKey = { label: string; value: string; accent?: boolean; a11y?: string };
 
 // Live voice-dictation state + control, supplied by `useDictation`. Omitted (or
@@ -42,7 +46,10 @@ export interface DictationControl {
   downloadPercent?: number;
   error?: string;
   modelLabel: string;
-  onToggle: () => void;
+  /** Begin capturing (press-and-hold start). */
+  onStart: () => void;
+  /** Stop capturing and flush the final phrase (release). */
+  onStop: () => void;
 }
 
 interface CommandBarProps {
@@ -90,7 +97,7 @@ function describeDictation(d: DictationControl): string {
     case "recognizing":
       return d.lastText ? `“${d.lastText}”` : "Transcribing…";
     case "listening":
-      return d.speaking ? "Listening…" : d.lastText ? `“${d.lastText}”` : "Listening — speak now";
+      return d.speaking ? "Listening…" : d.lastText ? `“${d.lastText}”` : "Listening — release to send";
     case "error":
       return d.error ?? "Dictation unavailable";
     default:
@@ -108,13 +115,103 @@ export function CommandBar({
   dictation,
 }: CommandBarProps) {
   const [expanded, setExpanded] = useState(true);
+  // Seconds left on the post-dictation auto-submit countdown; null when disarmed.
+  const [armSeconds, setArmSeconds] = useState<number | null>(null);
+  const armSubmitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // True for the duration of a press-and-hold; gates whether speech was heard.
+  const holdingRef = useRef(false);
+  const spokeRef = useRef(false);
 
   const disabled = !targetId || sessionStatus !== "running" || socketStatus !== "open";
   const showExpandedKeys = expanded && !keyboardVisible;
+  const speaking = dictation?.speaking ?? false;
+  const lastText = dictation?.lastText;
 
   useEffect(() => {
     loadKeysExpanded().then(setExpanded);
   }, []);
+
+  const clearArm = useCallback(() => {
+    if (armSubmitRef.current) {
+      clearTimeout(armSubmitRef.current);
+      armSubmitRef.current = null;
+    }
+    if (armTickRef.current) {
+      clearInterval(armTickRef.current);
+      armTickRef.current = null;
+    }
+    setArmSeconds(null);
+  }, []);
+
+  // Run the dictated command: send Enter to the active session.
+  const submitEnter = useCallback(() => {
+    if (!targetId) {
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    terminalSocket.send({ type: "input", sessionId: targetId, data: "\r" });
+  }, [targetId]);
+
+  // Arm the auto-submit: tick the visible countdown, then press Enter at zero
+  // unless Retry (or a fresh hold) cancels it first.
+  const beginArm = useCallback(() => {
+    clearArm();
+    setArmSeconds(ARM_SECONDS);
+    armTickRef.current = setInterval(() => {
+      setArmSeconds((s) => (s !== null && s > 1 ? s - 1 : s));
+    }, 1000);
+    armSubmitRef.current = setTimeout(() => {
+      clearArm();
+      submitEnter();
+    }, ARM_SECONDS * 1000);
+  }, [clearArm, submitEnter]);
+
+  const cancelArm = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+    clearArm();
+  }, [clearArm]);
+
+  // Disarm on unmount and whenever the target session can no longer take input.
+  useEffect(() => clearArm, [clearArm]);
+  useEffect(() => {
+    if (disabled) {
+      clearArm();
+    }
+  }, [disabled, clearArm]);
+
+  // While holding, remember that speech actually occurred (VAD flip or a landed
+  // phrase) so an empty hold doesn't arm a stray Enter.
+  useEffect(() => {
+    if (holdingRef.current && (speaking || lastText)) {
+      spokeRef.current = true;
+    }
+  }, [speaking, lastText]);
+
+  function micPressIn(d: DictationControl) {
+    // Need a live session to dictate into and to submit to.
+    if (disabled) {
+      return;
+    }
+    // A new hold supersedes any pending auto-submit.
+    clearArm();
+    spokeRef.current = false;
+    holdingRef.current = true;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    d.onStart();
+  }
+
+  function micPressOut(d: DictationControl) {
+    if (!holdingRef.current) {
+      return;
+    }
+    holdingRef.current = false;
+    d.onStop();
+    // Only arm the submit if we captured speech — a silent tap shouldn't run.
+    if (spokeRef.current && !disabled && targetId) {
+      beginArm();
+    }
+  }
 
   function toggleExpanded() {
     LayoutAnimation.configureNext(LayoutAnimation.create(160, "easeInEaseOut", "opacity"));
@@ -164,43 +261,38 @@ export function CommandBar({
   }
 
   function renderMic(d: DictationControl) {
-    // The mic can always be turned OFF; it's only blocked from turning ON when
-    // there's no running session to inject the transcription into.
-    const canToggle = !disabled || d.active;
+    // Press-and-hold to dictate: capture starts on press-in, stops on release.
+    // The control still works while a session is missing only to release a hold.
     const danger = d.status === "error";
     const glow = d.active && (d.status === "listening" || d.status === "recognizing");
     const iconColor = danger ? colors.destructive : d.active ? colors.primary : colors.secondaryForeground;
     return (
       <Pressable
-        onPress={() => {
-          if (!canToggle) {
-            return;
-          }
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-          d.onToggle();
-        }}
-        disabled={!canToggle}
+        onPressIn={() => micPressIn(d)}
+        onPressOut={() => micPressOut(d)}
+        hitSlop={10}
         accessibilityRole="button"
-        accessibilityLabel={d.active ? "Stop voice dictation" : "Start voice dictation"}
-        accessibilityState={{ disabled: !canToggle, selected: d.active }}
+        accessibilityLabel="Hold to dictate, release to send"
+        accessibilityState={{ disabled, selected: d.active }}
         style={({ pressed }) => [
           styles.mic,
           d.active && styles.micActive,
           // Mic glows with the live input level while listening/transcribing.
           glow && { backgroundColor: `rgba(255, 191, 0, ${0.16 + Math.min(0.5, d.level * 0.6)})` },
           danger && styles.micError,
-          !canToggle && styles.faded,
+          disabled && !d.active && styles.faded,
           pressed && styles.keyPressed,
         ]}
       >
-        <MicIcon size={16} color={iconColor} />
+        <MicIcon size={18} color={iconColor} />
       </Pressable>
     );
   }
 
   const showMic = Boolean(dictation && dictation.status !== "unsupported");
+  const arming = armSeconds !== null;
   const showDictationStrip = Boolean(
-    dictation && dictation.status !== "idle" && dictation.status !== "unsupported"
+    dictation && (arming || (dictation.status !== "idle" && dictation.status !== "unsupported"))
   );
   const meterPercent = dictation
     ? dictation.status === "downloading"
@@ -229,15 +321,37 @@ export function CommandBar({
 
       {showDictationStrip && dictation ? (
         <View style={styles.dictationStrip}>
-          <View style={styles.dictationMeterTrack}>
-            <View style={[styles.dictationMeterFill, { width: `${meterPercent}%` }]} />
-          </View>
-          <Text
-            style={[styles.dictationText, dictation.status === "error" && styles.dictationTextError]}
-            numberOfLines={1}
-          >
-            {describeDictation(dictation)}
-          </Text>
+          {arming ? (
+            <>
+              <View style={styles.armBadge}>
+                <Text style={styles.armCount}>{armSeconds}</Text>
+              </View>
+              <Text style={styles.dictationText} numberOfLines={1}>
+                Sending in {armSeconds}s…
+              </Text>
+              <Pressable
+                onPress={cancelArm}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel auto-send"
+                style={({ pressed }) => [styles.retry, pressed && styles.keyPressed]}
+              >
+                <Text style={styles.retryText}>Retry</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <View style={styles.dictationMeterTrack}>
+                <View style={[styles.dictationMeterFill, { width: `${meterPercent}%` }]} />
+              </View>
+              <Text
+                style={[styles.dictationText, dictation.status === "error" && styles.dictationTextError]}
+                numberOfLines={1}
+              >
+                {describeDictation(dictation)}
+              </Text>
+            </>
+          )}
         </View>
       ) : null}
 
@@ -342,8 +456,8 @@ const styles = StyleSheet.create({
     fontFamily: font.semibold,
   },
   mic: {
-    width: 42,
-    height: 34,
+    width: 54,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.md,
@@ -358,6 +472,34 @@ const styles = StyleSheet.create({
   micError: {
     backgroundColor: MIC_ERROR_BG,
     borderColor: ACCENT_GLASS_BORDER,
+  },
+  armBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: MIC_ACTIVE_BG,
+    borderColor: MIC_ACTIVE_BORDER,
+    borderWidth: 1,
+  },
+  armCount: {
+    color: colors.primary,
+    fontFamily: font.bold,
+    fontSize: 12,
+  },
+  retry: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: radius.pill,
+    backgroundColor: GLASS_RAISED,
+    borderColor: GLASS_RAISED_BORDER,
+    borderWidth: 1,
+  },
+  retryText: {
+    color: colors.primary,
+    fontFamily: font.semibold,
+    fontSize: 12.5,
   },
   visibleKeys: {
     flex: 1,

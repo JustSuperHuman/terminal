@@ -10,8 +10,10 @@ interface HeaderProps {
   meta: string;
   socketStatus: SocketStatus;
   canKill: boolean;
+  keyboardVisible: boolean;
   onMenu: () => void;
   onFocus: () => void;
+  onHideKeyboard: () => void;
   onNew: () => void;
   onKill: () => void;
 }
@@ -26,7 +28,18 @@ function statusInfo(status: SocketStatus): { label: string; color: string; detai
   return { label: "Idle", color: colors.mutedForeground, detail: "Not connected to a host yet." };
 }
 
-export function Header({ title, meta, socketStatus, canKill, onMenu, onFocus, onNew, onKill }: HeaderProps) {
+export function Header({
+  title,
+  meta,
+  socketStatus,
+  canKill,
+  keyboardVisible,
+  onMenu,
+  onFocus,
+  onHideKeyboard,
+  onNew,
+  onKill,
+}: HeaderProps) {
   const status = statusInfo(socketStatus);
   const insets = useSafeAreaInsets();
   const [infoOpen, setInfoOpen] = useState(false);
@@ -84,13 +97,14 @@ export function Header({ title, meta, socketStatus, canKill, onMenu, onFocus, on
 
       <View style={styles.actions}>
         <Pressable
-          onPress={onFocus}
+          onPress={keyboardVisible ? onHideKeyboard : onFocus}
           hitSlop={6}
           accessibilityRole="button"
-          accessibilityLabel="Show keyboard"
-          style={({ pressed }) => [styles.iconChip, pressed && styles.chipPressed]}
+          accessibilityLabel={keyboardVisible ? "Hide keyboard" : "Show keyboard"}
+          accessibilityState={{ selected: keyboardVisible }}
+          style={({ pressed }) => [styles.iconChip, keyboardVisible && styles.iconChipActive, pressed && styles.chipPressed]}
         >
-          <Text style={styles.iconGlyph}>⌨</Text>
+          <Text style={[styles.iconGlyph, keyboardVisible && styles.iconGlyphActive]}>⌨</Text>
         </Pressable>
         <Pressable
           onPress={onNew}
@@ -231,6 +245,13 @@ const styles = StyleSheet.create({
   iconGlyph: {
     color: colors.secondaryForeground,
     fontSize: 17,
+  },
+  iconChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  iconGlyphActive: {
+    color: colors.primaryForeground,
   },
   iconPlus: {
     color: colors.secondaryForeground,

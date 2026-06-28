@@ -20,8 +20,12 @@ type SttModule = typeof import("react-native-sherpa-onnx/stt");
 type AudioModule = typeof import("react-native-sherpa-onnx/audio");
 type RootModule = typeof import("react-native-sherpa-onnx");
 
-const sttModule = (): SttModule => require("react-native-sherpa-onnx/stt");
-const audioModule = (): AudioModule => require("react-native-sherpa-onnx/audio");
+// Metro doesn't honor this package's "exports" subpaths (./stt, ./audio) — only
+// the root resolves via "main". So the runtime require() targets the real build
+// files directly (the types above still resolve through "exports" via tsc, and
+// are erased before Metro sees them). Pinned to the v0.4.x build layout.
+const sttModule = (): SttModule => require("react-native-sherpa-onnx/lib/module/stt");
+const audioModule = (): AudioModule => require("react-native-sherpa-onnx/lib/module/audio");
 const rootModule = (): RootModule => require("react-native-sherpa-onnx");
 
 const TARGET_RATE = 16000;

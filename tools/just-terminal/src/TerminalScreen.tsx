@@ -32,14 +32,17 @@ interface TerminalScreenProps {
 }
 
 function dockedKeyboardHeight(metrics: KeyboardMetrics | undefined | null, windowHeight: number): number {
-  if (Platform.OS === "android") {
-    // Android is configured with softwareKeyboardLayoutMode="resize"; adding a
-    // manual keyboard offset here can double-count the system-resized viewport.
+  if (!metrics || metrics.height <= 0) {
     return 0;
   }
 
-  if (!metrics || metrics.height <= 0) {
-    return 0;
+  // SDK 56 (RN 0.85) renders edge-to-edge, so the soft keyboard OVERLAYS the
+  // window instead of resizing it — on Android too (the old softwareKeyboardLayoutMode
+  // "resize" is now a no-op). So we always shift content up by the keyboard's
+  // occluded height ourselves. On Android the keyboard is docked at the bottom,
+  // so its reported height is the full inset.
+  if (Platform.OS === "android") {
+    return Math.round(metrics.height);
   }
 
   const keyboardBottom = metrics.screenY + metrics.height;
@@ -347,10 +350,15 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           meta={headerMeta}
           socketStatus={socketStatus}
           canKill={Boolean(activeSession && activeSession.status === "running")}
+          keyboardVisible={keyboardVisible}
           onMenu={() => setDrawerOpen(true)}
           onFocus={() => {
             terminalRef.current?.focusTerminal();
             settleTerminalToInput();
+          }}
+          onHideKeyboard={() => {
+            Keyboard.dismiss();
+            terminalRef.current?.blurTerminal();
           }}
           onNew={() => createSession()}
           onKill={() => activeId && killSession(activeId)}
@@ -403,7 +411,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
               downloadPercent: dictation.downloadPercent,
               error: dictation.error,
               modelLabel: dictation.modelLabel,
-              onToggle: dictation.toggle,
+              onStart: dictation.start,
+              onStop: dictation.stop,
             }}
           />
         </View>
