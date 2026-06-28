@@ -18,6 +18,8 @@ export interface TerminalViewHandle {
   focusTerminal: () => void;
   blurTerminal: () => void;
   resizeForMobileInput: () => void;
+  /** Force a full all-rows repaint (e.g. after the app returns to foreground). */
+  repaint: () => void;
 }
 
 interface TerminalViewProps {
@@ -275,6 +277,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       focusTerminal: () => postToWeb({ type: "focus" }),
       blurTerminal: () => postToWeb({ type: "blur" }),
       resizeForMobileInput: () => requestTerminalFit(),
+      repaint: () => postToWeb({ type: "repaint" }),
     }),
     [postToWeb, requestTerminalFit]
   );
@@ -312,10 +315,11 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     if (!webReady || socketStatus !== "open" || !targetId) {
       return;
     }
-    if (subscribedTargetRef.current !== targetId) {
-      postToWeb({ type: "reset" });
-      subscribedTargetRef.current = targetId;
-    }
+    // Don't reset here — keep the current frame until the new session's snapshot
+    // arrives and clears+writes atomically (the snapshot handler resets right
+    // before writing), so the canvas never flashes blank on switch. The launch
+    // skeleton covers the gap until the new session paints.
+    subscribedTargetRef.current = targetId;
     postSession();
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
   }, [webReady, socketStatus, targetId, postToWeb, postSession]);

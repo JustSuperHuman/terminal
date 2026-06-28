@@ -16,6 +16,7 @@
 //                   | { type: "hostLayout", width, height }
 //                   | { type: "keyboardInset", height }  // shift view up, don't resize
 //                   | { type: "session" }  // re-fit on the active session changing
+//                   | { type: "repaint" }  // force a full all-rows redraw (foreground)
 //   Web -> Native : window.ReactNativeWebView.postMessage(JSON.stringify(...))
 //                   { type: "ready", cols, rows }
 //                   | { type: "input", data }
@@ -327,41 +328,51 @@ export const TERMINAL_HTML = `<!doctype html>
           if (out) { post({ type: "input", data: out }); }
         }
 
-        function clearCanvas() {
-          // Wipe the canvas to the background colour before a repaint. On real
-          // GPU-backed Android WebViews, term.reset() + a forced re-render don't
-          // always flush blanked cells, so the previous session's frame bleeds
-          // through when switching to a session with less content. Painting the
-          // backing store directly clears those stale pixels. No-op for a WebGL
-          // canvas (getContext('2d') returns null), where forceRepaint() covers it.
+        function forceRepaint() {
+          // Force a full, all-rows repaint. ghostty-web's continuous render loop
+          // only repaints *dirty* rows (its 2nd render arg = false); the 2D canvas
+          // persists between frames. So when the canvas content is lost — the
+          // requestAnimationFrame loop pauses while the WebView is backgrounded /
+          // hidden, or a resize wipes the backing store — the un-dirtied rows are
+          // left blank until the app happens to touch them again. Passing true as
+          // the force flag redraws every row from the wasm grid, healing that.
           try {
-            var canvas = getCanvas();
-            if (!canvas) { return; }
-            var ctx = canvas.getContext("2d");
-            if (ctx) {
-              ctx.setTransform(1, 0, 0, 1, 0, 0);
-              ctx.fillStyle = theme.background;
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
-            } else {
-              // ghostty-web renders via WebGL, where getContext('2d') is null.
-              // Reassigning the canvas size resets (clears) the drawing buffer
-              // without dropping GL programs/textures; forceRepaint() redraws.
-              canvas.width = canvas.width;
+            if (term && term.renderer && term.wasmTerm) {
+              var op = (term.scrollbarOpacity != null) ? term.scrollbarOpacity : 0;
+              term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term, op);
             }
           } catch (e) {}
         }
 
-        function forceRepaint() {
-          // term.reset() clears the canvas, but on some GPU-backed WebView
-          // canvases a bare clearRect isn't flushed until something draws — which
-          // is why a stale frame from the previous session can linger until new
-          // output arrives. Force a full synchronous repaint of the (now blank)
-          // terminal so the switch is clean immediately.
+        function hardRepaint() {
+          // Rebuild the canvas backing store + 2D context, then force a full
+          // redraw. A WebView returning from background can come back with its 2D
+          // context reset to an identity transform (the devicePixelRatio scale
+          // lost), which makes ghostty draw glyphs at the wrong scale — box-draw
+          // lines turn into dashes, block glyphs into specks, whole rows look
+          // blank. The renderer's resize() re-applies canvas.width = w*dpr +
+          // ctx.scale(dpr) + textBaseline/align (the same setup a fresh load
+          // does) without reloading the WASM or the grid, so it restores correct
+          // glyph rendering where a bare re-render cannot.
           try {
-            if (term && term.renderer && term.wasmTerm) {
-              term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
+            if (term && term.renderer && term.renderer.resize &&
+                typeof term.cols === "number" && typeof term.rows === "number") {
+              term.renderer.resize(term.cols, term.rows);
             }
           } catch (e) {}
+          applyCanvasTransform();
+          forceRepaint();
+        }
+
+        function scheduleFullRepaint() {
+          // Heal now and again across a few frames: an Android WebView can return
+          // from background a frame or two late, so a single pass can rebuild the
+          // context before the surface has actually settled. Repeating ensures the
+          // terminal ends fully painted rather than fragmented.
+          hardRepaint();
+          try { requestAnimationFrame(hardRepaint); } catch (e) {}
+          setTimeout(hardRepaint, 80);
+          setTimeout(hardRepaint, 300);
         }
 
         function handle(msg) {
@@ -377,7 +388,7 @@ export const TERMINAL_HTML = `<!doctype html>
                 // Claude/Codex), erase scrollback + the whole screen, home cursor.
                 term.write("\\x1b[?1049l\\x1b[3J\\x1b[2J\\x1b[H");
               } catch (e) {}
-              resetZoom(); clearCanvas(); forceRepaint(); applyCanvasTransform();
+              resetZoom(); forceRepaint(); applyCanvasTransform();
               break;
             case "write": try { term.write(msg.data); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "fit": applyLayout(); break;
@@ -412,6 +423,11 @@ export const TERMINAL_HTML = `<!doctype html>
             }
             case "session":
               applyLayout();
+              break;
+            case "repaint":
+              // App returned to foreground / surface became visible again — heal
+              // any rows the dirty-only render loop left blank while we were away.
+              scheduleFullRepaint();
               break;
           }
         }
@@ -507,6 +523,17 @@ export const TERMINAL_HTML = `<!doctype html>
             if (window.visualViewport) {
               window.visualViewport.addEventListener("resize", function () { applyLayout(); });
             }
+
+            // ghostty-web has no visibility handling of its own: its rAF render
+            // loop pauses while the WebView is hidden/backgrounded and only ever
+            // repaints dirty rows, so the surface can come back fragmented (mostly
+            // blank with stray cells from the last frame). Force a full repaint
+            // whenever the page becomes visible / regains focus again.
+            document.addEventListener("visibilitychange", function () {
+              if (document.visibilityState === "visible") { scheduleFullRepaint(); }
+            });
+            window.addEventListener("pageshow", scheduleFullRepaint);
+            window.addEventListener("focus", scheduleFullRepaint);
 
             ready = true;
             for (var i = 0; i < pending.length; i++) { handle(pending[i]); }

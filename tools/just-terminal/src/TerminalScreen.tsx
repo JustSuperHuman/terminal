@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   AppState,
   Keyboard,
   Platform,
   StyleSheet,
+  Text,
   type KeyboardEvent,
   type KeyboardMetrics,
   type LayoutChangeEvent,
@@ -24,7 +26,7 @@ import type { ServerEndpoint } from "./lib/endpoint";
 import { terminalSocket, type SocketStatus } from "./lib/socket";
 import { forgetCwd, loadRecentCwds, rememberCwd } from "./lib/storage";
 import type { ServerInfo, ServerMessage, TerminalProfile, TerminalSessionSummary } from "./types";
-import { colors } from "./theme";
+import { colors, font } from "./theme";
 
 interface TerminalScreenProps {
   endpoint: ServerEndpoint;
@@ -101,6 +103,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const [commandBarHeight, setCommandBarHeight] = useState(0);
   // True while the session switcher is being scrubbed (live terminal preview).
   const [scrubbing, setScrubbing] = useState(false);
+  // True while a new session is being created — the host can take a few seconds
+  // to spawn/bridge a terminal, so we show a clear "starting" overlay.
+  const [creating, setCreating] = useState(false);
   const activeIdRef = useRef<string | undefined>(activeId);
   const terminalRef = useRef<TerminalViewHandle | null>(null);
   const blurTargetRef = useRef<View | null>(null);
@@ -188,6 +193,10 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       if (state === "active") {
         requestAnimationFrame(syncKeyboardMetrics);
         settleTerminalToInput();
+        // ghostty-web's render loop only repaints dirty rows and pauses while the
+        // app is backgrounded, so the terminal can return fragmented (mostly
+        // blank). Force a full repaint once the surface is back.
+        requestAnimationFrame(() => terminalRef.current?.repaint());
       }
     });
 
@@ -286,6 +295,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     async (spec?: CreateSpec) => {
       setDrawerOpen(false);
       const options = { ...(spec ?? {}), ...(activeCwd ? { cwd: activeCwd } : {}) };
+      setCreating(true);
       try {
         const session = await createSessionApi(endpoint, options);
         upsertSession(session);
@@ -295,6 +305,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         }
       } catch {
         terminalSocket.send({ type: "create", ...options });
+      } finally {
+        setCreating(false);
       }
     },
     [endpoint, selectSession, activeCwd, upsertSession]
@@ -420,6 +432,13 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
             }}
           />
         </View>
+
+        {creating ? (
+          <View style={styles.creatingOverlay}>
+            <ActivityIndicator color={colors.primary} size="large" />
+            <Text style={styles.creatingText}>Starting session…</Text>
+          </View>
+        ) : null}
       </View>
 
       <SessionsDrawer
@@ -465,5 +484,22 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 0,
     right: 0,
+  },
+  creatingOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 14,
+    backgroundColor: colors.overlay,
+  },
+  creatingText: {
+    color: colors.foreground,
+    fontSize: 14,
+    fontFamily: font.semibold,
   },
 });

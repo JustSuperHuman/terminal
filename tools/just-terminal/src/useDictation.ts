@@ -22,19 +22,21 @@ export type DictationUiStatus =
   | "recognizing"
   | "error";
 
-// Statuses where the engine is engaged (so a toggle should stand it down).
-const BUSY: DictationUiStatus[] = ["checking", "downloading", "loading", "listening", "recognizing"];
+// Statuses where the engine/provisioning is engaged (drives the `active` flag).
+const BUSY: DictationUiStatus[] = ["downloading", "loading", "listening", "recognizing"];
+// Capture (press-and-hold listening) phases — these stand down on release.
+const CAPTURING: DictationUiStatus[] = ["loading", "listening", "recognizing"];
 
 export interface UseDictationParams {
   /** Called with each finalized phrase (already trimmed, non-empty). */
   onText: (text: string) => void;
-  /** When false, dictation is forced off (e.g. no running session). */
+  /** When false, capture is forced off (e.g. no running session). */
   enabled?: boolean;
 }
 
 export interface UseDictationResult {
   status: DictationUiStatus;
-  /** Engine engaged (busy or actively listening/recognizing). */
+  /** Engine/provisioning engaged (busy or actively listening/recognizing). */
   active: boolean;
   /** Mic level 0..1 for a meter. */
   level: number;
@@ -50,10 +52,14 @@ export interface UseDictationResult {
 }
 
 /**
- * Drives on-device voice dictation: probes native availability, lazily downloads
- * the Parakeet model on first use, then runs the capture/VAD/transcribe engine
- * and forwards each recognized phrase to `onText`. Safe in Expo Go — it simply
+ * Drives on-device voice dictation: probes native availability, downloads the
+ * Parakeet model on first use, then runs the capture/VAD/transcribe engine and
+ * forwards each recognized phrase to `onText`. Safe in Expo Go — it simply
  * reports `unsupported` there.
+ *
+ * The one-time ~660MB model download is intentionally DECOUPLED from the mic
+ * hold: a press kicks it off and it runs to completion regardless of release.
+ * Only the live capture (listening) is tied to holding the mic.
  */
 export function useDictation({ onText, enabled = true }: UseDictationParams): UseDictationResult {
   const [status, setStatus] = useState<DictationUiStatus>("idle");
@@ -67,19 +73,30 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
   const downloadRef = useRef<ModelDownloadHandle | null>(null);
   const onTextRef = useRef(onText);
   const levelTsRef = useRef(0);
-  // Bumped on every start/stop so stale async flows abandon themselves.
-  const tokenRef = useRef(0);
+  // Press-and-hold capture lifecycle: bumped on each start/stop so a capture
+  // released mid-load tears itself back down. The model download is NOT guarded
+  // by this — it runs to completion independent of press/release.
+  const captureTokenRef = useRef(0);
+  // null = not yet checked; true/false once known.
+  const modelReadyRef = useRef<boolean | null>(null);
 
   useEffect(() => {
     onTextRef.current = onText;
   }, [onText]);
 
-  // Probe once; flip to `unsupported` when there's no native module (Expo Go).
+  // Probe native support (false in Expo Go) and prime model readiness.
   useEffect(() => {
     let mounted = true;
-    isDictationSupported().then((ok) => {
-      if (mounted && !ok) {
+    isDictationSupported().then(async (ok) => {
+      if (!mounted) return;
+      if (!ok) {
         setStatus("unsupported");
+        return;
+      }
+      try {
+        modelReadyRef.current = await isModelReady();
+      } catch {
+        modelReadyRef.current = false;
       }
     });
     return () => {
@@ -94,7 +111,8 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
           if (engineStatus === "starting") setStatus("loading");
           else if (engineStatus === "listening") setStatus("listening");
           else if (engineStatus === "recognizing") setStatus("recognizing");
-          else if (engineStatus === "idle") setStatus("idle");
+          // Don't clobber a download that's running in the background.
+          else if (engineStatus === "idle") setStatus((cur) => (cur === "downloading" ? cur : "idle"));
           else if (engineStatus === "error") setStatus("error");
         },
         onLevel: (value) => {
@@ -119,87 +137,117 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
     return engineRef.current;
   }, []);
 
-  const stop = useCallback(() => {
-    tokenRef.current += 1;
-    downloadRef.current?.cancel();
-    downloadRef.current = null;
-    setDownloadPercent(undefined);
-    void engineRef.current?.stop();
-    setSpeaking(false);
-    setLevel(0);
-    setStatus((current) => (current === "unsupported" ? current : "idle"));
-  }, []);
-
-  const start = useCallback(() => {
-    if (status === "unsupported") {
+  // Kick off the one-time model download (no-op if already downloading/ready).
+  // Runs to completion regardless of the mic hold — a single tap is enough.
+  const ensureModelDownload = useCallback(() => {
+    if (downloadRef.current || modelReadyRef.current) {
       return;
     }
-    const token = ++tokenRef.current;
     setError(undefined);
+    setStatus("downloading");
+    setDownloadPercent(0);
+    const handle = downloadModel((progress) => {
+      if (downloadRef.current === handle) {
+        setDownloadPercent(progress.percent);
+      }
+    });
+    downloadRef.current = handle;
+    handle.promise.then(
+      () => {
+        if (downloadRef.current !== handle) return;
+        downloadRef.current = null;
+        modelReadyRef.current = true;
+        setDownloadPercent(undefined);
+        setStatus((cur) => (cur === "downloading" ? "idle" : cur));
+      },
+      (err: unknown) => {
+        if (downloadRef.current === handle) downloadRef.current = null;
+        setDownloadPercent(undefined);
+        if (err instanceof DictationCancelled) {
+          setStatus((cur) => (cur === "downloading" ? "idle" : cur));
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Model download failed.");
+        setStatus("error");
+      }
+    );
+  }, []);
 
+  // Begin live capture for a press-and-hold session (model must be ready).
+  // Guarded by `token` so releasing during the load tears the engine down.
+  const beginCapture = useCallback(
+    (token: number) => {
+      setError(undefined);
+      setStatus("loading");
+      void (async () => {
+        await getEngine().start(modelDir());
+        if (token !== captureTokenRef.current) {
+          void getEngine().stop();
+        }
+      })();
+    },
+    [getEngine]
+  );
+
+  const start = useCallback(() => {
+    if (status === "unsupported" || status === "downloading") {
+      return;
+    }
+    const token = ++captureTokenRef.current;
+
+    if (modelReadyRef.current === true) {
+      beginCapture(token);
+      return;
+    }
+    if (modelReadyRef.current === false) {
+      ensureModelDownload();
+      return;
+    }
+    // Readiness not resolved yet (first interaction) — check, then act.
     void (async () => {
-      setStatus("checking");
       let ready = false;
       try {
         ready = await isModelReady();
       } catch {
         ready = false;
       }
-      if (token !== tokenRef.current) return;
-
-      if (!ready) {
-        setStatus("downloading");
-        setDownloadPercent(0);
-        const handle = downloadModel((progress) => {
-          if (token === tokenRef.current) {
-            setDownloadPercent(progress.percent);
-          }
-        });
-        downloadRef.current = handle;
-        try {
-          await handle.promise;
-        } catch (err) {
-          if (downloadRef.current === handle) downloadRef.current = null;
-          if (err instanceof DictationCancelled || token !== tokenRef.current) {
-            return;
-          }
-          setError(err instanceof Error ? err.message : "Model download failed.");
-          setStatus("error");
-          return;
-        }
-        if (downloadRef.current === handle) downloadRef.current = null;
-        setDownloadPercent(undefined);
-      }
-      if (token !== tokenRef.current) return;
-
-      setStatus("loading");
-      await getEngine().start(modelDir());
-      // Stand down if dictation was toggled off while the model was loading.
-      if (token !== tokenRef.current) {
-        void getEngine().stop();
+      modelReadyRef.current = ready;
+      if (ready) {
+        if (token === captureTokenRef.current) beginCapture(token);
+      } else {
+        ensureModelDownload();
       }
     })();
-  }, [status, getEngine]);
+  }, [status, beginCapture, ensureModelDownload]);
+
+  const stop = useCallback(() => {
+    // Stop press-and-hold capture only. NEVER cancel an in-flight model download
+    // — it keeps running so a single tap downloads the whole model.
+    captureTokenRef.current += 1;
+    void engineRef.current?.stop();
+    setSpeaking(false);
+    setLevel(0);
+    setStatus((cur) => (CAPTURING.includes(cur) ? "idle" : cur));
+  }, []);
 
   const toggle = useCallback(() => {
-    if (status === "unsupported") {
-      return;
-    }
-    if (BUSY.includes(status)) {
+    if (status === "unsupported") return;
+    if (CAPTURING.includes(status)) {
       stop();
     } else {
       start();
     }
   }, [status, start, stop]);
 
-  // Force off when the consumer disables dictation.
+  // Force capture off when the consumer disables dictation. A download in flight
+  // is left running — it doesn't need a session.
   useEffect(() => {
-    if (!enabled && BUSY.includes(status)) {
+    if (!enabled && CAPTURING.includes(status)) {
       stop();
     }
   }, [enabled, status, stop]);
 
-  // Release the model + mic on unmount.
+  // Release the model + mic on unmount (and abort an in-flight download).
   useEffect(() => {
     return () => {
       downloadRef.current?.cancel();
