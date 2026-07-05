@@ -144,15 +144,28 @@ export class BridgeRegistry extends EventEmitter {
     send(session.socket, { type: "input", sessionId: id, data });
   }
 
-  resize(id: string, _cols: number, _rows: number): void {
+  resize(id: string, cols: number, rows: number): void {
     const session = this.requireSession(id);
     if (session.summary.status !== "running") {
       return;
     }
 
-    // A bridged session is already hosted by a real terminal window. Browser
-    // and mobile clients must not resize that child PTY, or the host tab
-    // reflows to the smallest attached viewport.
+    const nextCols = clampCols(cols);
+    const nextRows = clampRows(rows);
+
+    if (session.summary.cols === nextCols && session.summary.rows === nextRows) {
+      return;
+    }
+
+    session.summary = {
+      ...session.summary,
+      cols: nextCols,
+      rows: nextRows,
+      updatedAt: new Date().toISOString()
+    };
+    session.headless.resize(nextCols, nextRows);
+    send(session.socket, { type: "resize", sessionId: id, cols: nextCols, rows: nextRows });
+    this.emit("session", session.summary);
   }
 
   kill(id: string): void {
@@ -194,10 +207,46 @@ export class BridgeRegistry extends EventEmitter {
       case "resize":
         this.resizeFromBridge(message.sessionId, message.cols, message.rows);
         break;
+      case "title":
+        this.setTitle(message.sessionId, message.title);
+        break;
+      case "project":
+        this.assignProject(message.sessionId, message.projectId);
+        break;
       case "exit":
         this.exit(message.sessionId, message.exitCode, message.signal);
         break;
     }
+  }
+
+  private setTitle(id: string, title: string): void {
+    const session = this.sessions.get(id);
+    const nextTitle = cleanTitle(title);
+    if (!session || !nextTitle || session.summary.title === nextTitle) {
+      return;
+    }
+
+    session.summary = {
+      ...session.summary,
+      title: nextTitle,
+      updatedAt: new Date().toISOString()
+    };
+    this.emit("session", session.summary);
+  }
+
+  assignProject(id: string, projectId?: string): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session || session.summary.projectId === projectId) {
+      return session?.summary;
+    }
+
+    session.summary = {
+      ...session.summary,
+      projectId,
+      updatedAt: new Date().toISOString()
+    };
+    this.emit("session", session.summary);
+    return session.summary;
   }
 
   private register(socket: WebSocket, summary: TerminalSessionSummary): void {
@@ -362,6 +411,21 @@ export class BridgeRegistry extends EventEmitter {
       session: session.summary
     });
     this.emit("sessions", this.listSessions());
+
+    // The session list should mirror live terminal tabs: drop exited
+    // sessions after a grace period. The grace period lets a restarting
+    // terminal re-register under the same id (which flips it back to
+    // running) without losing its transcript.
+    const timer = setTimeout(() => {
+      const current = this.sessions.get(id);
+      if (current && current.summary.status === "exited") {
+        this.sessions.delete(id);
+        this.socketSessions.get(current.socket)?.delete(id);
+        current.headless.dispose();
+        this.emit("sessions", this.listSessions());
+      }
+    }, 30_000);
+    timer.unref?.();
   }
 
   private closeSocketSessions(socket: WebSocket): void {

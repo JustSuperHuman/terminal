@@ -11,17 +11,17 @@
 //   Native -> Web : window.onHostMessage(jsonString)
 //                   { type: "reset" } | { type: "write", data }
 //                   | { type: "fit" } | { type: "focus" } | { type: "blur" }
-//                   | { type: "scrollToBottom" } | { type: "scrollBy", deltaY }
+//                   | { type: "keepFocus", enabled }  // hold the soft keyboard open
+
+//                   | { type: "scrollToBottom" }
+//                   | { type: "scrollBy", deltaY }  // programmatic scroll (touch scroll/pan is handled in-page)
 //                   | { type: "fontSize", value }
 //                   | { type: "hostLayout", width, height }
-//                   | { type: "keyboardInset", height }  // shift view up, don't resize
-//                   | { type: "session" }  // re-fit on the active session changing
+//                   | { type: "session", cols, rows }  // mirror the host grid size
 //                   | { type: "repaint" }  // force a full all-rows redraw (foreground)
 //   Web -> Native : window.ReactNativeWebView.postMessage(JSON.stringify(...))
 //                   { type: "ready", cols, rows }
 //                   | { type: "input", data }
-//                   | { type: "resize", cols, rows }  // fit mode only
-//                   | { type: "viewport", cols, rows }
 //                   | { type: "scroll", atBottom, canScroll }
 //                   | { type: "log", message }
 
@@ -84,10 +84,18 @@ export const TERMINAL_HTML = `<!doctype html>
         var pending = [];
         var ready = false;
         var term = null;
-        var fit = null;
         var hostW = null;
         var hostH = null;
         var scrollAccum = 0;
+        // While true, the host wants the soft keyboard held open: any blur of
+        // ghostty's hidden textarea (Enter, taps on native chrome, IME quirks)
+        // is answered with an immediate refocus. Toggled by "keepFocus".
+        var keepFocus = false;
+        // Desired ghostty grid size = the host session's cols/rows. We mirror the
+        // host (the desktop owns the real terminal width) instead of reflowing the
+        // PTY to the phone, then scale the whole grid to fit the screen.
+        var gridCols = null;
+        var gridRows = null;
 
         // User pinch-zoom / two-finger pan: zoom into the fit view and pan around
         // to see the rest of the session. baseScale stays 1 (always fit); zoom is
@@ -96,7 +104,6 @@ export const TERMINAL_HTML = `<!doctype html>
         var zoom = 1;
         var panX = 0;
         var panY = 0;
-        var kbInset = 0;   // px the keyboard occludes at the bottom; shifts the view up
         var ZOOM_MIN = 1;
         var ZOOM_MAX = 6;
 
@@ -109,10 +116,14 @@ export const TERMINAL_HTML = `<!doctype html>
           var a = availSize();
           var contentW = canvas.offsetWidth * s;
           var contentH = canvas.offsetHeight * s;
-          var minX = Math.min(0, a.w - contentW);
-          var minY = Math.min(0, a.h - contentH);
-          panX = Math.max(minX, Math.min(0, panX));
-          panY = Math.max(minY, Math.min(0, panY));
+          // Horizontal: center when the scaled content is narrower than the
+          // viewport; otherwise clamp so an edge can't be dragged past the border.
+          if (contentW <= a.w) { panX = (a.w - contentW) / 2; }
+          else { panX = Math.max(a.w - contentW, Math.min(0, panX)); }
+          // Vertical: top-align when it fits (a terminal grows downward); clamp
+          // when zoomed in past the viewport.
+          if (contentH <= a.h) { panY = 0; }
+          else { panY = Math.max(a.h - contentH, Math.min(0, panY)); }
         }
 
         function applyCanvasTransform() {
@@ -120,14 +131,10 @@ export const TERMINAL_HTML = `<!doctype html>
           if (!canvas) { return; }
           clampPan();
           var s = baseScale * zoom;
-          // Shift the whole view up by the keyboard inset so the bottom (the
-          // active prompt / TUI input) sits above the keyboard, instead of
-          // shrinking the terminal to make room.
-          var ty = panY - kbInset;
           canvas.style.transformOrigin = "0 0";
           canvas.style.transform =
-            (s !== 1 || panX !== 0 || ty !== 0)
-              ? "translate(" + panX + "px," + ty + "px) scale(" + s + ")"
+            (s !== 1 || panX !== 0 || panY !== 0)
+              ? "translate(" + panX + "px," + panY + "px) scale(" + s + ")"
               : "";
         }
 
@@ -137,17 +144,46 @@ export const TERMINAL_HTML = `<!doctype html>
           return Math.sqrt(dx * dx + dy * dy);
         }
 
-        // Two-finger pinch-zoom + pan. Single-finger gestures are owned by the
-        // native side (scroll / session switch / tap-to-focus); two-finger ones
-        // are left for this page (the native PanResponder ignores multi-touch).
+        // Does the scaled canvas overflow the viewport on either axis (i.e. is
+        // there anywhere to pan)? True when zoomed in OR when the readability
+        // floor made baseScale alone overflow the viewport.
+        function contentOverflow() {
+          var canvas = getCanvas();
+          if (!canvas) { return { x: false, y: false }; }
+          var s = baseScale * zoom;
+          var a = availSize();
+          return {
+            x: canvas.offsetWidth * s > a.w + 1,
+            y: canvas.offsetHeight * s > a.h + 1,
+          };
+        }
+
+        // Gesture ownership: this page owns ALL terminal touch gestures. (The
+        // native SwipeBar above the command bar owns session switching only —
+        // it never scrolls the terminal.)
+        //   - two fingers: pinch-zoom + pan
+        //   - one finger, mostly vertical: scroll gesture anywhere on the
+        //     surface (scrollback viewport / SGR wheel / damped arrows per
+        //     screen mode) — like scrolling a normal page. While pinch-zoomed
+        //     in, vertical drags pan instead (the drag is how you roam).
+        //   - one finger, mostly horizontal: pans the canvas sideways when the
+        //     floored/zoomed content overflows the viewport; inert otherwise
+        //   - a tap (under the slop) is none of these: it must fall through so
+        //     it lands on ghostty's stretched textarea and raises the keyboard.
+        var TAP_SLOP_PX = 8;
+
         function installGestures() {
           var root = document.getElementById("root");
           if (!root || root.__gesturesInstalled) { return; }
           root.__gesturesInstalled = true;
           var pinch = null;
+          // One-finger tracker. mode: "pending" until movement passes the tap
+          // slop (so plain taps reach the textarea), then "pan" or "scroll".
+          var single = null;
 
           root.addEventListener("touchstart", function (e) {
             if (e.touches.length === 2) {
+              single = null; // a second finger promotes the gesture to pinch
               var rect = root.getBoundingClientRect();
               var t0 = e.touches[0], t1 = e.touches[1];
               pinch = {
@@ -157,36 +193,90 @@ export const TERMINAL_HTML = `<!doctype html>
                 zoom: zoom, panX: panX, panY: panY,
               };
               e.preventDefault();
+              return;
+            }
+            if (e.touches.length === 1 && !pinch) {
+              var t = e.touches[0];
+              single = {
+                id: t.identifier,
+                startX: t.clientX, startY: t.clientY,
+                lastX: t.clientX, lastY: t.clientY,
+                mode: "pending",
+              };
+              // No preventDefault: a tap must stay a tap (keyboard focus).
             }
           }, { passive: false, capture: true });
 
           root.addEventListener("touchmove", function (e) {
-            if (!pinch || e.touches.length !== 2) { return; }
-            var rect = root.getBoundingClientRect();
-            var t0 = e.touches[0], t1 = e.touches[1];
-            var newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinch.zoom * (pointDist(t0, t1) / pinch.dist)));
-            var canvas = getCanvas();
-            var originX = canvas ? canvas.offsetLeft : 0;
-            var originY = canvas ? canvas.offsetTop : 0;
-            var fx = pinch.mx - originX, fy = pinch.my - originY;
-            var s0 = baseScale * pinch.zoom, s1 = baseScale * newZoom;
-            var ratioS = s0 ? s1 / s0 : 1;
-            var curMx = (t0.clientX + t1.clientX) / 2 - rect.left;
-            var curMy = (t0.clientY + t1.clientY) / 2 - rect.top;
-            // Keep the pinch focal point steady while zooming, then follow the
-            // two-finger drag to pan.
-            panX = (fx - ratioS * (fx - pinch.panX)) + (curMx - pinch.mx);
-            panY = (fy - ratioS * (fy - pinch.panY)) + (curMy - pinch.my);
-            zoom = newZoom;
-            applyCanvasTransform();
+            if (pinch && e.touches.length === 2) {
+              var rect = root.getBoundingClientRect();
+              var t0 = e.touches[0], t1 = e.touches[1];
+              var newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinch.zoom * (pointDist(t0, t1) / pinch.dist)));
+              var canvas = getCanvas();
+              var originX = canvas ? canvas.offsetLeft : 0;
+              var originY = canvas ? canvas.offsetTop : 0;
+              var fx = pinch.mx - originX, fy = pinch.my - originY;
+              var s0 = baseScale * pinch.zoom, s1 = baseScale * newZoom;
+              var ratioS = s0 ? s1 / s0 : 1;
+              var curMx = (t0.clientX + t1.clientX) / 2 - rect.left;
+              var curMy = (t0.clientY + t1.clientY) / 2 - rect.top;
+              // Keep the pinch focal point steady while zooming, then follow
+              // the two-finger drag to pan.
+              panX = (fx - ratioS * (fx - pinch.panX)) + (curMx - pinch.mx);
+              panY = (fy - ratioS * (fy - pinch.panY)) + (curMy - pinch.my);
+              zoom = newZoom;
+              applyCanvasTransform();
+              e.preventDefault();
+              return;
+            }
+            if (!single || e.touches.length !== 1) { return; }
+            var t2 = e.touches[0];
+            if (t2.identifier !== single.id) { return; }
+            if (single.mode === "pending") {
+              var mx2 = t2.clientX - single.startX;
+              var my2 = t2.clientY - single.startY;
+              if (mx2 * mx2 + my2 * my2 < TAP_SLOP_PX * TAP_SLOP_PX) { return; }
+              var o = contentOverflow();
+              if (Math.abs(my2) >= Math.abs(mx2)) {
+                // Vertical drags scroll the terminal from anywhere, like a
+                // normal page — except while pinch-zoomed in, where the drag
+                // roams the zoomed canvas instead.
+                single.mode = (zoom > 1 && o.y) ? "pan" : "scroll";
+              } else {
+                // Horizontal drags only make sense as pans, and only when the
+                // (floored/zoomed) content actually overflows sideways.
+                single.mode = o.x ? "pan" : "scroll";
+              }
+            }
+            var dx = t2.clientX - single.lastX;
+            var dy = t2.clientY - single.lastY;
+            single.lastX = t2.clientX;
+            single.lastY = t2.clientY;
+            if (single.mode === "pan") {
+              panX += dx;
+              panY += dy;
+              applyCanvasTransform(); // clamps to content bounds
+            } else {
+              // deltaY > 0 means "show newer": dragging the finger up pulls
+              // newer content into view (same convention as scrollByDelta).
+              scrollByDelta(-dy);
+            }
             e.preventDefault();
           }, { passive: false, capture: true });
 
-          var endPinch = function (e) {
+          var endTouch = function (e) {
             if (!e.touches || e.touches.length < 2) { pinch = null; }
+            if (!e.touches || e.touches.length === 0) { single = null; return; }
+            if (single) {
+              var alive = false;
+              for (var i = 0; i < e.touches.length; i++) {
+                if (e.touches[i].identifier === single.id) { alive = true; break; }
+              }
+              if (!alive) { single = null; }
+            }
           };
-          root.addEventListener("touchend", endPinch, { passive: true, capture: true });
-          root.addEventListener("touchcancel", endPinch, { passive: true, capture: true });
+          root.addEventListener("touchend", endTouch, { passive: true, capture: true });
+          root.addEventListener("touchcancel", endTouch, { passive: true, capture: true });
         }
 
         function post(obj) {
@@ -246,36 +336,70 @@ export const TERMINAL_HTML = `<!doctype html>
           };
         }
 
-        function reportViewport() {
-          // Readable fit size for the current host layout (used by the native
-          // side when this view is the sizing authority).
-          var a = availSize();
-          var m = metrics();
-          var cols = clampDimension(Math.floor(a.w / m.width), 20, 400);
-          var rows = clampDimension(Math.floor(a.h / m.height), 8, 200);
-          if (cols && rows) { post({ type: "viewport", cols: cols, rows: rows }); }
-        }
-
         function applyHostLayoutStyle() {
-          // Size #root to the host-provided box so FitAddon (which measures
-          // #root) and mirror scaling both use the real available area — e.g.
-          // shrinking when the keyboard reduces the viewport.
+          // Size #root to the host-provided box so mirror scaling uses the real
+          // available area — e.g. shrinking when the keyboard reduces the
+          // viewport.
           var root = document.getElementById("root");
           root.style.width = hostW ? hostW + "px" : "100%";
           root.style.height = hostH ? hostH + "px" : "100%";
         }
 
+        function syncGrid() {
+          // Mirror the host session's grid. The desktop owns the real terminal
+          // width, and the snapshot/output bytes are laid out for that width — so
+          // ghostty must render at exactly that many cols/rows or everything
+          // re-wraps. We do NOT reflow the PTY down to the phone's width.
+          if (!term || !gridCols || !gridRows) { return; }
+          if (term.cols !== gridCols || term.rows !== gridRows) {
+            try { term.resize(gridCols, gridRows); } catch (e) {}
+          }
+        }
+
+        // Readability floor: never let a very wide host grid scale so far down
+        // that the effective glyph size (fontSize * scale) drops below this.
+        // When the floor wins over fit, the canvas overflows the viewport and
+        // clampPan gives it panning slack — exactly like zoom overflow.
+        var MIN_EFFECTIVE_FONT_PX = 10;
+
+        function currentFontSize() {
+          var fs = 0;
+          try { fs = term && term.options ? Number(term.options.fontSize) : 0; } catch (e) {}
+          return fs > 0 ? fs : fontSizeForWidth();
+        }
+
+        function minReadableScale() {
+          return Math.min(1, MIN_EFFECTIVE_FONT_PX / currentFontSize());
+        }
+
+        function recomputeBaseScale() {
+          // Scale the whole grid to fit the viewport on both axes, but never
+          // upscale past 1:1 (a small grid renders native) and never shrink
+          // below the readability floor (a huge grid overflows and pans
+          // instead). Pinch-zoom goes above this to read; pan roams whenever
+          // the content overflows.
+          var canvas = getCanvas();
+          if (!canvas) { baseScale = 1; return; }
+          var cw = canvas.offsetWidth, ch = canvas.offsetHeight;
+          var a = availSize();
+          var sx = cw > 0 ? a.w / cw : 1;
+          var sy = ch > 0 ? a.h / ch : 1;
+          var fit = Math.min(1, sx, sy);
+          baseScale = Math.min(1, Math.max(fit, minReadableScale()));
+          if (!(baseScale > 0) || !isFinite(baseScale)) { baseScale = 1; }
+        }
+
         function applyLayout() {
           if (!term) { return; }
           applyHostLayoutStyle();
-          // Always fit: reflow the terminal to the host box. FitAddon's onResize is
-          // the single authority for the size we forward. Use pinch-zoom + pan to
-          // inspect more than fits.
-          if (fit) {
-            try { fit.fit(); } catch (e) {}
-          }
-          baseScale = 1;
+          syncGrid();
+          recomputeBaseScale();
           applyCanvasTransform();
+          // Layout changes (keyboard open/close, cold-start settling) can land
+          // while the canvas surface was just wiped; the dirty-row render loop
+          // would then leave everything blank until fresh output arrives, so
+          // always follow layout with a full redraw from the wasm grid.
+          forceRepaint();
           setTimeout(reportScroll, 0);
         }
 
@@ -300,32 +424,56 @@ export const TERMINAL_HTML = `<!doctype html>
           try { alt = term.wasmTerm.isAlternateScreen && term.wasmTerm.isAlternateScreen(); } catch (e) {}
           try { mouse = term.wasmTerm.hasMouseTracking && term.wasmTerm.hasMouseTracking(); } catch (e) {}
 
-          if (mouse) { sendDiscrete(deltaY, "mouse"); return; }
-          if (alt) { sendDiscrete(deltaY, "arrow"); return; }
+          if (mouse) { sendWheel(deltaY); return; }
+          if (alt) { sendArrows(deltaY); return; }
 
           // Normal screen: move the scrollback viewport directly (smooth).
           try { term.scrollLines(deltaY / lineHeight()); } catch (e) {}
           reportScroll();
         }
 
-        function sendDiscrete(deltaY, kind) {
+        // Mouse-tracking apps (Claude Code with mouse reporting on) get real SGR
+        // wheel events; they know how to scroll themselves.
+        function sendWheel(deltaY) {
           scrollAccum += deltaY;
           var lh = lineHeight();
           var steps = Math.trunc(scrollAccum / lh);
           if (steps === 0) { return; }
           scrollAccum -= steps * lh;
           var n = Math.min(Math.abs(steps), 8);
+          var btn = steps > 0 ? 65 : 64; // SGR wheel down / up
+          var col = Math.max(1, Math.min(term.cols, Math.floor(term.cols / 2) + 1));
+          var row = Math.max(1, Math.min(term.rows, Math.floor(term.rows / 2) + 1));
           var out = "";
-          if (kind === "arrow") {
-            var seq = steps > 0 ? "\\x1b[B" : "\\x1b[A";
-            for (var i = 0; i < n; i++) { out += seq; }
-          } else {
-            var btn = steps > 0 ? 65 : 64; // SGR wheel down / up
-            var col = Math.max(1, Math.min(term.cols, Math.floor(term.cols / 2) + 1));
-            var row = Math.max(1, Math.min(term.rows, Math.floor(term.rows / 2) + 1));
-            for (var j = 0; j < n; j++) { out += "\\x1b[<" + btn + ";" + col + ";" + row + "M"; }
-          }
-          if (out) { post({ type: "input", data: out }); }
+          for (var j = 0; j < n; j++) { out += "\\x1b[<" + btn + ";" + col + ";" + row + "M"; }
+          post({ type: "input", data: out });
+        }
+
+        // Alt-screen apps WITHOUT mouse tracking (Claude/Codex prompt views,
+        // menus): bare arrow keys move their selection / history, so pan
+        // gestures must be conservative — heavily rate-limited, one arrow per
+        // 24 logical px of accumulated pan, at most 3 arrows per message. The
+        // sub-step remainder carries over; whole steps beyond the cap are
+        // dropped so a fast fling can't queue a burst of stray arrows.
+        var ARROW_STEP_PX = 24;
+        var ARROW_MAX_STEPS = 3;
+        var ARROW_MIN_INTERVAL_MS = 120;
+        var arrowAccum = 0;
+        var lastArrowAt = 0;
+
+        function sendArrows(deltaY) {
+          arrowAccum += deltaY;
+          var steps = Math.trunc(arrowAccum / ARROW_STEP_PX);
+          if (steps === 0) { return; }
+          var now = Date.now();
+          if (now - lastArrowAt < ARROW_MIN_INTERVAL_MS) { return; }
+          lastArrowAt = now;
+          arrowAccum -= steps * ARROW_STEP_PX;
+          var n = Math.min(Math.abs(steps), ARROW_MAX_STEPS);
+          var seq = steps > 0 ? "\\x1b[B" : "\\x1b[A";
+          var out = "";
+          for (var i = 0; i < n; i++) { out += seq; }
+          post({ type: "input", data: out });
         }
 
         function forceRepaint() {
@@ -375,6 +523,18 @@ export const TERMINAL_HTML = `<!doctype html>
           setTimeout(hardRepaint, 300);
         }
 
+        function dismissKeyboard() {
+          // Dismiss the soft keyboard. ghostty's hidden textarea holds the
+          // input connection, so term.blur() alone doesn't always tear it
+          // down on Android — blur the textarea and the active element too.
+          try {
+            term.blur();
+            if (term.textarea && term.textarea.blur) { term.textarea.blur(); }
+            var activeEl = document.activeElement;
+            if (activeEl && activeEl.blur && activeEl !== document.body) { activeEl.blur(); }
+          } catch (e) {}
+        }
+
         function handle(msg) {
           if (!term) { pending.push(msg); return; }
           switch (msg.type) {
@@ -394,15 +554,13 @@ export const TERMINAL_HTML = `<!doctype html>
             case "fit": applyLayout(); break;
             case "focus": try { term.focus(); } catch (e) {} break;
             case "blur":
-              // Dismiss the soft keyboard. ghostty's hidden textarea holds the
-              // input connection, so term.blur() alone doesn't always tear it
-              // down on Android — blur the textarea and the active element too.
-              try {
-                term.blur();
-                if (term.textarea && term.textarea.blur) { term.textarea.blur(); }
-                var activeEl = document.activeElement;
-                if (activeEl && activeEl.blur && activeEl !== document.body) { activeEl.blur(); }
-              } catch (e) {}
+              keepFocus = false;
+              dismissKeyboard();
+              break;
+            case "keepFocus":
+              keepFocus = !!msg.enabled;
+              if (keepFocus) { try { term.focus(); } catch (e) {} }
+              else { dismissKeyboard(); }
               break;
             case "scrollToBottom": try { term.scrollToBottom(); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "scrollBy": scrollByDelta(Number(msg.deltaY)); break;
@@ -415,15 +573,15 @@ export const TERMINAL_HTML = `<!doctype html>
               hostH = readPixelDimension(msg.height);
               applyLayout();
               break;
-            case "keyboardInset": {
-              var kb = Number(msg.height);
-              kbInset = (Number.isFinite(kb) && kb > 0) ? Math.min(kb, 4000) : 0;
-              applyCanvasTransform();
-              break;
-            }
-            case "session":
+            case "session": {
+              // The host tells us the session's real grid size; mirror it.
+              var sc = clampDimension(msg.cols, 1, 1000);
+              var sr = clampDimension(msg.rows, 1, 1000);
+              if (sc) { gridCols = sc; }
+              if (sr) { gridRows = sr; }
               applyLayout();
               break;
+            }
             case "repaint":
               // App returned to foreground / surface became visible again — heal
               // any rows the dirty-only render loop left blank while we were away.
@@ -502,26 +660,74 @@ export const TERMINAL_HTML = `<!doctype html>
                 ta.setAttribute("autocorrect", "off");
                 ta.setAttribute("autocomplete", "off");
                 ta.setAttribute("spellcheck", "false");
+                // Persistent keyboard: while the host holds keepFocus, any blur
+                // (Enter's default handling, stray taps, IME dismiss attempts)
+                // is undone a beat later so the soft keyboard never collapses.
+                ta.addEventListener("blur", function () {
+                  if (!keepFocus) { return; }
+                  setTimeout(function () {
+                    if (keepFocus) { try { term.focus(); } catch (e) {} }
+                  }, 60);
+                });
+                // Hold-to-repeat backspace: Android IMEs auto-repeat a held
+                // backspace by repeatedly deleting *content* before the caret
+                // (deleteSurroundingText -> beforeinput "deleteContentBackward").
+                // ghostty keeps this textarea empty, so GBoard has nothing to
+                // delete: each tap falls back to one synthetic DEL keydown and a
+                // hold never repeats. Park a run of sentinel spaces before the
+                // caret so a held backspace always has content to chew. ghostty
+                // preventDefault()s every delete it handles (still emitting DEL
+                // 0x7f to the PTY), so the sentinel normally never drains; edits
+                // that do land anyway (IME commits are not cancelable) are reset
+                // below.
+                var SENTINEL = "                                "; // 32 spaces
+                var composing = false;
+                var primeSentinel = function () {
+                  if (composing) { return; }
+                  if (ta.value !== SENTINEL) { ta.value = SENTINEL; }
+                  if (ta.selectionStart !== SENTINEL.length || ta.selectionEnd !== SENTINEL.length) {
+                    try { ta.setSelectionRange(SENTINEL.length, SENTINEL.length); } catch (e) {}
+                  }
+                };
+                var primeSentinelSoon = function () { setTimeout(primeSentinel, 0); };
+                ta.addEventListener("compositionstart", function () { composing = true; });
+                ta.addEventListener("compositionend", function () { composing = false; primeSentinelSoon(); });
+                // "input" only fires when an edit actually landed (handled ones
+                // are preventDefault()'d) — refill so the reservoir never drains.
+                ta.addEventListener("input", function () { if (!composing) { primeSentinelSoon(); } });
+                // A tap can drop the caret mid-sentinel (backspace at offset 0
+                // goes dead again) — re-park it once the tap's selection lands.
+                ta.addEventListener("focus", primeSentinelSoon);
+                ta.addEventListener("pointerup", primeSentinelSoon);
+                primeSentinel();
               }
             } catch (e) {}
             try { term.blur(); } catch (e) {}
             window.__term = term; // exposed for diagnostics / smoke tests
             installGestures();
 
-            if (GW.FitAddon) {
-              fit = new GW.FitAddon();
-              term.loadAddon(fit);
-            }
-
             term.onData(function (data) { post({ type: "input", data: data }); });
-            term.onResize(function (size) {
-              post({ type: "resize", cols: size.cols, rows: size.rows });
-            });
+            // Note: no term.onResize -> post("resize") bridge. The phone is a
+            // mirror — the grid only ever changes via syncGrid to match the
+            // host's own session size, and it must NEVER drive the real PTY.
             term.onScroll(function () { reportScroll(); });
 
-            window.addEventListener("resize", function () { applyLayout(); });
+            // A real view resize (keyboard raise/dismiss resizing the WebView)
+            // can reset the canvas 2D context outright — same failure mode as
+            // returning from background — so beyond re-laying-out, heal with a
+            // debounced full context rebuild once the resize burst settles.
+            var resizeHealTimer = null;
+            var onViewResize = function () {
+              applyLayout();
+              if (resizeHealTimer) { clearTimeout(resizeHealTimer); }
+              resizeHealTimer = setTimeout(function () {
+                resizeHealTimer = null;
+                hardRepaint();
+              }, 120);
+            };
+            window.addEventListener("resize", onViewResize);
             if (window.visualViewport) {
-              window.visualViewport.addEventListener("resize", function () { applyLayout(); });
+              window.visualViewport.addEventListener("resize", onViewResize);
             }
 
             // ghostty-web has no visibility handling of its own: its rAF render

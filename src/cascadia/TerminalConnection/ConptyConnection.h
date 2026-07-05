@@ -32,11 +32,18 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         void ReparentWindow(const uint64_t newParent);
         uint64_t RootProcessHandle() noexcept;
 
+        void UpdateBridgeTitle(const winrt::hstring& title);
+        void SetBridgeProject(const winrt::hstring& projectId);
+
         winrt::hstring Commandline() const;
         winrt::hstring StartingTitle() const;
         WORD ShowWindow() const noexcept;
 
         static void StartInboundListener();
+
+        static winrt::hstring BridgeConnectionStatus();
+        static winrt::hstring BridgeEndpoint();
+        static winrt::hstring BridgeAccessToken();
 
         static winrt::event_token NewConnection(const NewConnectionHandler& handler);
         static void NewConnection(const winrt::event_token& token);

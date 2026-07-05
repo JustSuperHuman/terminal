@@ -219,6 +219,25 @@ namespace winrt::TerminalApp::implementation
         if (pane)
         {
             auto newTabImpl = winrt::make_self<Tab>(pane);
+            if (!_activeProjectId.empty())
+            {
+                // Tag the tab with the active project so the rail can filter
+                // per project and closing the project can close its tabs.
+                newTabImpl->ProjectId(_activeProjectId);
+
+                // Also stamp the project onto the mirrored terminal-web
+                // session so remote clients group it correctly.
+                if (const auto control{ newTabImpl->GetActiveTerminalControl() })
+                {
+                    if (const auto conn{ control.Connection() })
+                    {
+                        if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
+                        {
+                            conpty.SetBridgeProject(_activeProjectId);
+                        }
+                    }
+                }
+            }
             _InitializeTab(newTabImpl, insertPosition);
             return *newTabImpl;
         }

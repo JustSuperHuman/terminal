@@ -8,6 +8,7 @@
     "@kesha-antonov/react-native-background-downloader": "^4.5.6",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.12",
+    "expo-audio": "~56.0.12",
     "expo-blur": "~56.0.3",
     "expo-dev-client": "~56.0.20",
     "expo-font": "~56.0.7",

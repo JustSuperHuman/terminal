@@ -97,6 +97,26 @@ export async function forgetCwd(endpointId: string, cwd: string): Promise<string
   return next;
 }
 
+// Sessions-drawer ordering: false = grouped by project in server order,
+// true = flat list by last update with the most recent at the bottom.
+const SORT_RECENT_KEY = "justterminal.sortRecent.v1";
+
+export async function loadSortRecent(): Promise<boolean> {
+  try {
+    return (await AsyncStorage.getItem(SORT_RECENT_KEY)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export async function saveSortRecent(value: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(SORT_RECENT_KEY, value ? "1" : "0");
+  } catch {
+    // best effort
+  }
+}
+
 // Whether the command-bar key toolbar is expanded. Defaults to true.
 const KEYS_KEY = "justterminal.keysExpanded.v1";
 

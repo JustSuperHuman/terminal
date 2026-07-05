@@ -19,6 +19,7 @@
     <ClCompile Include="AzureConnection.cpp" />
     <ClCompile Include="init.cpp" />
     <ClCompile Include="CTerminalHandoff.cpp" />
+    <ClCompile Include="TerminalBridge.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
@@ -27,6 +28,7 @@
     <ClInclude Include="AzureClientID.h" />
     <ClInclude Include="CTerminalHandoff.h" />
     <ClInclude Include="BaseTerminalConnection.h" />
+    <ClInclude Include="TerminalBridge.h" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="ITerminalConnection.idl" />

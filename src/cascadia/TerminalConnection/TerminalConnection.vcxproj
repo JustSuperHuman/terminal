@@ -26,6 +26,7 @@
       <DependentUpon>AzureConnection.idl</DependentUpon>
     </ClInclude>
     <ClInclude Include="CTerminalHandoff.h" />
+    <ClInclude Include="TerminalBridge.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="ConptyConnection.h">
       <DependentUpon>ConptyConnection.idl</DependentUpon>
@@ -36,6 +37,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="CTerminalHandoff.cpp" />
+    <ClCompile Include="TerminalBridge.cpp" />
     <ClCompile Include="init.cpp" />
     <ClCompile Include="ConnectionInformation.cpp">
       <DependentUpon>ConnectionInformation.idl</DependentUpon>

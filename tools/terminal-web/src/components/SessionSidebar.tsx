@@ -7,10 +7,11 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getPeerSessionTargetId } from "@/lib/session-targets";
 import { cn } from "@/lib/utils";
-import type { BridgeCommandInfo, CreateSessionOptions, HostTerminalProcess, ServerInfo, TerminalHostPeer, TerminalProfile, TerminalSessionSummary } from "@/lib/types";
+import type { BridgeCommandInfo, CreateSessionOptions, HostTerminalProcess, ServerInfo, TerminalHostPeer, TerminalProfile, TerminalProject, TerminalSessionSummary } from "@/lib/types";
 
 interface SessionSidebarProps {
   sessions: TerminalSessionSummary[];
+  projects?: TerminalProject[];
   activeTargetId?: string;
   hostProcesses: HostTerminalProcess[];
   peerHosts: TerminalHostPeer[];
@@ -178,6 +179,7 @@ function displayAccessUrl(value: string) {
 
 export function SessionSidebar({
   sessions,
+  projects = [],
   activeTargetId,
   hostProcesses,
   peerHosts,
@@ -204,6 +206,22 @@ export function SessionSidebar({
       ].filter(Boolean) as Array<{ id: string; label: string; command: string }>
     : [];
   const filteredSessions = normalizedQuery ? sessions.filter((session) => sessionMatches(session, normalizedQuery)) : sessions;
+  const projectIds = new Set(projects.map((project) => project.id));
+  const projectSessionGroups = projects
+    .map((project) => ({
+      key: project.id,
+      label: project.name as string | undefined,
+      sessions: filteredSessions.filter((session) => session.projectId === project.id)
+    }))
+    .filter((group) => group.sessions.length > 0);
+  const ungroupedSessions = filteredSessions.filter((session) => !session.projectId || !projectIds.has(session.projectId));
+  const sessionGroups =
+    ungroupedSessions.length > 0
+      ? [
+          ...projectSessionGroups,
+          { key: "other", label: projectSessionGroups.length > 0 ? "Other" : undefined, sessions: ungroupedSessions }
+        ]
+      : projectSessionGroups;
   const filteredProfileSections = profileSections(profiles, normalizedQuery);
   const filteredPeerHosts = peerHosts
     .map((peer) => {
@@ -234,6 +252,109 @@ export function SessionSidebar({
   function cancelRename() {
     setEditingTargetId(undefined);
     setEditingTitle("");
+  }
+
+  function renderSessionRow(session: TerminalSessionSummary) {
+    const selected = session.id === activeTargetId;
+    const unreadCount = unread[session.id] ?? 0;
+    const editing = editingTargetId === session.id;
+    return (
+      <div
+        key={session.id}
+        data-terminal-target={session.id}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-md px-2.5 py-2 transition-colors",
+          selected ? "bg-sidebar-active text-foreground" : "hover:bg-sidebar-active/70"
+        )}
+      >
+        {editing ? (
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span
+              className={cn(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
+                selected ? "border-primary/60 bg-primary/12 text-primary" : "border-border bg-background/50"
+              )}
+            >
+              <Terminal className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <Input
+              value={editingTitle}
+              onChange={(event) => setEditingTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  commitRename();
+                }
+                if (event.key === "Escape") {
+                  cancelRename();
+                }
+              }}
+              aria-label="Session title"
+              className="h-8 min-w-0 flex-1 text-xs"
+              autoFocus
+            />
+            <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={commitRename}>
+              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="sr-only">Save title</span>
+            </Button>
+            <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={cancelRename}>
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="sr-only">Cancel rename</span>
+            </Button>
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onSelectSession(session.id)}
+              className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span
+                className={cn(
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
+                  selected ? "border-primary/60 bg-primary/12 text-primary" : "border-border bg-background/50"
+                )}
+              >
+                <Terminal className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium">{session.title}</span>
+                  {unreadCount > 0 ? <Badge variant="warning">{unreadCount}</Badge> : null}
+                </span>
+                <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                  <span className={cn("h-1.5 w-1.5 rounded-full", session.status === "running" ? "bg-primary" : "bg-muted-foreground")} />
+                  {session.source === "bridged" ? <span>bridge</span> : null}
+                  {session.source === "bridged" ? <span aria-hidden="true">·</span> : null}
+                  <span className="truncate">{shellName(session)}</span>
+                  <span>{timeLabel(session.updatedAt)}</span>
+                </span>
+              </span>
+            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => beginRename(session.id, session.title)}>
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">Rename {session.title}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Rename</TooltipContent>
+            </Tooltip>
+            {session.status === "exited" ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => onKillSession(session.id)}>
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span className="sr-only">Close {session.title}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Close exited session</TooltipContent>
+              </Tooltip>
+            ) : null}
+          </>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -287,109 +408,13 @@ export function SessionSidebar({
           <div className="text-xs font-medium text-muted-foreground">Sessions</div>
           {normalizedQuery ? <Badge variant="muted">{filteredSessions.length}</Badge> : null}
         </div>
-        <div className="space-y-1">
-          {filteredSessions.map((session) => {
-            const selected = session.id === activeTargetId;
-            const unreadCount = unread[session.id] ?? 0;
-            const editing = editingTargetId === session.id;
-            return (
-              <div
-                key={session.id}
-                data-terminal-target={session.id}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2.5 py-2 transition-colors",
-                  selected ? "bg-sidebar-active text-foreground" : "hover:bg-sidebar-active/70"
-                )}
-              >
-                {editing ? (
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
-                    <span
-                      className={cn(
-                        "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
-                        selected ? "border-primary/60 bg-primary/12 text-primary" : "border-border bg-background/50"
-                      )}
-                    >
-                      <Terminal className="h-4 w-4" aria-hidden="true" />
-                    </span>
-                    <Input
-                      value={editingTitle}
-                      onChange={(event) => setEditingTitle(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          commitRename();
-                        }
-                        if (event.key === "Escape") {
-                          cancelRename();
-                        }
-                      }}
-                      aria-label="Session title"
-                      className="h-8 min-w-0 flex-1 text-xs"
-                      autoFocus
-                    />
-                    <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={commitRename}>
-                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span className="sr-only">Save title</span>
-                    </Button>
-                    <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={cancelRename}>
-                      <X className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span className="sr-only">Cancel rename</span>
-                    </Button>
-                  </div>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      aria-pressed={selected}
-                      onClick={() => onSelectSession(session.id)}
-                      className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <span
-                        className={cn(
-                          "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
-                          selected ? "border-primary/60 bg-primary/12 text-primary" : "border-border bg-background/50"
-                        )}
-                      >
-                        <Terminal className="h-4 w-4" aria-hidden="true" />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium">{session.title}</span>
-                          {unreadCount > 0 ? <Badge variant="warning">{unreadCount}</Badge> : null}
-                        </span>
-                        <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-                          <span className={cn("h-1.5 w-1.5 rounded-full", session.status === "running" ? "bg-primary" : "bg-muted-foreground")} />
-                          {session.source === "bridged" ? <span>bridge</span> : null}
-                          {session.source === "bridged" ? <span aria-hidden="true">·</span> : null}
-                          <span className="truncate">{shellName(session)}</span>
-                          <span>{timeLabel(session.updatedAt)}</span>
-                        </span>
-                      </span>
-                    </button>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => beginRename(session.id, session.title)}>
-                          <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span className="sr-only">Rename {session.title}</span>
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Rename</TooltipContent>
-                    </Tooltip>
-                    {session.status === "exited" ? (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button type="button" variant="ghost" size="iconSm" className="h-7 w-7 shrink-0" onClick={() => onKillSession(session.id)}>
-                            <X className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span className="sr-only">Close {session.title}</span>
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Close exited session</TooltipContent>
-                      </Tooltip>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            );
-          })}
+        <div className="space-y-3">
+          {sessionGroups.map((group) => (
+            <div key={group.key}>
+              {group.label ? <div className="mb-1 px-2 text-xs font-medium text-muted-foreground">{group.label}</div> : null}
+              <div className="space-y-1">{group.sessions.map((session) => renderSessionRow(session))}</div>
+            </div>
+          ))}
           {filteredSessions.length === 0 ? <div className="px-2.5 py-2 text-sm text-muted-foreground">No matching sessions</div> : null}
         </div>
 

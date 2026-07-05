@@ -46,6 +46,7 @@ function getAgentProfiles(): TerminalProfile[] {
   const profiles: TerminalProfile[] = [];
   const codex = findOnPath("codex");
   const claude = findOnPath("claude");
+  const hermes = findOnPath("hermes");
 
   if (codex) {
     profiles.push({
@@ -66,6 +67,17 @@ function getAgentProfiles(): TerminalProfile[] {
       args: [],
       group: "agent",
       description: "Claude Code TUI"
+    });
+  }
+
+  if (hermes) {
+    profiles.push({
+      id: "hermes",
+      label: "Hermes",
+      shell: hermes,
+      args: [],
+      group: "agent",
+      description: "Hermes Agent TUI"
     });
   }
 

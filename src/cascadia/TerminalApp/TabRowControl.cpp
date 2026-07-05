@@ -72,9 +72,9 @@ namespace winrt::TerminalApp::implementation
     {
         _selectedTab = tab;
 
-        _updatingVerticalSelection = true;
+        ++_updatingVerticalSelection;
         auto restoreSelection = wil::scope_exit([&]() {
-            _updatingVerticalSelection = false;
+            --_updatingVerticalSelection;
         });
 
         if (!_selectedTab)
@@ -292,6 +292,7 @@ namespace winrt::TerminalApp::implementation
     }
 
     std::wstring TabRowControl::_tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const
+    try
     {
         std::wstring text;
         _appendSearchText(text, tab.Title());
@@ -352,9 +353,21 @@ namespace winrt::TerminalApp::implementation
 
         return text;
     }
-
-    bool TabRowControl::_matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms) const
+    catch (...)
     {
+        // A tab that's mid-teardown can throw from any of the accessors
+        // above; treat it as having no searchable text rather than crashing.
+        LOG_CAUGHT_EXCEPTION();
+        return {};
+    }
+
+    bool TabRowControl::_matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms, const bool allowBufferSearch) const
+    {
+        if (!_projectFilter.empty() && tab.ProjectId() != _projectFilter)
+        {
+            return false;
+        }
+
         if (terms.empty())
         {
             return true;
@@ -366,10 +379,19 @@ namespace winrt::TerminalApp::implementation
             return true;
         }
 
-        return _shouldSearchBuffer(terms) && _containsAllTerms(_tabSearchText(tab, true), terms);
+        return allowBufferSearch && _shouldSearchBuffer(terms) && _containsAllTerms(_tabSearchText(tab, true), terms);
     }
 
-    void TabRowControl::_updateFilteredTabs()
+    void TabRowControl::SetProjectFilter(const winrt::hstring& projectId)
+    {
+        if (_projectFilter != projectId)
+        {
+            _projectFilter = projectId;
+            _updateFilteredTabs();
+        }
+    }
+
+    void TabRowControl::_updateFilteredTabs(const bool includeBufferSearch)
     {
         const auto filter{ _foldForSearch(VerticalTabSearchBox().Text()) };
         const auto terms{ _splitSearchTerms(filter) };
@@ -378,7 +400,7 @@ namespace winrt::TerminalApp::implementation
 
         std::vector<TerminalApp::Tab> visibleTabs;
         auto appendIfVisible = [&](const auto& tab) {
-            if (!_containsTab(visibleTabs, tab) && _tabIsTracked(tab) && _matchesFilter(tab, terms))
+            if (!_containsTab(visibleTabs, tab) && _tabIsTracked(tab) && _matchesFilter(tab, terms, includeBufferSearch))
             {
                 visibleTabs.push_back(tab);
             }
@@ -399,6 +421,14 @@ namespace winrt::TerminalApp::implementation
                 appendIfVisible(tab);
             }
         }
+
+        // Clearing/appending the bound observable vector makes the ListView
+        // raise SelectionChanged for our own mutations; suppress those so
+        // they can't re-enter tab focusing (and, transitively, this method).
+        ++_updatingVerticalSelection;
+        auto restoreSelection = wil::scope_exit([&]() {
+            --_updatingVerticalSelection;
+        });
 
         _filteredTabs.Clear();
         for (const auto& tab : visibleTabs)
@@ -429,7 +459,26 @@ namespace winrt::TerminalApp::implementation
                                                        const winrt::Windows::UI::Xaml::Controls::TextChangedEventArgs&)
     {
         _closeVerticalTabTitleToolTip();
-        _updateFilteredTabs();
+
+        // Filter on the cheap metadata immediately; defer the expensive
+        // buffer-text pass (which takes each terminal's lock) until typing
+        // settles, so every keystroke doesn't contend with the output threads.
+        _updateFilteredTabs(false);
+
+        if (!_bufferSearchTimer)
+        {
+            _bufferSearchTimer.Interval(std::chrono::milliseconds(250));
+            _bufferSearchTimer.Tick({ get_weak(), &TabRowControl::_bufferSearchTimerTick });
+        }
+        _bufferSearchTimer.Stop();
+        _bufferSearchTimer.Start();
+    }
+
+    void TabRowControl::_bufferSearchTimerTick(const winrt::Windows::Foundation::IInspectable&,
+                                               const winrt::Windows::Foundation::IInspectable&)
+    {
+        _bufferSearchTimer.Stop();
+        _updateFilteredTabs(true);
     }
 
     void TabRowControl::OnVerticalTabSelectionChanged(const winrt::Windows::Foundation::IInspectable&,

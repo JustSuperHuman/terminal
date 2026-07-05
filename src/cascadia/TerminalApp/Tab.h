@@ -128,6 +128,8 @@ namespace winrt::TerminalApp::implementation
         WINRT_PROPERTY(uint32_t, TabViewIndex, 0);
         // The TabViewNumTabs is the number of Tab objects in TerminalPage's _tabs vector.
         WINRT_PROPERTY(uint32_t, TabViewNumTabs, 0);
+        // Which terminal-web project this tab was created under ("" = none).
+        WINRT_PROPERTY(winrt::hstring, ProjectId);
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);

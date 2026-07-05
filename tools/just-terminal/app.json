@@ -12,12 +12,18 @@
       "bundleIdentifier": "com.justsuperhuman.justterminal",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSMicrophoneUsageDescription": "JustTerminal uses the microphone for on-device voice dictation into the command line. Audio is transcribed locally and never leaves your device."
+        "NSMicrophoneUsageDescription": "JustTerminal uses the microphone for on-device voice dictation into the command line. Audio is transcribed locally and never leaves your device.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
       }
     },
     "android": {
       "package": "com.justsuperhuman.justterminal",
-      "permissions": ["android.permission.RECORD_AUDIO"],
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#10141a",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -45,7 +51,8 @@
           }
         }
       ],
-      "@kesha-antonov/react-native-background-downloader"
+      "@kesha-antonov/react-native-background-downloader",
+      "expo-audio"
     ],
     "extra": {
       "eas": {

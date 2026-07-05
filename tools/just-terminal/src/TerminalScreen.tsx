@@ -4,6 +4,7 @@ import {
   AppState,
   Keyboard,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   type KeyboardEvent,
@@ -14,10 +15,12 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BlurTargetView } from "expo-blur";
+import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
+import * as Haptics from "expo-haptics";
 import { CommandBar } from "./components/CommandBar";
-import { Header } from "./components/Header";
 import { SessionsDrawer, type CreateSpec } from "./components/SessionsDrawer";
-import { SessionSwitcher } from "./components/SessionSwitcher";
+import { SessionSwitcher, type SessionSwitcherHandle } from "./components/SessionSwitcher";
+import { SwipeBar } from "./components/SwipeBar";
 import { TerminalView, type TerminalViewHandle } from "./components/TerminalView";
 import { TerminalEmptyState } from "./components/TerminalEmptyState";
 import { useDictation } from "./useDictation";
@@ -25,13 +28,19 @@ import { createSession as createSessionApi } from "./lib/api";
 import type { ServerEndpoint } from "./lib/endpoint";
 import { terminalSocket, type SocketStatus } from "./lib/socket";
 import { forgetCwd, loadRecentCwds, rememberCwd } from "./lib/storage";
-import type { ServerInfo, ServerMessage, TerminalProfile, TerminalSessionSummary } from "./types";
+import type { ServerInfo, ServerMessage, TerminalProfile, TerminalProject, TerminalSessionSummary } from "./types";
 import { colors, font } from "./theme";
 
 interface TerminalScreenProps {
   endpoint: ServerEndpoint;
   onDisconnect: () => void;
 }
+
+// Tones played when desktop automation POSTs /api/notify (Claude Code hooks):
+// "done" = upbeat ascending chime, "attention"/"input" = gentle descending
+// pair for "Claude needs you". Unknown/absent sound names fall back to done.
+const doneChime = require("../assets/sounds/notify.wav");
+const attentionChime = require("../assets/sounds/attention.wav");
 
 function dockedKeyboardHeight(metrics: KeyboardMetrics | undefined | null, windowHeight: number): number {
   if (!metrics || metrics.height <= 0) {
@@ -72,11 +81,6 @@ function keyboardVisibleFromMetrics(metrics: KeyboardMetrics | undefined | null,
   return dockedKeyboardHeight(metrics, windowHeight) > 0;
 }
 
-function shellName(session?: TerminalSessionSummary) {
-  if (!session) return "";
-  return session.shell.split(/[\\/]/).pop() ?? session.shell;
-}
-
 function selectPreferredSessionId(sessions: TerminalSessionSummary[], currentId?: string): string | undefined {
   const current = sessions.find((session) => session.id === currentId);
   if (current?.status === "running") {
@@ -91,6 +95,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const { height: windowHeight } = useWindowDimensions();
   const [sessions, setSessions] = useState<TerminalSessionSummary[]>([]);
   const [profiles, setProfiles] = useState<TerminalProfile[]>([]);
+  const [projects, setProjects] = useState<TerminalProject[]>([]);
   const [serverInfo, setServerInfo] = useState<ServerInfo | undefined>();
   const [activeId, setActiveId] = useState<string | undefined>();
   const [socketStatus, setSocketStatus] = useState<SocketStatus>(terminalSocket.currentStatus);
@@ -107,7 +112,42 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // to spawn/bridge a terminal, so we show a clear "starting" overlay.
   const [creating, setCreating] = useState(false);
   const activeIdRef = useRef<string | undefined>(activeId);
+  // Notification tones for server "notify" broadcasts; ref-wrapped so the
+  // socket effect doesn't need the players in its dependency list.
+  const donePlayer = useAudioPlayer(doneChime);
+  const attentionPlayer = useAudioPlayer(attentionChime);
+  const playNotifyRef = useRef<(sound?: string) => void>(() => undefined);
+  useEffect(() => {
+    playNotifyRef.current = (sound?: string) => {
+      const wantsAttention = sound === "attention" || sound === "input" || sound === "warning";
+      const player = wantsAttention ? attentionPlayer : donePlayer;
+      try {
+        player.seekTo(0);
+        player.play();
+      } catch {
+        // Audio-session hiccups shouldn't take the app down.
+      }
+      Haptics.notificationAsync(
+        wantsAttention ? Haptics.NotificationFeedbackType.Warning : Haptics.NotificationFeedbackType.Success
+      ).catch(() => undefined);
+    };
+  }, [donePlayer, attentionPlayer]);
+  useEffect(() => {
+    // Hook chimes should be audible even with the iOS silent switch on.
+    // `allowsRecording: true` is load-bearing: this call configures the SHARED
+    // audio session, and without it iOS drops the session to playback-only
+    // (.playback instead of .playAndRecord), which intermittently kills the mic
+    // capture the dictation engine needs. With allowsRecording set, playback
+    // still routes through the speaker (shouldRouteThroughEarpiece defaults to
+    // false), so the chime is unaffected.
+    setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true }).catch(() => undefined);
+  }, []);
+  // Mirrors whether the soft keyboard should currently be held open, for
+  // listeners (AppState) that live outside the deciding effect.
+  const keepKeyboardOpenRef = useRef(false);
   const terminalRef = useRef<TerminalViewHandle | null>(null);
+  // Session scrubber overlay (picker wheel); driven by the SwipeBar's gesture.
+  const sessionSwitcherRef = useRef<SessionSwitcherHandle | null>(null);
   const blurTargetRef = useRef<View | null>(null);
   const settleFrameRef = useRef<number | undefined>(undefined);
   const settleTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
@@ -193,6 +233,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       if (state === "active") {
         requestAnimationFrame(syncKeyboardMetrics);
         settleTerminalToInput();
+        // Bring the persistent keyboard straight back after backgrounding.
+        terminalRef.current?.setKeepFocus(keepKeyboardOpenRef.current);
         // ghostty-web's render loop only repaints dirty rows and pauses while the
         // app is backgrounded, so the terminal can return fragmented (mostly
         // blank). Force a full repaint once the surface is back.
@@ -236,12 +278,21 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         case "hello":
           setSessions(message.sessions);
           setProfiles(message.profiles);
+          setProjects(message.projects ?? []);
           setServerInfo(message.server);
           setActiveId((current) => current ?? message.sessions[0]?.id);
           break;
         case "sessions":
           setSessions(message.sessions);
           setActiveId((current) => current ?? message.sessions[0]?.id);
+          break;
+        case "projects":
+          setProjects(message.projects);
+          break;
+        case "notify":
+          // Desktop-side automation (e.g. Claude Code hooks POSTing to
+          // /api/notify) plays a tone + haptic on the phone.
+          playNotifyRef.current(message.sound);
           break;
         case "session":
           upsertSession(message.session);
@@ -250,6 +301,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           upsertSession(message.session);
           break;
         case "output":
+        case "activity":
+          // "activity" is the server's data-free ping for sessions this client
+          // is NOT subscribed to — full output only streams for the active one.
           if (message.sessionId !== activeIdRef.current) {
             setUnread((current) => ({ ...current, [message.sessionId]: (current[message.sessionId] ?? 0) + 1 }));
           }
@@ -279,6 +333,19 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     onText: injectDictatedText,
     enabled: socketStatus === "open" && activeSession?.status === "running",
   });
+
+  // Persistent keyboard: while a live session is connected, the terminal input
+  // stays focused so the soft keyboard never collapses (the page refocuses on
+  // any blur attempt). Opening the drawer releases it; closing re-engages it.
+  const keepKeyboardOpen =
+    !drawerOpen && !creating && socketStatus === "open" && activeSession?.status === "running";
+  useEffect(() => {
+    keepKeyboardOpenRef.current = keepKeyboardOpen;
+    terminalRef.current?.setKeepFocus(keepKeyboardOpen);
+    if (keepKeyboardOpen) {
+      settleTerminalToInput();
+    }
+  }, [keepKeyboardOpen, settleTerminalToInput]);
 
   const selectSession = useCallback((id: string) => {
     setActiveId(id);
@@ -340,21 +407,14 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     [endpoint.id]
   );
 
-  const headerTitle = activeSession?.title ?? "Terminal";
-  const headerMeta = activeSession
-    ? `${activeSession.cwd} · pid ${activeSession.pid ?? "—"}`
-    : socketStatus === "open"
-      ? "No active session"
-      : "Connecting…";
   const commandBarBottom = keyboardHeight;
   // When the keyboard opens, shrink the terminal so it sits fully ABOVE the
   // command bar + keyboard and reflows to fewer rows. The old approach shifted
   // the whole canvas up by the keyboard height instead, which slid the top rows
-  // up under the fixed header with no way to scroll them back (alt-screen TUIs
-  // like Claude/Codex have no scrollback). Reserving the keyboard height as
-  // bottom inset keeps every row on screen between the header and the keyboard.
+  // up off screen with no way to scroll them back (alt-screen TUIs like
+  // Claude/Codex have no scrollback). Reserving the keyboard height as bottom
+  // inset keeps every row on screen between the status bar and the keyboard.
   const terminalBottomInset = commandBarHeight + (keyboardVisible ? keyboardHeight : 0);
-  const keyboardInset = 0;
 
   const handleCommandBarLayout = useCallback((event: LayoutChangeEvent) => {
     const nextHeight = Math.round(event.nativeEvent.layout.height);
@@ -363,44 +423,27 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
 
   return (
     <View style={styles.root}>
-      <View style={{ paddingTop: insets.top, backgroundColor: colors.surface }}>
-        <Header
-          title={headerTitle}
-          meta={headerMeta}
-          socketStatus={socketStatus}
-          canKill={Boolean(activeSession && activeSession.status === "running")}
-          keyboardVisible={keyboardVisible}
-          onMenu={() => setDrawerOpen(true)}
-          onFocus={() => {
-            terminalRef.current?.focusTerminal();
-            settleTerminalToInput();
-          }}
-          onHideKeyboard={() => {
-            Keyboard.dismiss();
-            terminalRef.current?.blurTerminal();
-          }}
-          onNew={() => createSession()}
-          onKill={() => activeId && killSession(activeId)}
-        />
-      </View>
-
       <View style={styles.body}>
         <BlurTargetView ref={blurTargetRef} style={styles.blurTarget}>
-          <View style={[styles.terminalWrap, { marginBottom: terminalBottomInset }]}>
+          {/* No header: the terminal owns the whole screen. The safe-area top is
+              padded INSIDE the terminal wrap so text clears the notch while the
+              surface itself runs edge to edge. */}
+          <View style={[styles.terminalWrap, { paddingTop: insets.top, marginBottom: terminalBottomInset }]}>
             <TerminalView
               ref={terminalRef}
               targetId={activeId}
               session={activeSession}
               socketStatus={socketStatus}
               suppressLoading={scrubbing}
-              keyboardInset={keyboardInset}
             />
+            {/* Scrub picker overlay (visual only; the SwipeBar below owns the
+                gesture and drives it through the imperative handle). */}
             <SessionSwitcher
+              ref={sessionSwitcherRef}
               sessions={sessions}
               activeId={activeId}
               unread={unread}
               onSelect={selectSession}
-              onRequestList={() => setDrawerOpen(true)}
               onPreview={(id) => setActiveId(id)}
               onScrubbingChange={setScrubbing}
             />
@@ -414,12 +457,26 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           </View>
         </BlurTargetView>
         <View style={[styles.commandBarDock, { bottom: commandBarBottom }]} onLayout={handleCommandBarLayout}>
+          {/* Terminal switcher bar between the terminal and the command bar:
+              swipe left/right to scrub sessions (release switches), tap for the
+              sessions drawer. Scrolling the terminal is a vertical drag on the
+              terminal surface itself, not here. Inside the dock so its height
+              is part of commandBarHeight (the terminal reserves space above it). */}
+          {activeSession ? (
+            <SwipeBar
+              sessionCount={sessions.length}
+              activeIndex={sessions.findIndex((item) => item.id === activeId)}
+              onTap={() => setDrawerOpen(true)}
+              onScrubBegin={() => sessionSwitcherRef.current?.begin() ?? false}
+              onScrubMove={(steps) => sessionSwitcherRef.current?.moveBy(steps)}
+              onScrubEnd={(commit) => sessionSwitcherRef.current?.finish(commit)}
+            />
+          ) : null}
           <CommandBar
             targetId={activeId}
             sessionStatus={activeSession?.status}
             socketStatus={socketStatus}
             bottomInset={keyboardVisible ? 0 : insets.bottom}
-            keyboardVisible={keyboardVisible}
             blurTarget={blurTargetRef}
             dictation={{
               status: dictation.status,
@@ -436,6 +493,20 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           />
         </View>
 
+        {/* The only chrome over the terminal: a mostly transparent menu button
+            floating in the top-left, safe-area aware. */}
+        <Pressable
+          onPress={() => setDrawerOpen(true)}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Open sessions menu"
+          style={({ pressed }) => [styles.menuFab, { top: insets.top + 8 }, pressed && styles.menuFabPressed]}
+        >
+          <View style={styles.menuLine} />
+          <View style={[styles.menuLine, styles.menuLineMid]} />
+          <View style={styles.menuLine} />
+        </Pressable>
+
         {creating ? (
           <View style={styles.creatingOverlay}>
             <ActivityIndicator color={colors.primary} size="large" />
@@ -447,6 +518,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       <SessionsDrawer
         visible={drawerOpen}
         sessions={sessions}
+        projects={projects}
         profiles={profiles}
         activeId={activeId}
         unread={unread}
@@ -482,6 +554,36 @@ const styles = StyleSheet.create({
   terminalWrap: {
     flex: 1,
     overflow: "hidden",
+    // Matches the terminal page background so the safe-area padding reads as
+    // part of the console surface, not a bar.
+    backgroundColor: colors.terminal,
+  },
+  menuFab: {
+    position: "absolute",
+    left: 10,
+    zIndex: 6,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3.5,
+    backgroundColor: "rgba(10, 12, 16, 0.35)",
+    borderColor: "rgba(255, 255, 255, 0.10)",
+    borderWidth: 1,
+  },
+  menuFabPressed: {
+    backgroundColor: "rgba(255, 255, 255, 0.13)",
+  },
+  menuLine: {
+    width: 15,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: colors.foreground,
+  },
+  menuLineMid: {
+    width: 11,
+    backgroundColor: colors.primary,
   },
   commandBarDock: {
     position: "absolute",

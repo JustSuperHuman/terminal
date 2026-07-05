@@ -19,6 +19,16 @@ const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 const INITIAL_RECONNECT_MS = 500;
 const MAX_RECONNECT_MS = 5000;
 
+// The bridge mirrors the child command's output to this terminal, so its own
+// operational chatter (connection retries, server-side error frames) must not
+// be written to stdout/stderr or it pollutes the shell. These reconnect quietly;
+// set TERMINAL_WEB_BRIDGE_DEBUG=1 to surface them for troubleshooting.
+function debugLog(message: string): void {
+  if (process.env.TERMINAL_WEB_BRIDGE_DEBUG) {
+    process.stderr.write(`${message}\n`);
+  }
+}
+
 function makeId(): string {
   return `bridge_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -236,6 +246,13 @@ function main(): void {
     }
   }
 
+  function resizeToHostTerminal(): void {
+    const cols = getCols();
+    const rows = getRows();
+    terminal.resize(cols, rows);
+    sendToServer({ type: "resize", sessionId, cols, rows });
+  }
+
   function scheduleReconnect(): void {
     if (terminalExited || reconnectTimer) {
       return;
@@ -299,14 +316,14 @@ function main(): void {
           }
           break;
         case "error":
-          console.error(message.detail ? `${message.message} ${message.detail}` : message.message);
+          debugLog(message.detail ? `${message.message} ${message.detail}` : message.message);
           break;
       }
     });
 
     nextSocket.on("error", (error) => {
       registered = false;
-      console.error(error instanceof Error ? error.message : String(error));
+      debugLog(error instanceof Error ? error.message : String(error));
       nextSocket.close();
     });
 
@@ -348,16 +365,14 @@ function main(): void {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on("data", (data) => {
+      resizeToHostTerminal();
       terminal.write(data.toString("utf8"));
     });
   }
 
   if (process.stdout.isTTY) {
     process.stdout.on("resize", () => {
-      const cols = getCols();
-      const rows = getRows();
-      terminal.resize(cols, rows);
-      sendToServer({ type: "resize", sessionId, cols, rows });
+      resizeToHostTerminal();
     });
   }
 

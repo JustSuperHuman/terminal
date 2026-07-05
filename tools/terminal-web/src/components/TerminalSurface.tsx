@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -48,6 +48,29 @@ function measureCellWidth(host: HTMLElement, term: Terminal) {
   return Number.isFinite(width) && width > 0 ? width : fontSize * 0.62;
 }
 
+interface TerminalDimensions {
+  cols: number;
+  rows: number;
+}
+
+function sameDimensions(left?: TerminalDimensions, right?: TerminalDimensions) {
+  return Boolean(left && right && left.cols === right.cols && left.rows === right.rows);
+}
+
+function measureReadableViewport(host: HTMLElement, term: Terminal): TerminalDimensions | undefined {
+  const shell = host.parentElement;
+  const availableWidth = Math.max(80, shell?.clientWidth ?? host.clientWidth);
+  const availableHeight = Math.max(80, host.clientHeight || shell?.clientHeight || 0);
+  const fontSize = getTerminalFontSize();
+  const lineHeight = Math.max(fontSize * Number(term.options.lineHeight ?? 1.22), 12);
+
+  setTerminalFontSize(term, fontSize);
+  return {
+    cols: clampTerminalDimension(Math.floor(availableWidth / measureCellWidth(host, term)), 20, 400),
+    rows: clampTerminalDimension(Math.floor(availableHeight / lineHeight), 8, 200)
+  };
+}
+
 interface TerminalSurfaceProps {
   session?: TerminalSessionSummary;
   targetId?: string;
@@ -57,15 +80,25 @@ interface TerminalSurfaceProps {
   onCopied?: () => void;
 }
 
-export function TerminalSurface({ session, targetId, copySignal, focusSignal, socketStatus, onCopied }: TerminalSurfaceProps) {
+export interface TerminalSurfaceHandle {
+  settleBeforeInput: () => void;
+}
+
+export const TerminalSurface = forwardRef<TerminalSurfaceHandle, TerminalSurfaceProps>(function TerminalSurface(
+  { session, targetId, copySignal, focusSignal, socketStatus, onCopied },
+  ref
+) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
   const activeTargetRef = useRef<string | undefined>(targetId);
   const activeSessionRef = useRef<TerminalSessionSummary | undefined>(session);
+  const socketStatusRef = useRef<SocketStatus>(socketStatus);
   const subscribedTargetRef = useRef<string | undefined>();
   const layoutFrameRef = useRef<number | undefined>();
+  const pendingBridgeSizeRef = useRef<(TerminalDimensions & { targetId: string }) | undefined>();
+  const lastResizeClaimRef = useRef<(TerminalDimensions & { targetId: string }) | undefined>();
   const [scrollState, setScrollState] = useState({ canScroll: false, atBottom: true });
 
   function isBridgedSession() {
@@ -82,8 +115,10 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
     const bridgedSession = activeSessionRef.current?.source === "bridged" ? activeSessionRef.current : undefined;
     if (bridgedSession) {
-      const cols = clampTerminalDimension(bridgedSession.cols, 20, 400);
-      const rows = clampTerminalDimension(bridgedSession.rows, 8, 200);
+      const pendingSize =
+        pendingBridgeSizeRef.current?.targetId === activeTargetRef.current ? pendingBridgeSizeRef.current : undefined;
+      const cols = clampTerminalDimension(pendingSize?.cols ?? bridgedSession.cols, 20, 400);
+      const rows = clampTerminalDimension(pendingSize?.rows ?? bridgedSession.rows, 8, 200);
       const shell = host.parentElement;
       const parentWidth = host.parentElement?.clientWidth ?? host.clientWidth;
       const baseFontSize = getTerminalFontSize();
@@ -127,6 +162,52 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     fit.fit();
   }
 
+  function sendResizeClaim(dimensions: TerminalDimensions, allowBridged: boolean) {
+    const targetId = activeTargetRef.current;
+    const activeSession = activeSessionRef.current;
+    if (!targetId || !activeSession || socketStatusRef.current !== "open" || activeSession.status !== "running") {
+      return;
+    }
+    if (!allowBridged && activeSession.source === "bridged") {
+      return;
+    }
+    if (activeSession.cols === dimensions.cols && activeSession.rows === dimensions.rows) {
+      return;
+    }
+    const nextClaim = { targetId, cols: dimensions.cols, rows: dimensions.rows };
+    if (sameDimensions(lastResizeClaimRef.current, nextClaim) && lastResizeClaimRef.current?.targetId === targetId) {
+      return;
+    }
+    lastResizeClaimRef.current = nextClaim;
+    terminalSocket.send({ type: "resize", sessionId: targetId, cols: dimensions.cols, rows: dimensions.rows });
+  }
+
+  function claimActiveViewportSize() {
+    const term = terminalRef.current;
+    const host = hostRef.current;
+    if (!term || !host) {
+      return;
+    }
+
+    const activeSession = activeSessionRef.current;
+    const targetId = activeTargetRef.current;
+    if (!activeSession || !targetId) {
+      return;
+    }
+
+    if (activeSession.source === "bridged") {
+      const dimensions = measureReadableViewport(host, term);
+      if (!dimensions) {
+        return;
+      }
+      pendingBridgeSizeRef.current = { targetId, ...dimensions };
+      sendResizeClaim(dimensions, true);
+      return;
+    }
+
+    sendResizeClaim({ cols: term.cols, rows: term.rows }, false);
+  }
+
   function scheduleTerminalLayout() {
     if (layoutFrameRef.current !== undefined) {
       window.cancelAnimationFrame(layoutFrameRef.current);
@@ -134,8 +215,24 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
     layoutFrameRef.current = window.requestAnimationFrame(() => {
       layoutFrameRef.current = undefined;
+      if (isBridgedSession()) {
+        claimActiveViewportSize();
+      }
       applyTerminalLayout();
+      if (!isBridgedSession()) {
+        claimActiveViewportSize();
+      }
+      updateScrollState();
     });
+  }
+
+  function settleBeforeInput() {
+    if (isBridgedSession()) {
+      claimActiveViewportSize();
+    }
+    applyTerminalLayout();
+    claimActiveViewportSize();
+    updateScrollState();
   }
 
   function updateScrollState() {
@@ -152,12 +249,29 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
 
   useEffect(() => {
     activeTargetRef.current = targetId;
+    pendingBridgeSizeRef.current = undefined;
+    lastResizeClaimRef.current = undefined;
   }, [targetId]);
 
   useEffect(() => {
+    const previous = activeSessionRef.current;
     activeSessionRef.current = session;
+    if (previous?.id !== session?.id || previous?.cols !== session?.cols || previous?.rows !== session?.rows) {
+      lastResizeClaimRef.current = undefined;
+    }
     scheduleTerminalLayout();
   }, [session?.id, session?.source, session?.cols, session?.rows]);
+
+  useEffect(() => {
+    socketStatusRef.current = socketStatus;
+  }, [socketStatus]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      settleBeforeInput,
+    })
+  );
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -208,18 +322,30 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     fitRef.current = fit;
     serializeRef.current = serialize;
 
-    const resizeObserver = new ResizeObserver(() => {
+    const settleFocusedLayout = () => {
       scheduleTerminalLayout();
+      window.setTimeout(scheduleTerminalLayout, 80);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        settleFocusedLayout();
+      }
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      settleFocusedLayout();
       window.setTimeout(updateScrollState, 0);
     });
     resizeObserver.observe(hostRef.current);
-    window.addEventListener("resize", scheduleTerminalLayout);
-    window.visualViewport?.addEventListener("resize", scheduleTerminalLayout);
+    window.addEventListener("resize", settleFocusedLayout);
+    window.visualViewport?.addEventListener("resize", settleFocusedLayout);
+    window.addEventListener("focus", settleFocusedLayout);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const mobileQuery = window.matchMedia("(max-width: 640px)");
     const onMobileQueryChange = () => {
       term.options.fontSize = getTerminalFontSize();
-      scheduleTerminalLayout();
+      settleFocusedLayout();
     };
     mobileQuery.addEventListener("change", onMobileQueryChange);
 
@@ -259,12 +385,55 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
       touchRemainder = 0;
     };
     const onTouchMove = (event: TouchEvent) => {
-      if (touchY === undefined || event.touches.length !== 1 || term.buffer.active.baseY === 0) {
+      if (touchY === undefined || event.touches.length !== 1) {
         return;
       }
       const nextY = event.touches[0].clientY;
-      touchRemainder += touchY - nextY;
+      const dy = touchY - nextY;
       touchY = nextY;
+
+      // Full-screen apps (Claude, Codex, vim, less) live on the alternate screen
+      // where there is no scrollback to move. Translate the gesture into input the
+      // app understands: SGR mouse-wheel sequences when it tracks the mouse, else
+      // arrow keys (respecting application-cursor mode).
+      if (term.buffer.active.type === "alternate") {
+        touchRemainder += dy;
+        const altLineHeight = Math.max(Number(term.options.fontSize) * Number(term.options.lineHeight ?? 1), 12);
+        const steps = Math.trunc(touchRemainder / altLineHeight);
+        if (steps !== 0) {
+          touchRemainder -= steps * altLineHeight;
+          const altTargetId = activeTargetRef.current;
+          if (altTargetId && socketStatusRef.current === "open") {
+            const count = Math.min(Math.abs(steps), 8);
+            const modes = term.modes;
+            let data = "";
+            if (modes.mouseTrackingMode !== "none") {
+              const button = steps > 0 ? 65 : 64; // SGR wheel down / up
+              const col = Math.max(1, Math.min(term.cols, Math.floor(term.cols / 2) + 1));
+              const row = Math.max(1, Math.min(term.rows, Math.floor(term.rows / 2) + 1));
+              for (let i = 0; i < count; i += 1) {
+                data += `\x1b[<${button};${col};${row}M`;
+              }
+            } else {
+              const down = modes.applicationCursorKeysMode ? "\x1bOB" : "\x1b[B";
+              const up = modes.applicationCursorKeysMode ? "\x1bOA" : "\x1b[A";
+              data = (steps > 0 ? down : up).repeat(count);
+            }
+            if (data) {
+              terminalSocket.send({ type: "input", sessionId: altTargetId, data });
+            }
+          }
+        }
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+        return;
+      }
+
+      if (term.buffer.active.baseY === 0) {
+        return;
+      }
+      touchRemainder += dy;
 
       const lineHeight = Math.max(Number(term.options.fontSize) * Number(term.options.lineHeight ?? 1), 12);
       const lines = Math.trunc(touchRemainder / lineHeight);
@@ -281,11 +450,13 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
       touchRemainder = 0;
     };
 
-    hostRef.current.addEventListener("wheel", onWheel, { passive: false });
-    hostRef.current.addEventListener("touchstart", onTouchStart, { passive: true });
-    hostRef.current.addEventListener("touchmove", onTouchMove, { passive: false });
-    hostRef.current.addEventListener("touchend", onTouchEnd, { passive: true });
-    hostRef.current.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    const hostElement = hostRef.current;
+    hostElement.addEventListener("wheel", onWheel, { passive: false });
+    hostElement.addEventListener("touchstart", onTouchStart, { passive: true });
+    hostElement.addEventListener("touchmove", onTouchMove, { passive: false });
+    hostElement.addEventListener("touchend", onTouchEnd, { passive: true });
+    hostElement.addEventListener("touchcancel", onTouchEnd, { passive: true });
+    hostElement.addEventListener("focusin", settleFocusedLayout);
 
     const dataDisposable = term.onData((data) => {
       const activeTargetId = activeTargetRef.current;
@@ -312,15 +483,18 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
         layoutFrameRef.current = undefined;
       }
       resizeObserver.disconnect();
-      window.removeEventListener("resize", scheduleTerminalLayout);
-      window.visualViewport?.removeEventListener("resize", scheduleTerminalLayout);
+      window.removeEventListener("resize", settleFocusedLayout);
+      window.visualViewport?.removeEventListener("resize", settleFocusedLayout);
+      window.removeEventListener("focus", settleFocusedLayout);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       mobileQuery.removeEventListener("change", onMobileQueryChange);
       viewport?.removeEventListener("scroll", updateScrollState);
-      hostRef.current?.removeEventListener("wheel", onWheel);
-      hostRef.current?.removeEventListener("touchstart", onTouchStart);
-      hostRef.current?.removeEventListener("touchmove", onTouchMove);
-      hostRef.current?.removeEventListener("touchend", onTouchEnd);
-      hostRef.current?.removeEventListener("touchcancel", onTouchEnd);
+      hostElement.removeEventListener("wheel", onWheel);
+      hostElement.removeEventListener("touchstart", onTouchStart);
+      hostElement.removeEventListener("touchmove", onTouchMove);
+      hostElement.removeEventListener("touchend", onTouchEnd);
+      hostElement.removeEventListener("touchcancel", onTouchEnd);
+      hostElement.removeEventListener("focusin", settleFocusedLayout);
       dataDisposable.dispose();
       resizeDisposable.dispose();
       term.dispose();
@@ -378,9 +552,7 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
     window.setTimeout(() => {
       applyTerminalLayout();
-      if (!isBridgedSession()) {
-        terminalSocket.send({ type: "resize", sessionId: targetId, cols: term.cols, rows: term.rows });
-      }
+      claimActiveViewportSize();
       if (acceptsInput) {
         term.focus();
       }
@@ -391,6 +563,9 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
     if (focusSignal === 0) {
       return;
     }
+    scheduleTerminalLayout();
+    window.setTimeout(claimActiveViewportSize, 0);
+    window.setTimeout(claimActiveViewportSize, 120);
     terminalRef.current?.focus();
   }, [focusSignal]);
 
@@ -463,4 +638,4 @@ export function TerminalSurface({ session, targetId, copySignal, focusSignal, so
       ) : null}
     </div>
   );
-}
+});

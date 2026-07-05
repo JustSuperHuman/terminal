@@ -94,6 +94,14 @@ export class DictationEngine {
   private unsubData?: () => void;
   private unsubError?: () => void;
   private running = false;
+  // Serializes start/stop/dispose so a new capture can never race the previous
+  // one's teardown (starting while the old stream is still releasing the mic
+  // was an intermittent "mic is busy/dead" failure). The chain never rejects.
+  private op: Promise<unknown> = Promise.resolve();
+  // Set when the native recognizer looks dead (repeated transcribe failures);
+  // the next start destroys and re-creates it instead of reusing the handle.
+  private recognizerSuspect = false;
+  private transcribeFailures = 0;
 
   // VAD state
   private phase: "listening" | "speaking" = "listening";
@@ -115,9 +123,73 @@ export class DictationEngine {
     return this.running;
   }
 
-  /** Acquire the mic and start listening. Loads the recognizer on first use. */
+  /**
+   * Acquire the mic and start listening. Loads the recognizer on first use.
+   * Serialized against stop/dispose: a stop issued while this is in flight runs
+   * AFTER it, so the mic acquired here is always released cleanly.
+   */
   async start(modelPath: string): Promise<void> {
+    return this.enqueue(() => this.doStart(modelPath));
+  }
+
+  /** Stop listening; any phrase mid-flight is flushed so its words aren't lost. */
+  async stop(): Promise<void> {
+    return this.enqueue(() => this.doStop());
+  }
+
+  /** Stop and release the loaded model. Call on unmount. */
+  async dispose(): Promise<void> {
+    return this.enqueue(async () => {
+      await this.doStop();
+      await this.recognizer?.destroy().catch(() => undefined);
+      this.recognizer = undefined;
+      this.recognizerDir = undefined;
+    });
+  }
+
+  /** Chain an operation behind every previously issued start/stop/dispose. */
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.op.then(fn, fn);
+    this.op = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * (Re)create the recognizer when absent, pointed at a different model dir, or
+   * marked suspect after repeated transcription failures. A single clean retry
+   * covers a native engine that died and needs a fresh init.
+   */
+  private async ensureRecognizer(modelPath: string): Promise<void> {
+    if (this.recognizer && this.recognizerDir === modelPath && !this.recognizerSuspect) {
+      return;
+    }
+    await this.recognizer?.destroy().catch(() => undefined);
+    this.recognizer = undefined;
+    this.recognizerDir = undefined;
+    const create = () =>
+      sttModule().createSTT({
+        modelPath: rootModule().fileModelPath(modelPath),
+        modelType: "nemo_transducer",
+        preferInt8: true,
+        numThreads: 2,
+        provider: "cpu",
+      });
+    try {
+      this.recognizer = await create();
+    } catch {
+      // The native side may have died mid-session — retry once from scratch.
+      this.recognizer = await create();
+    }
+    this.recognizerDir = modelPath;
+    this.recognizerSuspect = false;
+    this.transcribeFailures = 0;
+  }
+
+  private async doStart(modelPath: string): Promise<void> {
     if (this.running) {
+      // Already capturing (e.g. a press landed on a capture that never stood
+      // down) — re-emit the real state so the UI can't sit stuck on "loading".
+      this.events.onStatus?.("listening");
       return;
     }
     if (!(await ensureMicPermission())) {
@@ -127,17 +199,7 @@ export class DictationEngine {
 
     this.events.onStatus?.("starting");
     try {
-      if (!this.recognizer || this.recognizerDir !== modelPath) {
-        await this.recognizer?.destroy().catch(() => undefined);
-        this.recognizer = await sttModule().createSTT({
-          modelPath: rootModule().fileModelPath(modelPath),
-          modelType: "nemo_transducer",
-          preferInt8: true,
-          numThreads: 2,
-          provider: "cpu",
-        });
-        this.recognizerDir = modelPath;
-      }
+      await this.ensureRecognizer(modelPath);
     } catch (error) {
       this.fail(describe(error, "Could not load the speech model."));
       return;
@@ -147,7 +209,7 @@ export class DictationEngine {
     const pcm = audioModule().createPcmLiveStream({ sampleRate: TARGET_RATE, channelCount: 1 });
     this.pcm = pcm;
     this.unsubData = pcm.onData((samples) => this.onChunk(samples));
-    this.unsubError = pcm.onError((message) => this.events.onError?.(message));
+    this.unsubError = pcm.onError((message) => this.onCaptureError(message));
 
     try {
       await pcm.start();
@@ -157,12 +219,19 @@ export class DictationEngine {
       return;
     }
 
+    if (this.pcm !== pcm) {
+      // Defensive (start/stop are serialized now, but onCaptureError can still
+      // tear down out-of-band): if the stream we acquired is no longer current,
+      // release it so the mic doesn't leak and stand down.
+      await pcm.stop().catch(() => undefined);
+      return;
+    }
+
     this.running = true;
     this.events.onStatus?.("listening");
   }
 
-  /** Stop listening; any phrase mid-flight is flushed so its words aren't lost. */
-  async stop(): Promise<void> {
+  private async doStop(): Promise<void> {
     if (!this.running) {
       await this.teardownCapture();
       return;
@@ -175,12 +244,15 @@ export class DictationEngine {
     }
   }
 
-  /** Stop and release the loaded model. Call on unmount. */
-  async dispose(): Promise<void> {
-    await this.stop();
-    await this.recognizer?.destroy().catch(() => undefined);
-    this.recognizer = undefined;
-    this.recognizerDir = undefined;
+  /**
+   * The mic stream died mid-capture (OS revoked it, route change, backgrounding).
+   * Without this, `running` stayed true against a dead stream and the next press
+   * found the engine wedged. Fail loudly, then tear down so the next start is clean.
+   */
+  private onCaptureError(message: string): void {
+    this.fail(message);
+    this.running = false;
+    void this.enqueue(() => this.teardownCapture());
   }
 
   private fail(message: string): void {
@@ -320,7 +392,14 @@ export class DictationEngine {
         if (text) {
           this.events.onSegment?.(text);
         }
+        this.transcribeFailures = 0;
       } catch (error) {
+        // One failure can be a transient bad segment; two in a row means the
+        // native recognizer is likely dead — recreate it on the next start.
+        this.transcribeFailures += 1;
+        if (this.transcribeFailures >= 2) {
+          this.recognizerSuspect = true;
+        }
         this.events.onError?.(describe(error, "Transcription failed."));
       }
     }

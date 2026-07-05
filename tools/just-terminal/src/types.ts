@@ -16,12 +16,20 @@ export interface TerminalProfile {
   description?: string;
 }
 
+export interface TerminalProject {
+  id: string;
+  name: string;
+  cwd: string;
+  createdAt: string;
+}
+
 export interface TerminalSessionSummary {
   id: string;
   title: string;
   shell: string;
   args: string[];
   cwd: string;
+  projectId?: string;
   source: SessionSource;
   pid?: number;
   status: SessionStatus;
@@ -55,13 +63,19 @@ export type ServerMessage =
       profiles: TerminalProfile[];
       hostProcesses: unknown[];
       peerHosts: unknown[];
+      projects: TerminalProject[];
       server: ServerInfo;
       bridgeCommands: unknown;
     }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
+  | { type: "projects"; projects: TerminalProject[] }
+  | { type: "notify"; title?: string; body?: string; sound?: string }
   | { type: "session"; session: TerminalSessionSummary }
   | { type: "snapshot"; sessionId: string; screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary }
   | { type: "output"; sessionId: string; seq: number; data: string }
+  // Data-free "this session printed something" ping sent (throttled) instead
+  // of full output to clients not subscribed to the session.
+  | { type: "activity"; sessionId: string; seq: number }
   | { type: "exit"; sessionId: string; exitCode?: number; signal?: number; session: TerminalSessionSummary }
   | { type: "host"; hostProcesses: unknown[]; peerHosts: unknown[] }
   | { type: "error"; message: string; detail?: string };
@@ -70,7 +84,7 @@ export type ClientMessage =
   | { type: "subscribe"; sessionId: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
-  | { type: "create"; title?: string; profileId?: string; shell?: string; args?: string[]; cwd?: string }
+  | { type: "create"; title?: string; profileId?: string; shell?: string; args?: string[]; cwd?: string; projectId?: string }
   | { type: "rename"; sessionId: string; title: string }
   | { type: "kill"; sessionId: string }
   | { type: "refresh-host" };

@@ -17,6 +17,7 @@ interface CreateSessionOptions {
   shell?: string;
   args?: string[];
   cwd?: string;
+  projectId?: string;
   cols?: number;
   rows?: number;
 }
@@ -27,6 +28,7 @@ interface ManagedTerminalSession {
   shell: string;
   args: string[];
   cwd: string;
+  projectId?: string;
   pty: pty.IPty;
   headless: HeadlessTerminalType;
   serializer: SerializeAddon;
@@ -117,6 +119,7 @@ export class TerminalManager extends EventEmitter {
       shell,
       args,
       cwd,
+      projectId: options.projectId,
       pty: term,
       headless,
       serializer,
@@ -146,6 +149,17 @@ export class TerminalManager extends EventEmitter {
         session: this.toSummary(session)
       });
       this.emit("sessions", this.listSessions());
+
+      // Keep the session list a mirror of live terminals: drop exited
+      // sessions after a short grace period.
+      const timer = setTimeout(() => {
+        const current = this.sessions.get(session.id);
+        if (current && current.status === "exited") {
+          this.sessions.delete(session.id);
+          this.emit("sessions", this.listSessions());
+        }
+      }, 30_000);
+      timer.unref?.();
     });
 
     this.sessions.set(id, session);
@@ -296,6 +310,7 @@ export class TerminalManager extends EventEmitter {
       shell: session.shell,
       args: session.args,
       cwd: path.resolve(session.cwd),
+      projectId: session.projectId,
       source: "managed",
       pid: session.pty.pid,
       status: session.status,

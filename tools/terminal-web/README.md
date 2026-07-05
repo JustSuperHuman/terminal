@@ -11,11 +11,12 @@ session lifecycle control.
 ## Run
 
 ```powershell
-npm install
-npm run dev
+bun install
+bun run bridge
 ```
 
-The app binds to `127.0.0.1` on the first available port starting at `10001`.
+From the repo root, `bun run bridge` starts the terminal-web host. The app binds
+to `0.0.0.0` on the first available port starting at `10001` by default.
 Each additional app instance binds to the next free port. Running instances scan
 `127.0.0.1:10001` and upward, then show reachable terminal-web peers in the
 sidebar. Peer sessions can be selected from the sidebar and are proxied through
@@ -23,17 +24,17 @@ the active web host, so switching between hosted instances stays in one browser
 surface.
 
 ```powershell
-npm run dev -- --port 10005
-npm run dev -- --host 0.0.0.0
+bun run bridge -- --port 10005
+bun run bridge -- --host 127.0.0.1
 ```
 
-Use `--host 0.0.0.0` only on trusted networks. The web UI can send input to local
-shells. When bound to all interfaces, remote API and WebSocket clients require
-an access token by default, while loopback clients stay open for local tools,
-peer discovery, and bridge commands. The sidebar shows copyable tokenized
-network URLs for the active host. If no token is configured, the generated
-network token is saved in `.terminal-web-token` so mobile clients keep working
-after host restarts.
+Run it only on trusted networks or override the host back to `127.0.0.1`. The
+web UI can send input to local shells. When bound to all interfaces, remote API
+and WebSocket clients require an access token by default, while loopback clients
+stay open for local tools, peer discovery, and bridge commands. The sidebar
+shows copyable tokenized network URLs for the active host. If no token is
+configured, the generated network token is saved in `.terminal-web-token` so
+mobile clients keep working after host restarts.
 
 Set a stable token with:
 
@@ -67,17 +68,23 @@ ANSI buffer so the UI can recover recent terminal state.
 
 ## Windows Terminal Dev Auto-Bridge
 
-The local WindowsTerminalDev build auto-wraps new ConPTY tabs with the bridge
-when it can find this package at `tools/terminal-web`. New tabs opened in that
-dev host appear as bridged sessions in the web UI and can be switched to from
-the sidebar. Tabs that were already running before the patched dev host started,
-or tabs opened in a different Windows Terminal install, cannot be attached
-retroactively.
+The local WindowsTerminalDev build mirrors every ConPTY session into this
+server with an in-process WebSocket client (no sidecar process; see
+`src/cascadia/TerminalConnection/TerminalBridge.*`). New tabs opened in that
+dev host appear as bridged sessions in the web UI and can be viewed and
+controlled remotely. Tabs opened in a different Windows Terminal install
+cannot be attached retroactively.
 
-Set `TERMINAL_WEB_SERVER` to point bridged tabs at another host, set
-`TERMINAL_WEB_ROOT` if the package cannot be found by walking up from
-`WindowsTerminal.exe`, or set `TERMINAL_WEB_AUTO_BRIDGE=0` to disable the
-wrapper.
+While the dev host has sessions open it also keeps this server alive: if
+`127.0.0.1:10001` stops answering, the terminal spawns `bun run dev` from this
+package (found via `TERMINAL_WEB_ROOT` or by walking up from
+`WindowsTerminal.exe`) and keeps retrying with backoff. The window title bar
+shows the live bridge state (`Bridge: connected` / `Bridge: offline`), and the
+new-tab dropdown has a "Copy Connection Token" item that copies
+`.terminal-web-token` (or `TERMINAL_WEB_ACCESS_TOKEN`) for remote clients.
+
+Set `WT_BRIDGE_SERVER` to point the dev host at another server (or to `off` to
+disable mirroring entirely).
 
 ## Input Model
 

@@ -21,6 +21,9 @@ namespace TerminalApp
         UInt32 TabViewIndex;
         UInt32 TabViewNumTabs;
 
+        // Which terminal-web project this tab was created under ("" = none).
+        String ProjectId;
+
         void Focus(Windows.UI.Xaml.FocusState focusState);
         void Close();
         void Shutdown();

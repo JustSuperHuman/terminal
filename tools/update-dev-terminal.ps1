@@ -116,6 +116,17 @@ if (-not (Test-Path $manifest)) {
     throw "Build succeeded, but the loose package manifest was not found: $manifest"
 }
 
+# Stamp a unique, monotonically increasing package version. Re-registering the
+# same version can hit ERROR_SHARING_VIOLATION (0x80070020) when Windows fails
+# to delete the stale AppRepository metadata directory from the previous
+# registration; a fresh version gets a fresh metadata directory instead.
+$now = Get-Date
+$stampedVersion = '0.{0}.{1}.{2}' -f (($now.Year - 2020) * 12 + $now.Month), ($now.Day * 100 + $now.Hour), ($now.Minute * 100 + $now.Second)
+Write-Host "Stamping loose package version $stampedVersion..."
+$manifestXml = Get-Content $manifest -Raw
+$manifestXml = $manifestXml -replace '(<Identity[^>]*\sVersion=")[0-9.]+(")', "`${1}$stampedVersion`${2}"
+Set-Content -Path $manifest -Value $manifestXml -Encoding UTF8
+
 Write-Host 'Registering WindowsTerminalDev loose package...'
 Add-AppxPackage -Register $manifest -ForceUpdateFromAnyVersion -ForceApplicationShutdown
 

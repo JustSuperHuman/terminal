@@ -1,4 +1,4 @@
-import type { BootstrapPayload, CreateSessionOptions, TerminalSessionSummary } from "./types";
+import type { BootstrapPayload, CreateSessionOptions, TerminalProject, TerminalSessionSummary } from "./types";
 import { accessTokenHeaders, withAccessToken } from "./access-token";
 
 export class ApiError extends Error {
@@ -11,7 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-async function parseResponse<T>(response: Response): Promise<T> {
+async function ensureOk(response: Response): Promise<void> {
   if (!response.ok) {
     let detail = "";
     try {
@@ -27,6 +27,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
     }
     throw new ApiError(detail || `Request failed with ${response.status}`, response.status);
   }
+}
+
+async function parseResponse<T>(response: Response): Promise<T> {
+  await ensureOk(response);
   return (await response.json()) as T;
 }
 
@@ -40,6 +44,25 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
       method: "POST",
       headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
       body: JSON.stringify(options)
+    })
+  );
+}
+
+export async function createProject(name: string, cwd: string): Promise<TerminalProject> {
+  return parseResponse<TerminalProject>(
+    await fetch(withAccessToken("/api/projects"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
+      body: JSON.stringify({ name, cwd })
+    })
+  );
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  await ensureOk(
+    await fetch(withAccessToken(`/api/projects/${encodeURIComponent(id)}`), {
+      method: "DELETE",
+      headers: accessTokenHeaders()
     })
   );
 }

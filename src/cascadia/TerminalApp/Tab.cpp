@@ -379,7 +379,10 @@ namespace winrt::TerminalApp::implementation
     {
         ASSERT_UI_THREAD();
 
-        return _activePane->GetFocusedProfile();
+        // _activePane is nulled during teardown, and this accessor is hit by
+        // the tab search filter for every tracked tab - including ones that
+        // are mid-close.
+        return _activePane ? _activePane->GetFocusedProfile() : nullptr;
     }
 
     // Method Description:

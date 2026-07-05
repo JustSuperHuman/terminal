@@ -1,32 +1,38 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Animated, PanResponder, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { Animated, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import * as Haptics from "expo-haptics";
 import type { TerminalSessionSummary } from "../types";
 import { colors, font, radius } from "../theme";
 
 const GOLD_BORDER = "rgba(255, 191, 0, 0.42)";
 
-// Press-and-hold (or drag) on the left edge of the terminal to summon a
-// vertical picker, then slide up/down to scrub between every live session and
-// release to switch. The capture strip sits above the terminal WebView so the
-// gesture wins over the terminal's own touch scrolling; the picker overlay is
-// purely visual — once the strip owns the responder it keeps every move/release
-// for the whole gesture, wherever the finger travels.
+// Session scrubber picker: a full-screen overlay (live terminal preview behind
+// a translucent card wheel) summoned by the SwipeBar's horizontal drag (or a
+// stationary press-and-hold, for a look-first scrub). The bar owns the touch;
+// this component only renders the picker and applies the scrub via an
+// imperative handle:
+//   begin()          -> summon the picker anchored on the active session
+//                       (returns false when there is nothing to scrub)
+//   moveBy(steps)    -> select anchor+steps (clamped), live-previewing it
+//   finish(commit)   -> commit switches to the selection; cancel reverts the
+//                       preview to the anchor session
 
-const STRIP_WIDTH = 26; // left-edge capture zone
 const ROW_HEIGHT = 62; // height of each picker card
-const ACTIVATE_HOLD_MS = 190; // press-and-hold threshold to summon the picker
-const ACTIVATE_DRAG_PX = 12; // …or a deliberate drag past this also summons it
-const STEP_PX = 46; // finger travel per one-session step
+
+export interface SessionSwitcherHandle {
+  /** Summon the picker. Returns false (no-op) when fewer than 2 sessions. */
+  begin: () => boolean;
+  /** Move the selection to anchor+steps (clamped to the session list). */
+  moveBy: (steps: number) => void;
+  /** Dismiss: commit switches to the selection, cancel reverts the preview. */
+  finish: (commit: boolean) => void;
+}
 
 interface SessionSwitcherProps {
   sessions: TerminalSessionSummary[];
   activeId?: string;
   unread: Record<string, number>;
   onSelect: (id: string) => void;
-  // Quick tap on the grip opens the full (tappable) session list — slide is for
-  // power users, tap is the discoverable path.
-  onRequestList?: () => void;
   // Live-switch the terminal to the scrubbed session while still dragging, so the
   // user sees the destination before releasing (committed via onSelect, reverted
   // to the start on cancel).
@@ -48,35 +54,27 @@ const tick = () => Haptics.selectionAsync().catch(() => {});
 const thud = () => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
 const confirm = () => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
-export function SessionSwitcher({
-  sessions,
-  activeId,
-  unread,
-  onSelect,
-  onRequestList,
-  onPreview,
-  onScrubbingChange,
-}: SessionSwitcherProps) {
+export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcherProps>(function SessionSwitcher(
+  { sessions, activeId, unread, onSelect, onPreview, onScrubbingChange },
+  ref
+) {
   const [active, setActive] = useState(false);
   const [selected, setSelected] = useState(0);
   const [containerH, setContainerH] = useState(0);
 
-  // The PanResponder is created once; it reads live values through refs.
+  // The imperative handle reads live values through refs.
   const sessionsRef = useRef(sessions);
   const activeIdRef = useRef(activeId);
   const anchorSessionIdRef = useRef<string | undefined>(undefined);
-  const onRequestListRef = useRef(onRequestList);
   const onPreviewRef = useRef(onPreview);
   const onScrubbingChangeRef = useRef(onScrubbingChange);
   useEffect(() => {
-    onRequestListRef.current = onRequestList;
     onPreviewRef.current = onPreview;
     onScrubbingChangeRef.current = onScrubbingChange;
-  }, [onRequestList, onPreview, onScrubbingChange]);
+  }, [onPreview, onScrubbingChange]);
   const selectedRef = useRef(0);
   const anchorIndexRef = useRef(0);
   const activeRef = useRef(false);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -109,7 +107,7 @@ export function SessionSwitcher({
   const begin = useCallback(() => {
     const list = sessionsRef.current;
     if (list.length < 2 || activeRef.current) {
-      return;
+      return false;
     }
     const start = Math.max(0, list.findIndex((item) => item.id === activeIdRef.current));
     anchorIndexRef.current = start;
@@ -122,14 +120,23 @@ export function SessionSwitcher({
     onScrubbingChangeRef.current?.(true);
     thud();
     Animated.timing(fade, { toValue: 1, duration: 130, useNativeDriver: true }).start();
+    return true;
   }, [fade, pos]);
+
+  const moveBy = useCallback(
+    (steps: number) => {
+      if (!activeRef.current) {
+        return;
+      }
+      const count = sessionsRef.current.length;
+      const next = Math.min(count - 1, Math.max(0, anchorIndexRef.current + steps));
+      moveSelection(next);
+    },
+    [moveSelection]
+  );
 
   const finish = useCallback(
     (commit: boolean) => {
-      if (holdTimer.current) {
-        clearTimeout(holdTimer.current);
-        holdTimer.current = null;
-      }
       if (!activeRef.current) {
         return;
       }
@@ -156,94 +163,22 @@ export function SessionSwitcher({
     [fade, onSelect]
   );
 
-  // Keep the responder's closures pointing at the freshest callbacks.
-  const handlers = useRef({ begin, finish, moveSelection });
-  useEffect(() => {
-    handlers.current = { begin, finish, moveSelection };
-  }, [begin, finish, moveSelection]);
-
-  useEffect(() => {
-    return () => {
-      if (holdTimer.current) {
-        clearTimeout(holdTimer.current);
-      }
-    };
-  }, []);
-
-  const responder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => sessionsRef.current.length >= 2,
-      onStartShouldSetPanResponderCapture: () => sessionsRef.current.length >= 2,
-      onMoveShouldSetPanResponder: () => activeRef.current,
-      onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => {
-        if (sessionsRef.current.length < 2) {
-          return;
-        }
-        holdTimer.current = setTimeout(() => handlers.current.begin(), ACTIVATE_HOLD_MS);
-      },
-      onPanResponderMove: (_evt, gesture) => {
-        if (!activeRef.current) {
-          if (Math.abs(gesture.dy) <= ACTIVATE_DRAG_PX && Math.abs(gesture.dx) <= ACTIVATE_DRAG_PX) {
-            return;
-          }
-          if (holdTimer.current) {
-            clearTimeout(holdTimer.current);
-            holdTimer.current = null;
-          }
-          handlers.current.begin();
-        }
-        const count = sessionsRef.current.length;
-        const steps = Math.round(gesture.dy / STEP_PX);
-        const next = Math.min(count - 1, Math.max(0, anchorIndexRef.current + steps));
-        handlers.current.moveSelection(next);
-      },
-      onPanResponderRelease: () => {
-        // A quick tap (no hold-to-activate, no slide) never entered scrub mode —
-        // treat it as "open the session list" so switching is discoverable.
-        const wasActive = activeRef.current;
-        handlers.current.finish(true);
-        if (!wasActive) {
-          onRequestListRef.current?.();
-        }
-      },
-      onPanResponderTerminate: () => handlers.current.finish(false),
-    })
-  ).current;
+  useImperativeHandle(ref, () => ({ begin, moveBy, finish }), [begin, moveBy, finish]);
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     setContainerH(event.nativeEvent.layout.height);
   }, []);
 
-  const hasMany = sessions.length >= 2;
   const centerY = containerH / 2;
   // Slide the whole column so the selected card lands on the centre frame.
   const listTranslate = Animated.subtract(centerY - ROW_HEIGHT / 2, Animated.multiply(pos, ROW_HEIGHT));
 
-  // Idle, only the 26px edge strip overlays the terminal — the rest of the
-  // surface is left clear so taps reach the WebView (Android does not reliably
-  // pass taps through a full-screen pointerEvents="box-none" view). The picker
-  // overlay is mounted only while actively scrubbing.
+  // The wrapper is a permanent, untouchable full-bleed layer: it measures the
+  // terminal area (so the wheel centres correctly on the first frame) and hosts
+  // the picker overlay only while a scrub is in flight. All touches pass
+  // through to the terminal beneath.
   return (
-    <>
-      <View
-        style={styles.strip}
-        pointerEvents={hasMany ? "auto" : "none"}
-        onLayout={onLayout}
-        accessibilityRole="button"
-        accessibilityLabel={`Switch terminal · ${sessions.length} sessions. Tap to list, hold and slide to scrub.`}
-        {...responder.panHandlers}
-      >
-        {hasMany && !active ? (
-          <View style={styles.grip}>
-            <View style={styles.gripDot} />
-            <View style={styles.gripDot} />
-            <View style={styles.gripDot} />
-            <Text style={styles.gripCount}>{sessions.length}</Text>
-          </View>
-        ) : null}
-      </View>
-
+    <View style={StyleSheet.absoluteFill} pointerEvents="none" onLayout={onLayout}>
       {active ? (
         <Animated.View style={[StyleSheet.absoluteFill, styles.overlay, { opacity: fade }]} pointerEvents="none">
           <View style={styles.topHint}>
@@ -315,40 +250,11 @@ export function SessionSwitcher({
           </View>
         </Animated.View>
       ) : null}
-    </>
+    </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
-  strip: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: STRIP_WIDTH,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  grip: {
-    gap: 5,
-    paddingVertical: 14,
-    paddingHorizontal: 7,
-    borderTopRightRadius: radius.pill,
-    borderBottomRightRadius: radius.pill,
-    backgroundColor: "rgba(255, 191, 0, 0.08)",
-  },
-  gripDot: {
-    width: 3,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: "rgba(255, 191, 0, 0.5)",
-  },
-  gripCount: {
-    marginTop: 4,
-    color: "rgba(255, 191, 0, 0.85)",
-    fontSize: 10,
-    fontFamily: font.bold,
-  },
   overlay: {
     // Translucent so the live terminal preview is visible behind the picker as
     // the user scrubs between sessions.

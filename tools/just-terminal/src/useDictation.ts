@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AppState } from "react-native";
 import {
   ACTIVE_MODEL,
   DictationCancelled,
@@ -23,9 +24,13 @@ export type DictationUiStatus =
   | "error";
 
 // Statuses where the engine/provisioning is engaged (drives the `active` flag).
-const BUSY: DictationUiStatus[] = ["downloading", "loading", "listening", "recognizing"];
-// Capture (press-and-hold listening) phases — these stand down on release.
-const CAPTURING: DictationUiStatus[] = ["loading", "listening", "recognizing"];
+const BUSY: DictationUiStatus[] = ["checking", "downloading", "loading", "listening", "recognizing"];
+// Capture (press-and-hold) phases — these stand down on release/backgrounding.
+const CAPTURING: DictationUiStatus[] = ["checking", "loading", "listening", "recognizing"];
+
+// An error is shown briefly, then the hook self-recovers to idle so the mic
+// button always responds to the next press (nothing stays wedged on "error").
+const ERROR_RESET_MS = 4000;
 
 export interface UseDictationParams {
   /** Called with each finalized phrase (already trimmed, non-empty). */
@@ -108,11 +113,15 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
     if (!engineRef.current) {
       engineRef.current = new DictationEngine({
         onStatus: (engineStatus) => {
-          if (engineStatus === "starting") setStatus("loading");
-          else if (engineStatus === "listening") setStatus("listening");
-          else if (engineStatus === "recognizing") setStatus("recognizing");
-          // Don't clobber a download that's running in the background.
-          else if (engineStatus === "idle") setStatus((cur) => (cur === "downloading" ? cur : "idle"));
+          // An "error" status is only cleared by its auto-reset timer or a fresh
+          // press — trailing engine events (the drain loop emits idle/listening
+          // right after a failure) must not swallow it before the user sees it.
+          if (engineStatus === "starting") setStatus((cur) => (cur === "error" ? cur : "loading"));
+          else if (engineStatus === "listening") setStatus((cur) => (cur === "error" ? cur : "listening"));
+          else if (engineStatus === "recognizing") setStatus((cur) => (cur === "error" ? cur : "recognizing"));
+          // Also don't clobber a download that's running in the background.
+          else if (engineStatus === "idle")
+            setStatus((cur) => (cur === "downloading" || cur === "error" ? cur : "idle"));
           else if (engineStatus === "error") setStatus("error");
         },
         onLevel: (value) => {
@@ -203,7 +212,10 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
       ensureModelDownload();
       return;
     }
-    // Readiness not resolved yet (first interaction) — check, then act.
+    // Readiness not resolved yet (first interaction) — check, then act. Show
+    // "checking" so the press gives immediate feedback instead of a dead button.
+    setError(undefined);
+    setStatus("checking");
     void (async () => {
       let ready = false;
       try {
@@ -246,6 +258,31 @@ export function useDictation({ onText, enabled = true }: UseDictationParams): Us
       stop();
     }
   }, [enabled, status, stop]);
+
+  // Backgrounding mid-capture: the OS suspends/revokes the mic, which used to
+  // leave a dead capture (or a stuck status) behind. Stand the capture down on
+  // any away-from-active transition; a model download keeps running.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") {
+        stop();
+      }
+    });
+    return () => sub.remove();
+  }, [stop]);
+
+  // Self-recovery: errors surface briefly, then reset to idle so the next press
+  // always works (start() is never blocked by an "error" status either way).
+  useEffect(() => {
+    if (status !== "error") {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setError(undefined);
+      setStatus((cur) => (cur === "error" ? "idle" : cur));
+    }, ERROR_RESET_MS);
+    return () => clearTimeout(timer);
+  }, [status]);
 
   // Release the model + mic on unmount (and abort an in-flight download).
   useEffect(() => {

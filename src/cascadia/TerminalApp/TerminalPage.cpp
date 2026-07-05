@@ -26,6 +26,10 @@
 #include "TabRowControl.h"
 #include "TerminalSettingsCache.h"
 
+#include <winhttp.h>
+#include <winrt/Windows.Data.Json.h>
+#pragma comment(lib, "winhttp.lib")
+
 #include "LaunchPositionRequest.g.cpp"
 #include "WindowListEntry.g.cpp"
 #include "WindowListRequest.g.cpp"
@@ -60,8 +64,86 @@ namespace winrt
 {
     namespace MUX = Microsoft::UI::Xaml;
     namespace WUX = Windows::UI::Xaml;
+    namespace WDJ = Windows::Data::Json;
     using IInspectable = Windows::Foundation::IInspectable;
     using VirtualKeyModifiers = Windows::System::VirtualKeyModifiers;
+}
+
+namespace
+{
+    using unique_winhttp_handle = wil::unique_any<HINTERNET, decltype(&::WinHttpCloseHandle), ::WinHttpCloseHandle>;
+
+    // Minimal synchronous HTTP client for the local terminal-web server that
+    // backs the project tabs. Only ever call this from a background thread.
+    std::optional<std::string> _projectServerRequest(const wchar_t* verb, const std::wstring& path, const std::string& body = {})
+    {
+        const unique_winhttp_handle session{ WinHttpOpen(L"WindowsTerminal-Projects/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
+        if (!session)
+        {
+            return std::nullopt;
+        }
+
+        const unique_winhttp_handle connection{ WinHttpConnect(session.get(), L"127.0.0.1", 10001, 0) };
+        if (!connection)
+        {
+            return std::nullopt;
+        }
+
+        const unique_winhttp_handle request{ WinHttpOpenRequest(connection.get(), verb, path.c_str(), nullptr, nullptr, nullptr, 0) };
+        if (!request)
+        {
+            return std::nullopt;
+        }
+
+        const auto* const headers = body.empty() ? nullptr : L"Content-Type: application/json\r\n";
+        const auto headersLength = body.empty() ? 0UL : static_cast<DWORD>(-1);
+        auto* const optionalData = body.empty() ? nullptr : const_cast<char*>(body.data());
+        const auto bodySize = gsl::narrow_cast<DWORD>(body.size());
+        if (!WinHttpSendRequest(request.get(), headers, headersLength, optionalData, bodySize, bodySize, 0))
+        {
+            return std::nullopt;
+        }
+        if (!WinHttpReceiveResponse(request.get(), nullptr))
+        {
+            return std::nullopt;
+        }
+
+        DWORD statusCode{};
+        DWORD statusCodeSize{ sizeof(statusCode) };
+#pragma warning(suppress : 26477) // WINHTTP_HEADER_NAME_BY_INDEX expands to NULL rather than nullptr.
+        if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX))
+        {
+            return std::nullopt;
+        }
+        if (statusCode < 200 || statusCode >= 300)
+        {
+            return std::nullopt;
+        }
+
+        std::string response;
+        for (;;)
+        {
+            DWORD available{};
+            if (!WinHttpQueryDataAvailable(request.get(), &available))
+            {
+                return std::nullopt;
+            }
+            if (available == 0)
+            {
+                break;
+            }
+
+            const auto offset = response.size();
+            response.resize(offset + available);
+            DWORD read{};
+            if (!WinHttpReadData(request.get(), response.data() + offset, available, &read))
+            {
+                return std::nullopt;
+            }
+            response.resize(offset + read);
+        }
+        return response;
+    }
 }
 
 namespace clipboard
@@ -331,6 +413,47 @@ namespace winrt::TerminalApp::implementation
         _tabRow = this->TabRow();
         _tabView = _tabRow.TabView();
         _rearranging = false;
+
+        // The terminal-web bridge lives on background threads inside
+        // TerminalConnection, so poll its status and reflect changes in the
+        // window title instead of marshalling events across the boundary.
+        _bridgeStatusTimer.Interval(std::chrono::milliseconds(2000));
+        _bridgeStatusTimer.Tick({ get_weak(), &TerminalPage::_BridgeStatusTimerTick });
+        _bridgeStatusTimer.Start();
+
+        // Populate the project strip ("All" + "+") immediately; the timer
+        // tick keeps it in sync with the terminal-web store afterwards.
+        _RebuildProjectTabs();
+
+        // Accept project-tab drags for reordering.
+        {
+            const auto panel{ ProjectTabPanel() };
+            panel.AllowDrop(true);
+            panel.DragOver([](const IInspectable&, const WUX::DragEventArgs& e) {
+                e.AcceptedOperation(DataPackageOperation::Move);
+            });
+            panel.Drop([weakThis = get_weak()](const IInspectable&, const WUX::DragEventArgs& e) {
+                const auto page{ weakThis.get() };
+                if (!page || !e.DataView().Contains(StandardDataFormats::Text()))
+                {
+                    return;
+                }
+
+                const auto dropX = e.GetPosition(page->ProjectTabPanel()).X;
+                const auto deferral{ e.GetDeferral() };
+                e.DataView().GetTextAsync().Completed([weakThis, dropX, deferral](const auto& operation, const auto status) {
+                    if (status == Windows::Foundation::AsyncStatus::Completed)
+                    {
+                        if (const auto page{ weakThis.get() })
+                        {
+                            // The coroutine marshals itself back to the UI thread.
+                            page->_ProjectDropReorder(operation.GetResults(), dropX);
+                        }
+                    }
+                    deferral.Complete();
+                });
+            });
+        }
 
         const auto canDragDrop = CanDragDrop();
 
@@ -1232,6 +1355,23 @@ namespace winrt::TerminalApp::implementation
 
             aboutFlyout.Click({ this, &TerminalPage::_AboutButtonOnClick });
             newTabFlyout.Items().Append(aboutFlyout);
+
+            // Create the "copy connection token" button, so remote web/mobile
+            // clients can be handed the terminal-web bridge access token.
+            auto copyTokenFlyout = WUX::Controls::MenuFlyoutItem{};
+            copyTokenFlyout.Text(RS_(L"CopyConnectionTokenMenuItem"));
+            const auto copyTokenToolTip = RS_(L"CopyConnectionTokenToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(copyTokenFlyout, box_value(copyTokenToolTip));
+            Automation::AutomationProperties::SetHelpText(copyTokenFlyout, copyTokenToolTip);
+
+            WUX::Controls::FontIcon copyTokenIcon{};
+            copyTokenIcon.Glyph(L"\xE8D7"); // Permissions (key)
+            copyTokenIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            copyTokenFlyout.Icon(copyTokenIcon);
+
+            copyTokenFlyout.Click({ this, &TerminalPage::_CopyConnectionTokenOnClick });
+            newTabFlyout.Items().Append(copyTokenFlyout);
         }
 
         // Before opening the fly-out set focus on the current tab
@@ -1668,226 +1808,6 @@ namespace winrt::TerminalApp::implementation
         return Utils::EvaluateStartingDirectory(_WindowProperties.VirtualWorkingDirectory(), path);
     }
 
-    namespace
-    {
-        static std::wstring _terminalWebGetEnvironmentVariable(const wchar_t* name)
-        {
-            const auto required = GetEnvironmentVariableW(name, nullptr, 0);
-            if (required == 0)
-            {
-                return {};
-            }
-
-            std::wstring value(required, L'\0');
-            const auto written = GetEnvironmentVariableW(name, value.data(), gsl::narrow_cast<DWORD>(value.size()));
-            if (written == 0 || written >= value.size())
-            {
-                return {};
-            }
-
-            value.resize(written);
-            return value;
-        }
-
-        static std::wstring _terminalWebToLower(std::wstring_view value)
-        {
-            std::wstring result{ value };
-            std::transform(result.begin(), result.end(), result.begin(), [](const wchar_t ch) {
-                return gsl::narrow_cast<wchar_t>(std::towlower(ch));
-            });
-            return result;
-        }
-
-        static bool _terminalWebIsDisabled()
-        {
-            const auto setting = _terminalWebToLower(_terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_AUTO_BRIDGE"));
-            return setting == L"0" || setting == L"false" || setting == L"off";
-        }
-
-        static bool _terminalWebIsBridgeCommandline(const std::wstring_view commandline)
-        {
-            const auto lower = _terminalWebToLower(commandline);
-            return lower.find(L"terminal-web") != std::wstring::npos &&
-                   lower.find(L"bridge") != std::wstring::npos;
-        }
-
-        static bool _terminalWebPackageExists(const std::filesystem::path& terminalWebRoot)
-        {
-            std::error_code ec;
-            return std::filesystem::is_regular_file(terminalWebRoot / L"package.json", ec);
-        }
-
-        static std::optional<std::filesystem::path> _terminalWebRoot()
-        {
-            const auto configuredRoot = _terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_ROOT");
-            if (!configuredRoot.empty())
-            {
-                std::filesystem::path root{ configuredRoot };
-                if (_terminalWebPackageExists(root))
-                {
-                    return root;
-                }
-            }
-
-            std::filesystem::path cursor = wil::GetModuleFileNameW<std::wstring>(nullptr);
-            cursor = cursor.parent_path();
-
-            for (auto depth = 0; depth < 12 && !cursor.empty(); ++depth)
-            {
-                const auto candidate = cursor / L"tools" / L"terminal-web";
-                if (_terminalWebPackageExists(candidate))
-                {
-                    return candidate;
-                }
-
-                const auto parent = cursor.parent_path();
-                if (parent == cursor)
-                {
-                    break;
-                }
-                cursor = parent;
-            }
-
-            return std::nullopt;
-        }
-
-        static std::wstring _terminalWebPowerShellQuote(std::wstring_view value)
-        {
-            std::wstring result;
-            result.reserve(value.size() + 2);
-            result.push_back(L'\'');
-            for (const auto ch : value)
-            {
-                result.push_back(ch);
-                if (ch == L'\'')
-                {
-                    result.push_back(L'\'');
-                }
-            }
-            result.push_back(L'\'');
-            return result;
-        }
-
-        static std::wstring _terminalWebCommandLineQuote(std::wstring_view value)
-        {
-            if (!value.empty() && value.find_first_of(L" \t\n\v\"") == std::wstring_view::npos)
-            {
-                return std::wstring{ value };
-            }
-
-            std::wstring result;
-            result.push_back(L'"');
-
-            auto backslashes = 0;
-            for (const auto ch : value)
-            {
-                if (ch == L'\\')
-                {
-                    ++backslashes;
-                    continue;
-                }
-
-                if (ch == L'"')
-                {
-                    result.append(backslashes * 2 + 1, L'\\');
-                    result.push_back(ch);
-                }
-                else
-                {
-                    result.append(backslashes, L'\\');
-                    result.push_back(ch);
-                }
-                backslashes = 0;
-            }
-
-            result.append(backslashes * 2, L'\\');
-            result.push_back(L'"');
-            return result;
-        }
-
-        static std::vector<std::wstring> _terminalWebSplitCommandline(const std::wstring& commandline)
-        {
-            auto argc = 0;
-            wil::unique_any<LPWSTR*, decltype(&::LocalFree), ::LocalFree> argv{ CommandLineToArgvW(commandline.c_str(), &argc) };
-            std::vector<std::wstring> args;
-            if (!argv || argc == 0)
-            {
-                return args;
-            }
-
-            args.reserve(argc);
-            for (auto i = 0; i < argc; ++i)
-            {
-                args.emplace_back(argv.get()[i]);
-            }
-            return args;
-        }
-
-        static std::optional<winrt::hstring> _terminalWebBridgeCommandline(const Profile& profile,
-                                                                           const IControlSettings& settings,
-                                                                           const std::wstring& workingDirectory)
-        {
-            if (_terminalWebIsDisabled())
-            {
-                return std::nullopt;
-            }
-
-            const std::wstring originalCommandline{ std::wstring_view{ settings.Commandline() } };
-            if (originalCommandline.empty() || _terminalWebIsBridgeCommandline(originalCommandline))
-            {
-                return std::nullopt;
-            }
-
-            const auto originalArgs = _terminalWebSplitCommandline(originalCommandline);
-            if (originalArgs.empty())
-            {
-                return std::nullopt;
-            }
-
-            const auto terminalWebRoot = _terminalWebRoot();
-            if (!terminalWebRoot)
-            {
-                return std::nullopt;
-            }
-
-            auto server = _terminalWebGetEnvironmentVariable(L"TERMINAL_WEB_SERVER");
-            if (server.empty())
-            {
-                server = L"http://127.0.0.1:10001";
-            }
-
-            std::wstring title{ std::wstring_view{ settings.StartingTitle() } };
-            if (title.empty() && profile)
-            {
-                title = std::wstring{ std::wstring_view{ profile.Name() } };
-            }
-            if (title.empty())
-            {
-                title = L"Windows Terminal";
-            }
-
-            std::wstring script;
-            script.append(L"& npm --prefix ");
-            script.append(_terminalWebPowerShellQuote(terminalWebRoot->wstring()));
-            script.append(L" run bridge -- --server ");
-            script.append(_terminalWebPowerShellQuote(server));
-            script.append(L" --title ");
-            script.append(_terminalWebPowerShellQuote(title));
-            script.append(L" --cwd ");
-            script.append(_terminalWebPowerShellQuote(workingDirectory));
-            script.append(L" --");
-            for (const auto& arg : originalArgs)
-            {
-                script.push_back(L' ');
-                script.append(_terminalWebPowerShellQuote(arg));
-            }
-
-            std::wstring commandline{ L"powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command " };
-            commandline.append(_terminalWebCommandLineQuote(script));
-            return winrt::hstring{ commandline };
-        }
-    }
-
     // Method Description:
     // - Creates a new connection based on the profile settings
     // Arguments:
@@ -1958,11 +1878,12 @@ namespace winrt::TerminalApp::implementation
             // process until later, on another thread, after we've already
             // restored the CWD to its original value.
             auto newWorkingDirectory{ _evaluatePathForCwd(settings.StartingDirectory()) };
-            auto commandline{ settings.Commandline() };
-            if (const auto bridgeCommandline = _terminalWebBridgeCommandline(profile, settings, newWorkingDirectory))
+            if (!_activeProjectCwd.empty())
             {
-                commandline = *bridgeCommandline;
+                // A project tab is active: new terminals start in its directory.
+                newWorkingDirectory = std::wstring{ _activeProjectCwd };
             }
+            auto commandline{ settings.Commandline() };
 
             connection = TerminalConnection::ConptyConnection{};
             valueSet = TerminalConnection::ConptyConnection::CreateSettings(commandline,
@@ -2132,6 +2053,657 @@ namespace winrt::TerminalApp::implementation
             TraceLoggingValue("CommandPalette", "ItemType", "The type of item that was clicked in the new tab menu"),
             TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
             TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+    }
+
+    // Method Description:
+    // - Called when the "copy connection token" item in the new tab flyout is
+    //   clicked. Copies the terminal-web bridge access token to the clipboard
+    //   so a web/mobile client on the network can authenticate.
+    void TerminalPage::_CopyConnectionTokenOnClick(const IInspectable&,
+                                                   const RoutedEventArgs&)
+    {
+        const auto token = TerminalConnection::ConptyConnection::BridgeAccessToken();
+        if (token.empty())
+        {
+            return;
+        }
+
+        if (const auto clipboard = clipboard::open(_hostingHwnd.value_or(nullptr)))
+        {
+            clipboard::write(token.c_str(), {}, {});
+        }
+    }
+
+    // Method Description:
+    // - Samples the terminal-web bridge connectivity and refreshes the window
+    //   title when it changes, so the title bar always reflects bridge status.
+    void TerminalPage::_BridgeStatusTimerTick(const IInspectable&,
+                                              const IInspectable&)
+    {
+        const auto status = TerminalConnection::ConptyConnection::BridgeConnectionStatus();
+        if (status != _bridgeStatus)
+        {
+            _bridgeStatus = status;
+            TitleChanged.raise(*this, nullptr);
+        }
+
+        // Refresh the project tabs from the terminal-web store every third
+        // tick (~6s), and immediately on the first tick after startup.
+        if ((_bridgeStatusTicks++ % 3) == 0)
+        {
+            _RefreshBridgeProjects();
+        }
+    }
+
+    // Method Description:
+    // - Fetches the project list from the local terminal-web server on a
+    //   background thread and rebuilds the horizontal project tab strip when
+    //   it changed.
+    safe_void_coroutine TerminalPage::_RefreshBridgeProjects()
+    {
+        if (_projectFetchInFlight.exchange(true))
+        {
+            co_return;
+        }
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        std::vector<BridgeProject> projects;
+        auto fetched = false;
+        if (const auto response{ _projectServerRequest(L"GET", L"/api/projects") })
+        {
+            WDJ::JsonArray array{ nullptr };
+            if (WDJ::JsonArray::TryParse(winrt::to_hstring(*response), array))
+            {
+                fetched = true;
+                for (const auto& item : array)
+                {
+                    if (item.ValueType() != WDJ::JsonValueType::Object)
+                    {
+                        continue;
+                    }
+                    const auto obj{ item.GetObject() };
+                    BridgeProject project{
+                        obj.GetNamedString(L"id", L""),
+                        obj.GetNamedString(L"name", L""),
+                        obj.GetNamedString(L"cwd", L"")
+                    };
+                    if (!project.Id.empty())
+                    {
+                        projects.push_back(std::move(project));
+                    }
+                }
+            }
+        }
+
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        page->_projectFetchInFlight.store(false);
+
+        if (fetched && page->_bridgeProjects != projects)
+        {
+            page->_bridgeProjects = std::move(projects);
+
+            // If the active project disappeared (deleted remotely), fall back
+            // to "All"; _SelectProject rebuilds the strip either way.
+            auto activeStillExists = page->_activeProjectId.empty();
+            for (const auto& project : page->_bridgeProjects)
+            {
+                if (project.Id == page->_activeProjectId)
+                {
+                    activeStillExists = true;
+                    break;
+                }
+            }
+
+            if (activeStillExists)
+            {
+                page->_RebuildProjectTabs();
+            }
+            else
+            {
+                page->_SelectProject({}, {});
+            }
+        }
+    }
+
+    // Method Description:
+    // - Rebuilds the horizontal project tab strip: "All", one tab per
+    //   project (with an inline close button), and a trailing "+".
+    void TerminalPage::_RebuildProjectTabs()
+    {
+        const auto panel{ ProjectTabPanel() };
+        if (!panel)
+        {
+            return;
+        }
+
+        panel.Children().Clear();
+
+        WUX::Style accentStyle{ nullptr };
+        try
+        {
+            accentStyle = Application::Current().Resources().Lookup(winrt::box_value(L"AccentButtonStyle")).try_as<WUX::Style>();
+        }
+        CATCH_LOG();
+
+        const auto weakThis{ get_weak() };
+
+        auto addProjectTab = [&](const winrt::hstring& label, const winrt::hstring& id, const winrt::hstring& cwd, const bool closable) {
+            Button tabButton;
+            tabButton.Padding(ThicknessHelper::FromLengths(10, 2, closable ? 4 : 10, 2));
+            if (id == _activeProjectId && accentStyle)
+            {
+                tabButton.Style(accentStyle);
+            }
+
+            StackPanel content;
+            content.Orientation(Orientation::Horizontal);
+            content.Spacing(6);
+
+            TextBlock text;
+            text.Text(label);
+            text.VerticalAlignment(VerticalAlignment::Center);
+            content.Children().Append(text);
+
+            if (closable)
+            {
+                Button closeButton;
+                FontIcon closeIcon;
+                closeIcon.Glyph(L"\xE711"); // Cancel
+                closeIcon.FontSize(10);
+                closeIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                closeButton.Content(closeIcon);
+                closeButton.Padding(ThicknessHelper::FromLengths(4, 2, 4, 2));
+                closeButton.Background(Media::SolidColorBrush{ Colors::Transparent() });
+                closeButton.BorderThickness(ThicknessHelper::FromUniformLength(0));
+                Automation::AutomationProperties::SetName(closeButton, L"Close project " + label);
+                closeButton.Click([weakThis, id, label](auto&&, auto&&) {
+                    if (const auto page{ weakThis.get() })
+                    {
+                        page->_CloseProjectRequested(id, label);
+                    }
+                });
+                content.Children().Append(closeButton);
+            }
+
+            tabButton.Content(content);
+            if (!cwd.empty())
+            {
+                ToolTipService::SetToolTip(tabButton, winrt::box_value(cwd));
+            }
+            Automation::AutomationProperties::SetName(tabButton, label);
+            tabButton.Click([weakThis, id, cwd](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_SelectProject(id, cwd);
+                }
+            });
+
+            if (closable)
+            {
+                // Project tabs can be dragged to reorder; the panel's Drop
+                // handler (wired in Create()) computes the target position.
+                tabButton.CanDrag(true);
+                tabButton.DragStarting([id](const WUX::UIElement&, const WUX::DragStartingEventArgs& args) {
+                    args.Data().SetText(id);
+                    args.Data().RequestedOperation(DataPackageOperation::Move);
+                });
+            }
+
+            panel.Children().Append(tabButton);
+        };
+
+        addProjectTab(L"All", {}, {}, false);
+        for (const auto& project : _bridgeProjects)
+        {
+            addProjectTab(project.Name, project.Id, project.Cwd, true);
+        }
+
+        Button addButton;
+        FontIcon addIcon;
+        addIcon.Glyph(L"\xE710"); // Add
+        addIcon.FontSize(12);
+        addIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        addButton.Content(addIcon);
+        addButton.Padding(ThicknessHelper::FromLengths(8, 2, 8, 2));
+        ToolTipService::SetToolTip(addButton, winrt::box_value(L"New Project"));
+        Automation::AutomationProperties::SetName(addButton, L"New Project");
+        addButton.Click([weakThis](auto&&, auto&&) {
+            if (const auto page{ weakThis.get() })
+            {
+                page->_ShowNewProjectTip();
+            }
+        });
+        panel.Children().Append(addButton);
+
+        // Globe button: open the terminal-web view in the default browser.
+        Button webButton;
+        FontIcon webIcon;
+        webIcon.Glyph(L"\xE774"); // Globe
+        webIcon.FontSize(12);
+        webIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        webButton.Content(webIcon);
+        webButton.Padding(ThicknessHelper::FromLengths(8, 2, 8, 2));
+        ToolTipService::SetToolTip(webButton, winrt::box_value(L"Open web view"));
+        Automation::AutomationProperties::SetName(webButton, L"Open web view");
+        webButton.Click([](auto&&, auto&&) {
+            std::ignore = Launcher::LaunchUriAsync(Windows::Foundation::Uri{ L"http://127.0.0.1:10001/" });
+        });
+        panel.Children().Append(webButton);
+    }
+
+    // Method Description:
+    // - Makes the given project the active one: new terminals start in its
+    //   directory and the vertical rail filters down to its tabs.
+    void TerminalPage::_SelectProject(const winrt::hstring& projectId, const winrt::hstring& projectCwd)
+    {
+        _activeProjectId = projectId;
+        _activeProjectCwd = projectCwd;
+
+        if (_tabRow)
+        {
+            winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectFilter(projectId);
+        }
+
+        _RebuildProjectTabs();
+
+        // If the focused tab isn't part of the newly selected project, move
+        // focus to the project's first tab.
+        if (!projectId.empty())
+        {
+            const auto focused{ _GetFocusedTab() };
+            if (!focused || focused.ProjectId() != projectId)
+            {
+                for (const auto& tab : _tabs)
+                {
+                    if (tab.ProjectId() == projectId)
+                    {
+                        _SetFocusedTab(tab);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Method Description:
+    // - Opens the "New Project" TeachingTip. This is deliberately NOT a
+    //   ContentDialog: in Xaml Islands a text box inside a ContentDialog
+    //   won't receive any keypresses (see the WindowRenamer for the same
+    //   workaround, including the two-LayoutUpdated focus dance).
+    void TerminalPage::_ShowNewProjectTip()
+    {
+        const auto tip{ FindName(L"NewProjectTip").try_as<MUX::Controls::TeachingTip>() };
+        if (!tip)
+        {
+            return;
+        }
+
+        NewProjectNameBox().Text(L"");
+        NewProjectDirBox().Text(L"");
+        NewProjectDirBox().ItemsSource(nullptr);
+
+        // Refresh the recent-directory suggestions shown while the box is empty.
+        _FetchRecentProjectDirs();
+
+        _newProjectLayoutUpdatedRevoker.revoke();
+        _newProjectLayoutCount = 0;
+        _newProjectLayoutUpdatedRevoker = NewProjectNameBox().LayoutUpdated(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self{ weakThis.get() })
+            {
+                auto& count{ self->_newProjectLayoutCount };
+                if (count < 2)
+                {
+                    count++;
+                }
+                if (count >= 2)
+                {
+                    self->_newProjectLayoutUpdatedRevoker.revoke();
+                    self->NewProjectNameBox().Focus(FocusState::Programmatic);
+                }
+            }
+        });
+
+        _newProjectPressedEnter = false;
+        tip.IsOpen(true);
+    }
+
+    void TerminalPage::_NewProjectActionClick(const IInspectable& /*sender*/,
+                                              const IInspectable& /*eventArgs*/)
+    {
+        _CreateProjectFromTip();
+    }
+
+    void TerminalPage::_NewProjectKeyDown(const IInspectable& /*sender*/,
+                                          const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e)
+    {
+        if (e.OriginalKey() == Windows::System::VirtualKey::Enter)
+        {
+            _newProjectPressedEnter = true;
+        }
+    }
+
+    void TerminalPage::_NewProjectKeyUp(const IInspectable& /*sender*/,
+                                        const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e)
+    {
+        const auto key = e.OriginalKey();
+        if (key == Windows::System::VirtualKey::Enter && _newProjectPressedEnter)
+        {
+            _CreateProjectFromTip();
+        }
+        else if (key == Windows::System::VirtualKey::Escape)
+        {
+            if (const auto tip{ FindName(L"NewProjectTip").try_as<MUX::Controls::TeachingTip>() })
+            {
+                tip.IsOpen(false);
+            }
+            _newProjectPressedEnter = false;
+        }
+    }
+
+    // Method Description:
+    // - Supplies suggestions for the starting-directory box: recently used
+    //   project directories while the box is (nearly) empty, and filesystem
+    //   directory completion once a path is being typed.
+    void TerminalPage::_NewProjectDirTextChanged(const AutoSuggestBox& sender,
+                                                 const AutoSuggestBoxTextChangedEventArgs& args)
+    {
+        if (args.Reason() != AutoSuggestionBoxTextChangeReason::UserInput)
+        {
+            return;
+        }
+
+        const std::wstring text{ sender.Text() };
+        std::vector<winrt::hstring> suggestions;
+
+        if (text.size() < 2)
+        {
+            suggestions = _recentProjectDirs;
+        }
+        else
+        {
+            try
+            {
+                const std::filesystem::path typed{ text };
+                std::filesystem::path parent;
+                std::wstring prefix;
+                if (text.back() == L'\\' || text.back() == L'/')
+                {
+                    parent = typed;
+                }
+                else
+                {
+                    parent = typed.parent_path();
+                    prefix = typed.filename().wstring();
+                }
+
+                std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::towlower);
+
+                std::error_code ec;
+                for (const auto& entry : std::filesystem::directory_iterator{ parent, ec })
+                {
+                    if (!entry.is_directory(ec))
+                    {
+                        continue;
+                    }
+
+                    auto name = entry.path().filename().wstring();
+                    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+                    if (name.compare(0, prefix.size(), prefix) != 0)
+                    {
+                        continue;
+                    }
+
+                    suggestions.emplace_back(entry.path().wstring());
+                    if (suggestions.size() >= 12)
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Bad path fragments just produce no suggestions.
+            }
+        }
+
+        const auto items{ winrt::single_threaded_vector<IInspectable>() };
+        for (const auto& suggestion : suggestions)
+        {
+            items.Append(winrt::box_value(suggestion));
+        }
+        sender.ItemsSource(items);
+    }
+
+    void TerminalPage::_NewProjectDirSuggestionChosen(const AutoSuggestBox& sender,
+                                                      const AutoSuggestBoxSuggestionChosenEventArgs& args)
+    {
+        sender.Text(winrt::unbox_value_or<winrt::hstring>(args.SelectedItem(), L""));
+    }
+
+    // Method Description:
+    // - Pulls the recently closed project directories from the terminal-web
+    //   store, for the starting-directory suggestions.
+    safe_void_coroutine TerminalPage::_FetchRecentProjectDirs()
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        std::vector<winrt::hstring> recents;
+        if (const auto response{ _projectServerRequest(L"GET", L"/api/projects/recent") })
+        {
+            WDJ::JsonArray array{ nullptr };
+            if (WDJ::JsonArray::TryParse(winrt::to_hstring(*response), array))
+            {
+                for (const auto& item : array)
+                {
+                    if (item.ValueType() != WDJ::JsonValueType::Object)
+                    {
+                        continue;
+                    }
+                    const auto cwd{ item.GetObject().GetNamedString(L"cwd", L"") };
+                    if (!cwd.empty())
+                    {
+                        recents.push_back(cwd);
+                    }
+                }
+            }
+        }
+
+        co_await wil::resume_foreground(dispatcher);
+
+        if (const auto page{ weakThis.get() })
+        {
+            page->_recentProjectDirs = std::move(recents);
+        }
+    }
+
+    // Method Description:
+    // - Finishes a project tab drag: computes the insertion index from the
+    //   drop position, reorders locally, and persists the order server-side.
+    safe_void_coroutine TerminalPage::_ProjectDropReorder(winrt::hstring draggedId, float dropX)
+    {
+        co_await wil::resume_foreground(Dispatcher());
+
+        const auto from = std::find_if(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& project) {
+            return project.Id == draggedId;
+        });
+        if (from == _bridgeProjects.end())
+        {
+            co_return;
+        }
+
+        // Children: [0] "All", [1..N] project tabs, then the "+" and web buttons.
+        const auto panel{ ProjectTabPanel() };
+        const auto children{ panel.Children() };
+        auto target = _bridgeProjects.size();
+        for (size_t i = 0; i < _bridgeProjects.size(); ++i)
+        {
+            const auto element{ children.GetAt(gsl::narrow_cast<uint32_t>(i + 1)).try_as<WUX::FrameworkElement>() };
+            if (!element)
+            {
+                break;
+            }
+            const auto origin{ element.TransformToVisual(panel).TransformPoint({ 0, 0 }) };
+            if (dropX < origin.X + element.ActualWidth() / 2.0)
+            {
+                target = i;
+                break;
+            }
+        }
+
+        const auto fromIndex = gsl::narrow_cast<size_t>(from - _bridgeProjects.begin());
+        auto dragged = *from;
+        _bridgeProjects.erase(from);
+        if (target > fromIndex)
+        {
+            --target;
+        }
+        _bridgeProjects.insert(_bridgeProjects.begin() + target, std::move(dragged));
+        _RebuildProjectTabs();
+
+        WDJ::JsonArray ids;
+        for (const auto& project : _bridgeProjects)
+        {
+            ids.Append(WDJ::JsonValue::CreateStringValue(project.Id));
+        }
+        WDJ::JsonObject body;
+        body.SetNamedValue(L"ids", ids);
+        const auto bodyStr{ winrt::to_string(body.Stringify()) };
+
+        co_await winrt::resume_background();
+        std::ignore = _projectServerRequest(L"PATCH", L"/api/projects/order", bodyStr);
+    }
+
+    // Method Description:
+    // - Reads the New Project TeachingTip's fields and creates the project in
+    //   the terminal-web store.
+    safe_void_coroutine TerminalPage::_CreateProjectFromTip()
+    {
+        _newProjectPressedEnter = false;
+
+        const winrt::hstring name{ NewProjectNameBox().Text() };
+        const winrt::hstring cwd{ NewProjectDirBox().Text() };
+        if (name.empty() || cwd.empty())
+        {
+            co_return;
+        }
+
+        if (const auto tip{ FindName(L"NewProjectTip").try_as<MUX::Controls::TeachingTip>() })
+        {
+            tip.IsOpen(false);
+        }
+
+        WDJ::JsonObject bodyJson;
+        bodyJson.SetNamedValue(L"name", WDJ::JsonValue::CreateStringValue(name));
+        bodyJson.SetNamedValue(L"cwd", WDJ::JsonValue::CreateStringValue(cwd));
+        const auto body{ winrt::to_string(bodyJson.Stringify()) };
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        winrt::hstring createdId;
+        winrt::hstring createdCwd;
+        if (const auto response{ _projectServerRequest(L"POST", L"/api/projects", body) })
+        {
+            WDJ::JsonObject created{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), created))
+            {
+                createdId = created.GetNamedString(L"id", L"");
+                createdCwd = created.GetNamedString(L"cwd", L"");
+            }
+        }
+
+        co_await wil::resume_foreground(dispatcher);
+
+        if (const auto page{ weakThis.get() })
+        {
+            if (!createdId.empty())
+            {
+                page->_bridgeProjects.push_back(BridgeProject{ createdId, name, createdCwd });
+                page->_SelectProject(createdId, createdCwd);
+            }
+            page->_RefreshBridgeProjects();
+        }
+    }
+
+    // Method Description:
+    // - Confirms and closes a project: closes this window's tabs that belong
+    //   to it, then deletes it from the terminal-web store (which also stops
+    //   the project's remote sessions).
+    safe_void_coroutine TerminalPage::_CloseProjectRequested(winrt::hstring projectId, winrt::hstring projectName)
+    {
+        const auto presenter{ _dialogPresenter.get() };
+        if (!presenter)
+        {
+            co_return;
+        }
+
+        std::vector<winrt::TerminalApp::Tab> projectTabs;
+        for (const auto& tab : _tabs)
+        {
+            if (tab.ProjectId() == projectId)
+            {
+                projectTabs.push_back(tab);
+            }
+        }
+
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(L"Close Project"));
+        const auto message = L"Close project \"" + projectName + L"\"? This closes " + winrt::to_hstring(projectTabs.size()) + L" terminal tab(s) here and stops any remote sessions started in it.";
+        dialog.Content(winrt::box_value(message));
+        dialog.PrimaryButtonText(L"Close Project");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Close);
+
+        const auto result{ co_await presenter.ShowDialog(dialog) };
+        if (result != ContentDialogResult::Primary)
+        {
+            co_return;
+        }
+
+        if (_activeProjectId == projectId)
+        {
+            _SelectProject({}, {});
+        }
+
+        // The project-level dialog already confirmed; don't re-prompt per tab.
+        for (const auto& tab : projectTabs)
+        {
+            std::ignore = _HandleCloseTabRequested(tab, true);
+        }
+
+        // Drop it locally right away so the strip feels responsive, then
+        // delete it on the server and re-sync.
+        std::erase_if(_bridgeProjects, [&](const auto& project) { return project.Id == projectId; });
+        _RebuildProjectTabs();
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        std::ignore = _projectServerRequest(L"DELETE", L"/api/projects/" + std::wstring{ projectId });
+
+        co_await wil::resume_foreground(dispatcher);
+
+        if (const auto page{ weakThis.get() })
+        {
+            page->_RefreshBridgeProjects();
+        }
     }
 
     // Method Description:
@@ -2378,6 +2950,22 @@ namespace winrt::TerminalApp::implementation
     // - tab: the Tab to update the title for.
     void TerminalPage::_UpdateTitle(const winrt::TerminalApp::Tab& tab)
     {
+        // Mirror the tab's title onto its bridged terminal-web session, so
+        // remote clients show the same names as the local tabs.
+        if (const auto tabImpl{ _GetTabImpl(tab) })
+        {
+            if (const auto control{ tabImpl->GetActiveTerminalControl() })
+            {
+                if (const auto conn{ control.Connection() })
+                {
+                    if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
+                    {
+                        conpty.UpdateBridgeTitle(tab.Title());
+                    }
+                }
+            }
+        }
+
         if (_tabRow)
         {
             winrt::get_self<implementation::TabRowControl>(_tabRow)->NotifyTabTitleUpdated(tab);
@@ -3423,14 +4011,27 @@ namespace winrt::TerminalApp::implementation
     // - the title of the focused control if there is one, else "Terminal"
     hstring TerminalPage::Title()
     {
+        hstring title{ L"Terminal" };
         if (_settings.GlobalSettings().ShowTitleInTitlebar())
         {
             if (const auto tab{ _GetFocusedTab() })
             {
-                return tab.Title();
+                title = tab.Title();
             }
         }
-        return { L"Terminal" };
+
+        // Surface the terminal-web bridge state in the caption so it's always
+        // visible whether remote web/mobile control is available.
+        const auto bridge = TerminalConnection::ConptyConnection::BridgeConnectionStatus();
+        if (bridge == L"connected")
+        {
+            return hstring{ title + L" \x2022 Bridge: connected" };
+        }
+        if (bridge == L"connecting")
+        {
+            return hstring{ title + L" \x2022 Bridge: offline" };
+        }
+        return title;
     }
 
     // Method Description:

@@ -397,6 +397,48 @@ namespace winrt::TerminalApp::implementation
         void _SettingsButtonOnClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
         void _CommandPaletteButtonOnClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
         void _AboutButtonOnClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
+        void _CopyConnectionTokenOnClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
+
+        void _BridgeStatusTimerTick(const IInspectable& sender, const IInspectable& e);
+        SafeDispatcherTimer _bridgeStatusTimer;
+        winrt::hstring _bridgeStatus;
+        uint32_t _bridgeStatusTicks{ 0 };
+
+        // Horizontal project tabs, backed by the terminal-web project store.
+        struct BridgeProject
+        {
+            winrt::hstring Id;
+            winrt::hstring Name;
+            winrt::hstring Cwd;
+
+            bool operator==(const BridgeProject&) const = default;
+        };
+        std::vector<BridgeProject> _bridgeProjects;
+        winrt::hstring _activeProjectId;
+        winrt::hstring _activeProjectCwd;
+        std::atomic<bool> _projectFetchInFlight{ false };
+
+        safe_void_coroutine _RefreshBridgeProjects();
+        void _RebuildProjectTabs();
+        void _SelectProject(const winrt::hstring& projectId, const winrt::hstring& projectCwd);
+        void _ShowNewProjectTip();
+        safe_void_coroutine _CreateProjectFromTip();
+        safe_void_coroutine _CloseProjectRequested(winrt::hstring projectId, winrt::hstring projectName);
+
+    public:
+        void _NewProjectActionClick(const IInspectable& sender, const IInspectable& eventArgs);
+        void _NewProjectKeyDown(const IInspectable& sender, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
+        void _NewProjectKeyUp(const IInspectable& sender, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
+        void _NewProjectDirTextChanged(const winrt::Windows::UI::Xaml::Controls::AutoSuggestBox& sender, const winrt::Windows::UI::Xaml::Controls::AutoSuggestBoxTextChangedEventArgs& args);
+        void _NewProjectDirSuggestionChosen(const winrt::Windows::UI::Xaml::Controls::AutoSuggestBox& sender, const winrt::Windows::UI::Xaml::Controls::AutoSuggestBoxSuggestionChosenEventArgs& args);
+
+    private:
+        winrt::Windows::UI::Xaml::Controls::TextBox::LayoutUpdated_revoker _newProjectLayoutUpdatedRevoker;
+        int _newProjectLayoutCount{ 0 };
+        bool _newProjectPressedEnter{ false };
+        std::vector<winrt::hstring> _recentProjectDirs;
+        safe_void_coroutine _FetchRecentProjectDirs();
+        safe_void_coroutine _ProjectDropReorder(winrt::hstring draggedId, float dropX);
 
         void _KeyDownHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
         static ::Microsoft::Terminal::Core::ControlKeyStates _GetPressedModifierKeys() noexcept;

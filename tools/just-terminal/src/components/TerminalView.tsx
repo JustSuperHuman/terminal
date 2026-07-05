@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-import { PanResponder, Pressable, StyleSheet, Text, type LayoutChangeEvent, View } from "react-native";
+import { Pressable, StyleSheet, Text, type LayoutChangeEvent, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
 import type { ServerMessage, TerminalSessionSummary } from "../types";
@@ -7,16 +7,17 @@ import { TERMINAL_HTML } from "../terminalHtml";
 import { colors, font, radius } from "../theme";
 import { TerminalLoading } from "./TerminalLoading";
 
-// Hard cap on how long the launch skeleton lingers if a session never prints.
+// Hard cap on how long the cold-start skeleton lingers if a session never prints.
 const LOADING_FALLBACK_MS = 4000;
-
-const SESSION_SWITCH_EDGE_WIDTH = 34;
-const SCROLL_GESTURE_THRESHOLD = 7;
 
 export interface TerminalViewHandle {
   fitToViewport: () => void;
-  focusTerminal: () => void;
-  blurTerminal: () => void;
+  /**
+   * While enabled, the page holds ghostty's hidden textarea focused so the soft
+   * keyboard stays open (refocusing on any blur attempt). Disabling blurs and
+   * lets the keyboard dismiss (e.g. while the sessions drawer is open).
+   */
+  setKeepFocus: (enabled: boolean) => void;
   resizeForMobileInput: () => void;
   /** Force a full all-rows repaint (e.g. after the app returns to foreground). */
   repaint: () => void;
@@ -29,15 +30,6 @@ interface TerminalViewProps {
   // While the session switcher is scrubbing we live-preview each session; hide
   // the launch skeleton so the real terminal content is visible as it flips.
   suppressLoading?: boolean;
-  // Pixels the keyboard occludes at the bottom. We shift the terminal view up by
-  // this much (instead of resizing it) so the input stays visible above the
-  // keyboard.
-  keyboardInset?: number;
-}
-
-interface WebDims {
-  cols: number;
-  rows: number;
 }
 
 interface HostLayout {
@@ -45,17 +37,8 @@ interface HostLayout {
   height: number;
 }
 
-function parseWebDims(cols: unknown, rows: unknown): WebDims | undefined {
-  const nextCols = Math.floor(Number(cols));
-  const nextRows = Math.floor(Number(rows));
-  if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows)) {
-    return undefined;
-  }
-  return { cols: nextCols, rows: nextRows };
-}
-
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
-  { targetId, session, socketStatus, suppressLoading = false, keyboardInset = 0 },
+  { targetId, session, socketStatus, suppressLoading = false },
   ref
 ) {
   const webRef = useRef<WebView | null>(null);
@@ -64,16 +47,25 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
   const [webReady, setWebReady] = useState(false);
   const activeTargetRef = useRef<string | undefined>(targetId);
   const activeSessionRef = useRef<TerminalSessionSummary | undefined>(session);
-  const keyboardInsetRef = useRef<number>(keyboardInset);
   const subscribedTargetRef = useRef<string | undefined>(undefined);
+  // The session id whose grid dims the WebView is currently mirroring. Set when
+  // a snapshot posts its own dims; used to defer dim changes for a NEW session
+  // until its snapshot arrives (posting them early reflows the old content).
+  const postedSessionIdRef = useRef<string | undefined>(undefined);
   const hostLayoutRef = useRef<HostLayout | undefined>(undefined);
-  const lastResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | undefined>(undefined);
+  // Last keep-focus request from the host; re-posted after a WebView (re)load so
+  // a crashed/reloaded page comes back with the keyboard held open again.
+  const keepFocusRef = useRef(false);
   const fitTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
-  const scrollGestureLastDyRef = useRef(0);
   const [scroll, setScroll] = useState({ canScroll: false, atBottom: true });
-  // Whether the active session has painted anything yet — drives the launch skeleton.
+  // Whether the WebView currently has ANY terminal content on screen. This is a
+  // cold-start flag, not a per-session one: it starts false on first mount and
+  // flips back to false only when the page is genuinely blank again (WebView
+  // process crash/reload). It deliberately does NOT reset on session switch,
+  // socket reconnect, foreground repaints, or fit/resize churn — in all of those
+  // the previous frame stays visible until the next snapshot swaps atomically,
+  // so a loading skeleton would just flash over real content.
   const [rendered, setRendered] = useState(false);
-  const loadingFallbackRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const postToWeb = useCallback((message: Record<string, unknown>) => {
     if (!webRef.current) {
@@ -135,30 +127,14 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     postToWeb({ type: "hostLayout", width: layout.width, height: layout.height });
   }, [postToWeb]);
 
-  // Forward a measured size to the PTY (the WebView reflows to fit and reports
-  // its size here). Deduped so we don't spam identical resizes.
-  const forwardResize = useCallback((dims?: WebDims) => {
-    if (!dims) {
-      return;
-    }
-    const target = activeTargetRef.current;
-    const session = activeSessionRef.current;
-    if (!target || !session || terminalSocket.currentStatus !== "open") {
-      return;
-    }
-    if (session.cols === dims.cols && session.rows === dims.rows) {
-      return;
-    }
-    const last = lastResizeRef.current;
-    if (last?.sessionId === target && last.cols === dims.cols && last.rows === dims.rows) {
-      return;
-    }
-    lastResizeRef.current = { sessionId: target, cols: dims.cols, rows: dims.rows };
-    terminalSocket.send({ type: "resize", sessionId: target, cols: dims.cols, rows: dims.rows });
-  }, []);
+  // Note: the phone deliberately never sends { type: "resize" } to the server.
+  // It MIRRORS the host session's grid (the desktop owns the real PTY size) and
+  // scales the canvas to fit — driving the real PTY from here would resize the
+  // user's desktop terminal.
 
   const postSession = useCallback(() => {
-    postToWeb({ type: "session" });
+    const current = activeSessionRef.current;
+    postToWeb({ type: "session", cols: current?.cols, rows: current?.rows });
   }, [postToWeb]);
 
   const requestTerminalFit = useCallback(
@@ -181,88 +157,40 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     [clearFitTimers, measureHostLayout, postHostLayout, postToWeb, recordHostLayout]
   );
 
-  const scrollResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => false,
-      onStartShouldSetPanResponderCapture: () => false,
-      onMoveShouldSetPanResponder: (event, gesture) => {
-        // Leave multi-touch (pinch-zoom / two-finger pan) to the WebView.
-        if (gesture.numberActiveTouches > 1) {
-          return false;
-        }
-        if (event.nativeEvent.locationX <= SESSION_SWITCH_EDGE_WIDTH) {
-          return false;
-        }
-        const absDx = Math.abs(gesture.dx);
-        const absDy = Math.abs(gesture.dy);
-        return absDy >= SCROLL_GESTURE_THRESHOLD && absDy > absDx * 1.15;
-      },
-      onMoveShouldSetPanResponderCapture: (event, gesture) => {
-        if (gesture.numberActiveTouches > 1) {
-          return false;
-        }
-        if (event.nativeEvent.locationX <= SESSION_SWITCH_EDGE_WIDTH) {
-          return false;
-        }
-        const absDx = Math.abs(gesture.dx);
-        const absDy = Math.abs(gesture.dy);
-        return absDy >= SCROLL_GESTURE_THRESHOLD && absDy > absDx * 1.15;
-      },
-      onPanResponderGrant: () => {
-        scrollGestureLastDyRef.current = 0;
-      },
-      onPanResponderMove: (_event, gesture) => {
-        const deltaY = scrollGestureLastDyRef.current - gesture.dy;
-        scrollGestureLastDyRef.current = gesture.dy;
-        if (Math.abs(deltaY) >= 0.5) {
-          postToWeb({ type: "scrollBy", deltaY });
-        }
-      },
-      onPanResponderRelease: () => {
-        scrollGestureLastDyRef.current = 0;
-      },
-      onPanResponderTerminate: () => {
-        scrollGestureLastDyRef.current = 0;
-      },
-      onPanResponderTerminationRequest: () => true,
-    })
-  ).current;
+  // Touch gestures (one-finger scroll/pan, tap-to-focus, two-finger pinch)
+  // are owned by the page inside the WebView — it knows the canvas
+  // bounds/scale. The native layer owns the SwipeBar above the command bar
+  // (session scrubbing only, see SwipeBar/SessionSwitcher) and posting
+  // hostLayout/fit on layout changes.
 
   useEffect(() => {
     activeTargetRef.current = targetId;
-    lastResizeRef.current = undefined;
-    // Re-arm the launch skeleton for the newly selected session until it paints.
-    if (loadingFallbackRef.current) {
-      clearTimeout(loadingFallbackRef.current);
-      loadingFallbackRef.current = undefined;
-    }
-    if (targetId) {
-      setRendered(false);
-      loadingFallbackRef.current = setTimeout(() => setRendered(true), LOADING_FALLBACK_MS);
-    } else {
-      setRendered(true);
-    }
-    return () => {
-      if (loadingFallbackRef.current) {
-        clearTimeout(loadingFallbackRef.current);
-        loadingFallbackRef.current = undefined;
-      }
-    };
   }, [targetId]);
+
+  // Cold-start skeleton fallback: while nothing has ever painted (or the page
+  // came back blank after a crash) and a session is selected, cap how long the
+  // skeleton can linger if that session never prints. Session switches do NOT
+  // reset `rendered` — the old frame stays up until the new snapshot paints, so
+  // switching feels instant with no loading flash.
+  useEffect(() => {
+    if (rendered || !targetId) {
+      return;
+    }
+    const timer = setTimeout(() => setRendered(true), LOADING_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [rendered, targetId]);
 
   useEffect(() => {
     activeSessionRef.current = session;
-    if (webReadyRef.current) {
+    // Only live-sync grid dims for the session the WebView is already showing
+    // (e.g. the host window was resized). A newly selected session's dims are
+    // posted by the snapshot handler, atomically with the reset+write — posting
+    // them here first would reflow the still-displayed OLD content into the new
+    // grid and flash a corrupted frame during session scrubbing.
+    if (webReadyRef.current && session && postedSessionIdRef.current === session.id) {
       postSession();
     }
   }, [postSession, session?.id, session?.source, session?.cols, session?.rows]);
-
-  useEffect(() => {
-    keyboardInsetRef.current = keyboardInset;
-    if (webReadyRef.current) {
-      postToWeb({ type: "keyboardInset", height: keyboardInset });
-    }
-  }, [keyboardInset, postToWeb]);
 
   useEffect(() => {
     return () => {
@@ -274,8 +202,15 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     ref,
     () => ({
       fitToViewport: requestTerminalFit,
-      focusTerminal: () => postToWeb({ type: "focus" }),
-      blurTerminal: () => postToWeb({ type: "blur" }),
+      setKeepFocus: (enabled: boolean) => {
+        keepFocusRef.current = enabled;
+        if (enabled) {
+          // Android only raises the soft keyboard for a focused WebView, so make
+          // sure the native view itself has focus before the page focuses ghostty.
+          webRef.current?.requestFocus();
+        }
+        postToWeb({ type: "keepFocus", enabled });
+      },
       resizeForMobileInput: () => requestTerminalFit(),
       repaint: () => postToWeb({ type: "repaint" }),
     }),
@@ -289,11 +224,23 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         return;
       }
       if (message.type === "snapshot" && message.sessionId === activeTargetRef.current) {
+        // Size the grid to the exact dimensions this snapshot was rendered for
+        // (the host owns the width) before clearing + writing, so the bytes land
+        // without re-wrapping. This is the ONLY place a new session's dims are
+        // posted — doing it here keeps the resize atomic with the reset+write.
+        if (message.session) {
+          postToWeb({ type: "session", cols: message.session.cols, rows: message.session.rows });
+          postedSessionIdRef.current = message.sessionId;
+        }
         postToWeb({ type: "reset" });
         if (message.screen) {
+          // Prefer the server's rendered screen dump: it reproduces the full
+          // grid exactly as the host shows it.
           postToWeb({ type: "write", data: message.screen });
           setRendered(true);
         } else {
+          // Fallback only: chunks are a bounded tail of the raw transcript, so
+          // replaying them can miss content that scrolled out of the buffer.
           for (const chunk of message.chunks) {
             postToWeb({ type: "write", data: chunk.data });
           }
@@ -301,6 +248,12 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
             setRendered(true);
           }
         }
+        // Cold start / session switch: the snapshot write can land while the
+        // WebView surface is still settling (first composite, keyboard raise
+        // resizing the view), which wipes the canvas after the dirty rows were
+        // already painted — leaving a blank terminal until fresh output
+        // arrives. Chase the write with the staggered full-repaint heal.
+        postToWeb({ type: "repaint" });
       }
       if (message.type === "output" && message.sessionId === activeTargetRef.current) {
         postToWeb({ type: "write", data: message.data });
@@ -315,14 +268,28 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
     if (!webReady || socketStatus !== "open" || !targetId) {
       return;
     }
-    // Don't reset here — keep the current frame until the new session's snapshot
-    // arrives and clears+writes atomically (the snapshot handler resets right
-    // before writing), so the canvas never flashes blank on switch. The launch
-    // skeleton covers the gap until the new session paints.
+    // Don't reset or post the new session's dims here — keep the current frame
+    // (and grid) until the new session's snapshot arrives and sizes+clears+
+    // writes atomically (the snapshot handler posts session dims right before
+    // reset+write). Resizing early would reflow the still-visible old content;
+    // resetting early would flash blank. The launch skeleton covers the gap
+    // until the new session paints.
     subscribedTargetRef.current = targetId;
-    postSession();
     terminalSocket.send({ type: "subscribe", sessionId: targetId });
-  }, [webReady, socketStatus, targetId, postToWeb, postSession]);
+  }, [webReady, socketStatus, targetId]);
+
+  // The WebView's renderer process died (OS reclaimed it) — the page is
+  // genuinely blank now, so this is the ONE post-mount path that re-arms the
+  // cold-start skeleton. Reload and let the ready → subscribe → snapshot chain
+  // repaint and clear it.
+  const onWebViewProcessGone = useCallback(() => {
+    webReadyRef.current = false;
+    subscribedTargetRef.current = undefined;
+    postedSessionIdRef.current = undefined;
+    setWebReady(false);
+    setRendered(false);
+    webRef.current?.reload();
+  }, []);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     let message: Record<string, unknown>;
@@ -337,22 +304,22 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       case "ready": {
         webReadyRef.current = true;
         setWebReady(true);
-        postToWeb({ type: "keyboardInset", height: keyboardInsetRef.current });
+        // The page is blank at this point, so posting the active session's dims
+        // is safe (nothing to reflow) and gives the grid a sane initial size
+        // until the snapshot arrives.
+        postedSessionIdRef.current = activeSessionRef.current?.id;
         postSession();
         requestTerminalFit();
+        // A fresh page booted with keepFocus off — restore the host's wish so
+        // the keyboard comes straight back up after a WebView reload.
+        if (keepFocusRef.current) {
+          postToWeb({ type: "keepFocus", enabled: true });
+        }
         break;
       }
       case "input": {
         if (target) {
           terminalSocket.send({ type: "input", sessionId: target, data: String(message.data ?? "") });
-        }
-        break;
-      }
-      case "resize":
-      case "viewport": {
-        const dims = parseWebDims(message.cols, message.rows);
-        if (dims) {
-          forwardResize(dims);
         }
         break;
       }
@@ -369,7 +336,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       default:
         break;
     }
-  }, [forwardResize, postSession, postToWeb, requestTerminalFit]);
+  }, [postSession, postToWeb, requestTerminalFit]);
 
   return (
     <View
@@ -377,7 +344,6 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       collapsable={false}
       style={styles.container}
       onLayout={requestTerminalFit}
-      {...scrollResponder.panHandlers}
     >
       <WebView
         ref={webRef}
@@ -398,12 +364,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         style={styles.web}
         containerStyle={styles.web}
         androidLayerType="hardware"
-        onContentProcessDidTerminate={() => {
-          webReadyRef.current = false;
-          subscribedTargetRef.current = undefined;
-          setWebReady(false);
-          webRef.current?.reload();
-        }}
+        onContentProcessDidTerminate={onWebViewProcessGone}
+        onRenderProcessGone={onWebViewProcessGone}
       />
 
       {scroll.canScroll && !scroll.atBottom ? (
@@ -412,9 +374,14 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         </Pressable>
       ) : null}
 
+      {/* Cold-start skeleton only: first-ever paint or a post-crash blank page.
+          Never shown for session switches, reconnects, or repaints (see the
+          `rendered` flag above). */}
       {socketStatus === "open" && targetId && !rendered && !suppressLoading ? <TerminalLoading session={session} /> : null}
 
-      {socketStatus !== "open" ? (
+      {/* Informative (non-blocking) pill while the socket is actually down and
+          retrying. "idle" is an intentional disconnect — no pill. */}
+      {socketStatus === "connecting" || socketStatus === "closed" ? (
         <View style={styles.reconnect} pointerEvents="none">
           <Text style={styles.reconnectText}>Reconnecting…</Text>
         </View>
@@ -484,7 +451,8 @@ const styles = StyleSheet.create({
   exited: {
     position: "absolute",
     top: 10,
-    left: 10,
+    // Clears the floating menu button that overlays the terminal's top-left.
+    left: 58,
     zIndex: 2,
     flexDirection: "row",
     alignItems: "center",

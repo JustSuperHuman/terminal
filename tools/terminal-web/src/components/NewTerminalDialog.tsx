@@ -10,6 +10,7 @@ import type { CreateSessionOptions, TerminalProfile, TerminalSessionSummary } fr
 interface NewTerminalDialogProps {
   open: boolean;
   profiles: TerminalProfile[];
+  defaultCwd?: string;
   onOpenChange: (open: boolean) => void;
   onCreate: (options: CreateSessionOptions) => Promise<TerminalSessionSummary>;
 }
@@ -26,7 +27,7 @@ function shellName(value: string) {
   return value.split(/[\\/]/).pop() ?? value;
 }
 
-export function NewTerminalDialog({ open, profiles, onOpenChange, onCreate }: NewTerminalDialogProps) {
+export function NewTerminalDialog({ open, profiles, defaultCwd, onOpenChange, onCreate }: NewTerminalDialogProps) {
   const defaultProfile = profiles[0];
   const [profileId, setProfileId] = useState("");
   const [title, setTitle] = useState("");
@@ -43,11 +44,11 @@ export function NewTerminalDialog({ open, profiles, onOpenChange, onCreate }: Ne
       setTitle("");
       setShell("");
       setArgs("");
-      setCwd("");
+      setCwd(defaultCwd ?? "");
       setSubmitting(false);
       setError("");
     }
-  }, [defaultProfile?.id, open]);
+  }, [defaultCwd, defaultProfile?.id, open]);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();

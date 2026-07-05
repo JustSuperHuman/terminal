@@ -8,6 +8,7 @@
 #include <winmeta.h>
 
 #include "CTerminalHandoff.h"
+#include "TerminalBridge.h"
 #include "../../types/inc/utils.hpp"
 
 #include "ConptyConnection.g.cpp"
@@ -452,6 +453,27 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 
         _startTime = std::chrono::high_resolution_clock::now();
 
+        // Mirror this session into the terminal-web bridge (if enabled) before
+        // the output thread can produce any bytes, so the registration is
+        // ordered ahead of the first output on the wire.
+        if (TerminalBridge::Instance().Enabled())
+        {
+            const auto pid = _piClient.hProcess ? ::GetProcessId(_piClient.hProcess) : 0u;
+            const std::wstring_view title = !_startingTitle.empty() ? std::wstring_view{ _startingTitle } :
+                                            !_startupInfo.title.empty() ? std::wstring_view{ _startupInfo.title } :
+                                            !_clientName.empty()        ? std::wstring_view{ _clientName } :
+                                                                          std::wstring_view{ _commandline };
+            const std::wstring_view shell = !_commandline.empty() ? std::wstring_view{ _commandline } : std::wstring_view{ _clientName };
+            TerminalBridge::Instance().RegisterSession(_sessionId,
+                                                       get_strong().as<Windows::Foundation::IInspectable>(),
+                                                       title,
+                                                       shell,
+                                                       _startingDirectory,
+                                                       pid,
+                                                       gsl::narrow_cast<uint32_t>(_cols),
+                                                       gsl::narrow_cast<uint32_t>(_rows));
+        }
+
         // Create our own output handling thread
         // This must be done after the pipes are populated.
         // Each connection needs to make sure to drain the output from its backing host.
@@ -540,6 +562,12 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         DWORD exitCode{ 0 };
         GetExitCodeProcess(_piClient.hProcess, &exitCode);
 
+        if (TerminalBridge::Instance().Enabled())
+        {
+            TerminalBridge::Instance().NotifyExit(_sessionId, exitCode);
+            TerminalBridge::Instance().Unregister(_sessionId);
+        }
+
         _piClient.reset();
 
         // Signal the closing or failure of the process.
@@ -608,6 +636,11 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         if (_isConnected())
         {
             THROW_IF_FAILED(ConptyResizePseudoConsole(_hPC.get(), { Utils::ClampToShortMax(columns, 1), Utils::ClampToShortMax(rows, 1) }));
+        }
+
+        if (TerminalBridge::Instance().Enabled())
+        {
+            TerminalBridge::Instance().NotifyResize(_sessionId, rows, columns);
         }
     }
 
@@ -797,6 +830,11 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
                     TerminalOutput.raise(winrt_wstring_to_array_view(wstr));
                 }
                 CATCH_LOG();
+
+                if (TerminalBridge::Instance().Enabled())
+                {
+                    TerminalBridge::Instance().ForwardOutput(_sessionId, wstr);
+                }
             }
 
             // Here's the counterpart to the start of the loop. We processed whatever was in `wstr`,
@@ -860,6 +898,45 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         return S_OK;
     }
     CATCH_RETURN()
+
+    void ConptyConnection::UpdateBridgeTitle(const winrt::hstring& title)
+    {
+        if (TerminalBridge::Instance().Enabled())
+        {
+            TerminalBridge::Instance().ForwardTitle(_sessionId, title);
+        }
+    }
+
+    void ConptyConnection::SetBridgeProject(const winrt::hstring& projectId)
+    {
+        if (TerminalBridge::Instance().Enabled())
+        {
+            TerminalBridge::Instance().SetProject(_sessionId, projectId);
+        }
+    }
+
+    winrt::hstring ConptyConnection::BridgeConnectionStatus()
+    {
+        switch (TerminalBridge::Instance().ConnectionStatus())
+        {
+        case TerminalBridge::Status::Connected:
+            return L"connected";
+        case TerminalBridge::Status::Connecting:
+            return L"connecting";
+        default:
+            return L"disabled";
+        }
+    }
+
+    winrt::hstring ConptyConnection::BridgeEndpoint()
+    {
+        return winrt::hstring{ TerminalBridge::Instance().Endpoint() };
+    }
+
+    winrt::hstring ConptyConnection::BridgeAccessToken()
+    {
+        return winrt::hstring{ TerminalBridge::Instance().AccessToken() };
+    }
 
     void ConptyConnection::StartInboundListener()
     {

@@ -11,6 +11,7 @@ interface CommandBarProps {
   session?: TerminalSessionSummary;
   targetId?: string;
   socketStatus: SocketStatus;
+  onBeforeInput?: () => void;
 }
 
 type ComposerMode = "line" | "paste";
@@ -37,7 +38,9 @@ function bracketedPaste(value: string): string {
   return `\x1b[200~${value.replace(/\r\n/g, "\n")}\x1b[201~`;
 }
 
-export function CommandBar({ session, targetId, socketStatus }: CommandBarProps) {
+const compactMobileKeyLabels = new Set(["Enter", "Esc", "Tab", "Ctrl+C"]);
+
+export function CommandBar({ session, targetId, socketStatus, onBeforeInput }: CommandBarProps) {
   const [value, setValue] = useState("");
   const [mode, setMode] = useState<ComposerMode>("line");
   const draftsByTargetRef = useRef<Record<string, string>>({});
@@ -66,11 +69,17 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
     }
   }
 
+  function settleInputLayout() {
+    onBeforeInput?.();
+    window.setTimeout(() => onBeforeInput?.(), 80);
+  }
+
   function send(data: string) {
     if (!session || !targetId || disabled) {
       return;
     }
 
+    settleInputLayout();
     terminalSocket.send({ type: "input", sessionId: targetId, data });
   }
 
@@ -103,12 +112,14 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
   }
 
   function focusComposer() {
+    settleInputLayout();
     textareaRef.current?.focus();
     window.setTimeout(() => {
       const textarea = textareaRef.current;
       if (!textarea) {
         return;
       }
+      settleInputLayout();
       textarea.focus();
       const end = textarea.value.length;
       textarea.setSelectionRange(end, end);
@@ -178,8 +189,8 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
   }
 
   return (
-    <form data-active-target={targetId} onSubmit={onSubmit} className="border-t bg-background/95 px-3 py-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+    <form data-active-target={targetId} onSubmit={onSubmit} className="shrink-0 border-t bg-background/95 px-2 py-2 sm:px-3 sm:py-3">
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5 sm:mb-2 sm:gap-2">
         <div className="flex flex-wrap items-center gap-1">
           {controlKeys.map((key) => (
             <Tooltip key={key.label}>
@@ -188,7 +199,10 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
                   type="button"
                   variant="secondary"
                   size="sm"
-                  className="h-7 min-w-8 px-2 font-mono text-[11px]"
+                  className={cn(
+                    "h-7 min-w-8 px-2 font-mono text-[11px]",
+                    !compactMobileKeyLabels.has(key.label) && "hidden sm:inline-flex"
+                  )}
                   disabled={disabled}
                   onClick={() => send(key.value)}
                   aria-label={key.label}
@@ -201,8 +215,8 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
           ))}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="flex rounded-md border bg-background p-0.5">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          <div className="hidden rounded-md border bg-background p-0.5 sm:flex">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -243,7 +257,7 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
                 key={item}
                 type="button"
                 className={cn(
-                  "inline-flex h-7 min-w-16 items-center justify-center gap-1 rounded px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "inline-flex h-7 min-w-14 items-center justify-center gap-1 rounded px-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-w-16",
                   mode === item ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:text-foreground"
                 )}
                 onClick={() => setMode(item)}
@@ -267,13 +281,14 @@ export function CommandBar({ session, targetId, socketStatus }: CommandBarProps)
             setHistoryIndex(undefined);
             setDraftBeforeHistory("");
           }}
+          onFocus={settleInputLayout}
           onKeyDown={onKeyDown}
           disabled={disabled}
           rows={1}
           placeholder={
             !session ? "No terminal selected" : socketStatus !== "open" ? "Reconnecting terminal host" : mode === "line" ? "Send to active terminal" : "Paste to active terminal"
           }
-          className="max-h-32 min-h-10 resize-none font-mono"
+          className="max-h-20 min-h-9 resize-none py-2 font-mono sm:max-h-32 sm:min-h-10"
         />
         <Tooltip>
           <TooltipTrigger asChild>

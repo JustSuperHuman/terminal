@@ -162,6 +162,12 @@
   <data name="AboutMenuItem" xml:space="preserve">
     <value>About</value>
   </data>
+  <data name="CopyConnectionTokenMenuItem" xml:space="preserve">
+    <value>Copy Connection Token</value>
+  </data>
+  <data name="CopyConnectionTokenToolTip" xml:space="preserve">
+    <value>Copy the bridge access token used by the web and mobile apps to connect to this terminal</value>
+  </data>
   <data name="SettingsMenuItem" xml:space="preserve">
     <value>Settings</value>
   </data>

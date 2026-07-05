@@ -12,6 +12,7 @@ import { discoverHostTerminals } from "./host-discovery.js";
 import { discoverTerminalWebPeers } from "./peer-discovery.js";
 import { PeerProxy } from "./peer-proxy.js";
 import { listenOnAvailablePort } from "./ports.js";
+import { ProjectStore } from "./projects.js";
 import { TerminalManager } from "./terminal-manager.js";
 import type {
   BridgeCommandInfo,
@@ -32,6 +33,7 @@ const wss = new WebSocketServer({ noServer: true });
 const bridgeWss = new WebSocketServer({ noServer: true });
 const manager = new TerminalManager();
 const bridgeRegistry = new BridgeRegistry();
+const projectStore = new ProjectStore();
 const peerProxy = new PeerProxy(() => peerHosts);
 
 let hostProcesses: HostTerminalProcess[] = [];
@@ -39,7 +41,7 @@ let peerHosts: TerminalHostPeer[] = [];
 let accessToken: string | undefined;
 let serverInfo: ServerInfo = {
   pid: process.pid,
-  host: "127.0.0.1",
+  host: "0.0.0.0",
   port: 10001,
   startedAt,
   urls: []
@@ -64,6 +66,7 @@ interface CreateSessionOptions {
   shell?: string;
   args?: string[];
   cwd?: string;
+  projectId?: string;
   cols?: number;
   rows?: number;
 }
@@ -79,6 +82,16 @@ interface ResolvedSessionCommand {
 const MAX_BUFFERED_OUTPUT_BYTES = 128 * 1024;
 let pendingOutputs = new Map<string, PendingOutput>();
 let outputFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Which session each client is watching (its last "subscribe"). Full output
+// bytes are only streamed to clients subscribed to that session; everyone else
+// gets a lightweight throttled "activity" ping so unread badges still tick.
+// Without this, every session's output was broadcast to every client, which
+// saturated slow (mobile) connections as soon as a few sessions were busy and
+// starved the active terminal's own stream.
+const clientSubscriptions = new WeakMap<WebSocket, string>();
+const ACTIVITY_PING_INTERVAL_MS = 1000;
+const lastActivityPingAt = new Map<string, number>();
 
 server.on("upgrade", (request, socket, head) => {
   const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "127.0.0.1"}`);
@@ -118,7 +131,7 @@ function getStartPort(): number {
 }
 
 function getHost(): string {
-  return getArgValue("--host") ?? process.env.TERMINAL_WEB_HOST ?? "127.0.0.1";
+  return getArgValue("--host") ?? process.env.TERMINAL_WEB_HOST ?? "0.0.0.0";
 }
 
 function isAllInterfacesHost(host: string): boolean {
@@ -347,6 +360,7 @@ function normalizeCreateSessionOptions(value: any): CreateSessionOptions {
   options.profileId = optionalString(value?.profileId);
   options.shell = optionalString(value?.shell);
   options.cwd = optionalString(value?.cwd);
+  options.projectId = optionalString(value?.projectId);
 
   if (Array.isArray(value?.args)) {
     options.args = value.args.map((arg: unknown) => String(arg));
@@ -385,33 +399,29 @@ function resolveCreateCommand(options: CreateSessionOptions): ResolvedSessionCom
   };
 }
 
-function quotePowerShellLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function desktopBridgeScript(command: ResolvedSessionCommand): string {
-  const serverUrl = `http://127.0.0.1:${serverInfo.port}`;
-  const parts = [
-    "& npm",
-    "--prefix",
-    quotePowerShellLiteral(process.cwd()),
-    "run",
-    "bridge",
-    "--",
-    "--server",
-    quotePowerShellLiteral(serverUrl),
-    "--title",
-    quotePowerShellLiteral(command.title),
-    "--cwd",
-    quotePowerShellLiteral(command.cwd),
-    "--",
-    quotePowerShellLiteral(command.shell),
-    ...command.args.map(quotePowerShellLiteral)
-  ];
-  return parts.join(" ");
+function resolveWindowsTerminalLauncher(): string {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    // The dev package's app execution alias.
+    const wtd = path.join(localAppData, "Microsoft", "WindowsApps", "wtd.exe");
+    if (existsSync(wtd)) {
+      return wtd;
+    }
+    // The per-user shim installed by `bun run update` (forwards to wtd.exe).
+    const shim = path.join(localAppData, "Programs", "WindowsTerminalDevShim", "wt.exe");
+    if (existsSync(shim)) {
+      return shim;
+    }
+  }
+  return "wt.exe";
 }
 
 function buildWindowsTerminalNewTabArgs(command: ResolvedSessionCommand): string[] {
+  // Run the requested shell directly: the dev Windows Terminal mirrors every
+  // ConPTY session into this server in-process, so the old Node bridge
+  // wrapper is unnecessary (and used to double-register every tab).
+  // "-w 0" targets the existing window (new tab) and only creates a new
+  // window when none is running.
   return [
     "-w",
     "0",
@@ -421,13 +431,8 @@ function buildWindowsTerminalNewTabArgs(command: ResolvedSessionCommand): string
     "--startingDirectory",
     command.cwd,
     "--",
-    "powershell.exe",
-    "-NoLogo",
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    desktopBridgeScript(command)
+    command.shell,
+    ...command.args
   ];
 }
 
@@ -511,11 +516,13 @@ async function createDesktopTerminalSession(options: CreateSessionOptions): Prom
     return undefined;
   }
 
-  await refreshHostProcesses();
-  const host = getPreferredWindowsTerminalHost();
-  if (!host?.executablePath) {
-    return undefined;
-  }
+  // Launch through the dev package's execution alias: packaged Windows
+  // Terminal builds cannot be started via their exe path (package identity),
+  // and "-w 0" already routes to the existing window when one is running —
+  // otherwise a fresh instance (new window) is started. The alias is resolved
+  // explicitly because a plain "wt.exe" PATH lookup can land on the Store
+  // terminal (which doesn't mirror into this server) in stale environments.
+  const executablePath = resolveWindowsTerminalLauncher();
 
   const command = resolveCreateCommand(options);
   const beforeIds = new Set(bridgeRegistry.listSessions().map((session) => session.id));
@@ -523,7 +530,7 @@ async function createDesktopTerminalSession(options: CreateSessionOptions): Prom
   const args = buildWindowsTerminalNewTabArgs(command);
 
   try {
-    const child = spawn(host.executablePath, args, {
+    const child = spawn(executablePath, args, {
       cwd: process.cwd(),
       detached: true,
       stdio: "ignore",
@@ -544,7 +551,7 @@ async function createDesktopTerminalSession(options: CreateSessionOptions): Prom
   } catch (error) {
     waiter.cancel();
     throw new Error(
-      `Could not open a bridged Windows Terminal tab via ${host.executablePath}: ${
+      `Could not open a bridged Windows Terminal tab via ${executablePath}: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -552,15 +559,30 @@ async function createDesktopTerminalSession(options: CreateSessionOptions): Prom
 }
 
 async function createSession(options: CreateSessionOptions): Promise<TerminalSessionSummary> {
+  if (options.projectId && !options.cwd) {
+    options.cwd = projectStore.list().find((project) => project.id === options.projectId)?.cwd;
+  }
+
   const mode = getSessionCreateMode();
   if (mode !== "managed") {
-    const session = await createDesktopTerminalSession(options);
-    if (session) {
-      return session;
-    }
-
-    if (mode === "desktop") {
-      throw new Error("No running Windows Terminal host was found for desktop session creation.");
+    try {
+      const session = await createDesktopTerminalSession(options);
+      if (session) {
+        if (options.projectId) {
+          // Persist the project association on the registered bridged session
+          // so the sidebar/mobile grouping sees it, not just this response.
+          return bridgeRegistry.assignProject(session.id, options.projectId) ?? { ...session, projectId: options.projectId };
+        }
+        return session;
+      }
+    } catch (error) {
+      if (mode === "desktop") {
+        throw error;
+      }
+      console.warn(
+        "Desktop tab creation failed; falling back to a managed session:",
+        error instanceof Error ? error.message : String(error)
+      );
     }
   }
 
@@ -591,13 +613,26 @@ function flushOutputs(): void {
   const outputs = pendingOutputs;
   pendingOutputs = new Map();
 
+  const now = Date.now();
   for (const [sessionId, output] of outputs) {
-    broadcast({
-      type: "output",
-      sessionId,
-      seq: output.seq,
-      data: output.data
-    });
+    const outputBody = JSON.stringify({ type: "output", sessionId, seq: output.seq, data: output.data });
+    const pingDue = now - (lastActivityPingAt.get(sessionId) ?? 0) >= ACTIVITY_PING_INTERVAL_MS;
+    const activityBody = JSON.stringify({ type: "activity", sessionId, seq: output.seq });
+    let pinged = false;
+    for (const client of wss.clients) {
+      if (client.readyState !== WebSocket.OPEN) {
+        continue;
+      }
+      if (clientSubscriptions.get(client) === sessionId) {
+        client.send(outputBody);
+      } else if (pingDue) {
+        client.send(activityBody);
+        pinged = true;
+      }
+    }
+    if (pinged) {
+      lastActivityPingAt.set(sessionId, now);
+    }
   }
 }
 
@@ -700,6 +735,7 @@ manager.on("sessions", (sessions) => {
 
 manager.on("exit", (event) => {
   flushOutputs();
+  lastActivityPingAt.delete(event.sessionId);
   broadcast({
     type: "exit",
     sessionId: event.sessionId,
@@ -723,6 +759,7 @@ bridgeRegistry.on("sessions", () => {
 
 bridgeRegistry.on("exit", (event) => {
   flushOutputs();
+  lastActivityPingAt.delete(event.sessionId);
   broadcast({
     type: "exit",
     sessionId: event.sessionId,
@@ -751,9 +788,73 @@ app.get("/api/bootstrap", (_req, res) => {
     profiles: manager.profiles,
     hostProcesses,
     peerHosts,
+    projects: projectStore.list(),
     server: serverInfo,
     bridgeCommands: getBridgeCommands()
   });
+});
+
+app.get("/api/projects", (_req, res) => {
+  res.json(projectStore.list());
+});
+
+// Fire-and-forget notification fanned out to every connected client (web +
+// mobile), which play a sound/haptic. Meant for desktop-side automation like
+// Claude Code hooks: curl -X POST http://127.0.0.1:10001/api/notify.
+app.post("/api/notify", (req, res) => {
+  // Query params are accepted alongside the JSON body so shell hooks can use
+  // a bare `curl -X POST ".../api/notify?sound=done"` without JSON quoting.
+  const title = optionalString(req.body?.title) ?? optionalString(req.query?.title);
+  const body = optionalString(req.body?.body) ?? optionalString(req.query?.body);
+  const sound = optionalString(req.body?.sound) ?? optionalString(req.query?.sound);
+  broadcast({ type: "notify", title, body, sound });
+  res.status(204).end();
+});
+
+app.post("/api/projects", (req, res) => {
+  try {
+    const project = projectStore.create(String(req.body?.name ?? ""), String(req.body?.cwd ?? ""));
+    broadcast({ type: "projects", projects: projectStore.list() });
+    res.status(201).json(project);
+  } catch (error) {
+    res.status(400).json({
+      message: "Project could not be created.",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/projects/recent", (_req, res) => {
+  res.json(projectStore.recents());
+});
+
+app.patch("/api/projects/order", (req, res) => {
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+    res.status(400).json({ message: "Project order requires an ids array of strings." });
+    return;
+  }
+
+  const projects = projectStore.reorder(ids);
+  broadcast({ type: "projects", projects });
+  res.json(projects);
+});
+
+app.delete("/api/projects/:id", (req, res) => {
+  for (const session of allSessions()) {
+    if (session.projectId !== req.params.id) {
+      continue;
+    }
+    if (bridgeRegistry.hasSession(session.id)) {
+      bridgeRegistry.kill(session.id);
+    } else {
+      manager.kill(session.id);
+    }
+  }
+
+  projectStore.remove(req.params.id);
+  broadcast({ type: "projects", projects: projectStore.list() });
+  res.status(204).end();
 });
 
 app.post("/api/sessions", async (req, res) => {
@@ -876,6 +977,7 @@ wss.on("connection", (ws) => {
     profiles: manager.profiles,
     hostProcesses,
     peerHosts,
+    projects: projectStore.list(),
     server: serverInfo,
     bridgeCommands: getBridgeCommands()
   });
@@ -890,6 +992,7 @@ wss.on("connection", (ws) => {
     safeAction(ws, async () => {
       switch (message.type) {
         case "subscribe": {
+          clientSubscriptions.set(ws, message.sessionId);
           flushOutputs();
           if (peerProxy.isPeerTarget(message.sessionId)) {
             peerProxy.forward(ws, message);
@@ -1000,7 +1103,8 @@ async function attachClientApp(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  manager.ensureDefaultSession();
+  // Intentionally no default managed session: the session list should be a
+  // faithful mirror of real terminal tabs, not seeded with a phantom shell.
   hostProcesses = await discoverHostTerminals();
   await attachClientApp();
 

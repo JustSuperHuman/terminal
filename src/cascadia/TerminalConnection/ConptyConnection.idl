@@ -23,8 +23,18 @@ namespace Microsoft.Terminal.TerminalConnection
 
         UInt64 RootProcessHandle();
 
+        // Push live tab metadata to the terminal-web bridge mirror.
+        void UpdateBridgeTitle(String title);
+        void SetBridgeProject(String projectId);
+
         static event NewConnectionHandler NewConnection;
         static void StartInboundListener();
+
+        // terminal-web bridge introspection: connection state for status UI,
+        // and the access token remote clients need to connect.
+        static String BridgeConnectionStatus();
+        static String BridgeEndpoint();
+        static String BridgeAccessToken();
 
         static Windows.Foundation.Collections.ValueSet CreateSettings(String cmdline,
                                                                       String startingDirectory,

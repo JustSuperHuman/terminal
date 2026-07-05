@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import type { TerminalProfile, TerminalSessionSummary } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import type { TerminalProfile, TerminalProject, TerminalSessionSummary } from "../types";
 import { resolveQuickLaunches } from "../lib/launchers";
+import { loadSortRecent, saveSortRecent } from "../lib/storage";
 import { colors, font, radius } from "../theme";
 import { BottomSheet } from "./BottomSheet";
 import { SwipeableRow } from "./SwipeableRow";
@@ -17,6 +18,7 @@ export interface CreateSpec {
 interface SessionsDrawerProps {
   visible: boolean;
   sessions: TerminalSessionSummary[];
+  projects: TerminalProject[];
   profiles: TerminalProfile[];
   activeId?: string;
   unread: Record<string, number>;
@@ -61,6 +63,7 @@ const profileGroups: Array<{ id: TerminalProfile["group"]; label: string }> = [
 export function SessionsDrawer({
   visible,
   sessions,
+  projects,
   profiles,
   activeId,
   unread,
@@ -81,9 +84,50 @@ export function SessionsDrawer({
   const [cwdDraft, setCwdDraft] = useState("");
   const [cwdSheetOpen, setCwdSheetOpen] = useState(false);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
+  // Recency sort: flat list ordered by last update, most recent at the BOTTOM
+  // (closest to the thumb). Off = the default project grouping. Persisted.
+  const [sortRecent, setSortRecent] = useState(false);
+
+  useEffect(() => {
+    loadSortRecent().then(setSortRecent);
+  }, []);
+
+  function toggleSortRecent() {
+    setSortRecent((current) => {
+      const next = !current;
+      saveSortRecent(next);
+      return next;
+    });
+  }
   // While a session row is being swiped to delete, lock the list's vertical
   // scroll so the two gestures don't fight.
   const [rowSwiping, setRowSwiping] = useState(false);
+  // The Modal unmounts its content while hidden, so the ScrollView starts back
+  // at the top on every open. Remember the last offset across open/close and
+  // restore it once the reopened list has laid out its content.
+  const scrollRef = useRef<ScrollView | null>(null);
+  const scrollOffsetRef = useRef(0);
+  const scrollRestoredRef = useRef(false);
+
+  useEffect(() => {
+    if (!visible) {
+      scrollRestoredRef.current = false;
+    }
+  }, [visible]);
+
+  function rememberScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+  }
+
+  function restoreScroll() {
+    if (scrollRestoredRef.current) {
+      return;
+    }
+    scrollRestoredRef.current = true;
+    if (scrollOffsetRef.current > 0) {
+      scrollRef.current?.scrollTo({ y: scrollOffsetRef.current, animated: false });
+    }
+  }
 
   useEffect(() => {
     if (!visible) {
@@ -98,6 +142,33 @@ export function SessionsDrawer({
     () => sessions.filter((session) => !hiddenIds.includes(session.id)),
     [sessions, hiddenIds]
   );
+
+  // Group sessions by project: one section per project (in server order),
+  // then a trailing group for sessions without a known project. Empty project
+  // sections are skipped; the trailing group only gets an "Other" header when
+  // at least one project section is shown. With recency sort on, grouping is
+  // dropped for a single flat list ordered oldest → newest (recent at bottom).
+  const sessionGroups = useMemo(() => {
+    if (sortRecent) {
+      const ordered = [...visibleSessions].sort(
+        (a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
+      );
+      return ordered.length > 0 ? [{ key: "__recent__", label: "", sessions: ordered }] : [];
+    }
+    const groups = projects
+      .map((project) => ({
+        key: project.id,
+        label: project.name,
+        sessions: visibleSessions.filter((session) => session.projectId === project.id),
+      }))
+      .filter((group) => group.sessions.length > 0);
+    const knownIds = new Set(projects.map((project) => project.id));
+    const ungrouped = visibleSessions.filter((session) => !session.projectId || !knownIds.has(session.projectId));
+    if (ungrouped.length > 0) {
+      groups.push({ key: "__ungrouped__", label: groups.length > 0 ? "Other" : "", sessions: ungrouped });
+    }
+    return groups;
+  }, [projects, visibleSessions, sortRecent]);
 
   function deleteSession(id: string) {
     setHiddenIds((current) => (current.includes(id) ? current : [...current, id]));
@@ -161,22 +232,50 @@ export function SessionsDrawer({
         </View>
 
         <ScrollView
+          ref={scrollRef}
           style={styles.body}
           contentContainerStyle={styles.bodyContent}
           keyboardShouldPersistTaps="handled"
           scrollEnabled={!rowSwiping}
+          onScroll={rememberScroll}
+          scrollEventThrottle={32}
+          onContentSizeChange={restoreScroll}
         >
           <View style={styles.sectionHead}>
             <Text style={styles.sectionTitle}>Sessions</Text>
-            <Pressable onPress={() => onCreate()} hitSlop={10} style={({ pressed }) => [styles.newBtn, pressed && styles.newBtnPressed]}>
-              <Text style={styles.newBtnText}>+</Text>
-            </Pressable>
+            <View style={styles.sectionActions}>
+              <Pressable
+                onPress={toggleSortRecent}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  sortRecent ? "Group sessions by project" : "Sort sessions by last update, recent at the bottom"
+                }
+                style={({ pressed }) => [
+                  styles.newBtn,
+                  sortRecent && styles.sortBtnActive,
+                  pressed && styles.newBtnPressed,
+                ]}
+              >
+                <Text style={[styles.sortBtnText, sortRecent && styles.sortBtnTextActive]}>⇅</Text>
+              </Pressable>
+              <Pressable onPress={() => onCreate()} hitSlop={10} style={({ pressed }) => [styles.newBtn, pressed && styles.newBtnPressed]}>
+                <Text style={styles.newBtnText}>+</Text>
+              </Pressable>
+            </View>
           </View>
 
           {visibleSessions.length === 0 ? (
             <Text style={styles.empty}>No sessions yet</Text>
           ) : (
-            visibleSessions.map((session) => {
+            sessionGroups.map((group) => (
+              <View key={group.key} style={styles.projectGroup}>
+                {group.label ? (
+                  <Text style={styles.projectHeader} numberOfLines={1}>
+                    {group.label}
+                  </Text>
+                ) : null}
+                {group.sessions.map((session) => {
               const selected = session.id === activeId;
               const unreadCount = unread[session.id] ?? 0;
               const editing = editingId === session.id;
@@ -247,7 +346,9 @@ export function SessionsDrawer({
                   </View>
                 </SwipeableRow>
               );
-            })
+                })}
+              </View>
+            ))
           )}
 
           {/* Working-directory chooser opens in a bottom sheet */}
@@ -456,6 +557,34 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontFamily: font.regular,
     marginTop: -2,
+  },
+  sectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  sortBtnActive: {
+    borderColor: colors.primary,
+  },
+  sortBtnText: {
+    color: colors.mutedForeground,
+    fontSize: 15,
+  },
+  sortBtnTextActive: {
+    color: colors.primary,
+  },
+  projectGroup: {
+    gap: 4,
+  },
+  projectHeader: {
+    color: colors.mutedForeground,
+    fontSize: 10.5,
+    fontFamily: font.bold,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 2,
   },
   empty: {
     color: colors.mutedForeground,

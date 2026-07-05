@@ -57,7 +57,6 @@ interface CommandBarProps {
   sessionStatus?: SessionStatus;
   socketStatus: SocketStatus;
   bottomInset?: number;
-  keyboardVisible?: boolean;
   // Ref to the BlurTargetView behind the bar; required for real blur on Android.
   blurTarget?: RefObject<View | null>;
   dictation?: DictationControl;
@@ -110,7 +109,6 @@ export function CommandBar({
   sessionStatus,
   socketStatus,
   bottomInset = 0,
-  keyboardVisible = false,
   blurTarget,
   dictation,
 }: CommandBarProps) {
@@ -124,7 +122,9 @@ export function CommandBar({
   const spokeRef = useRef(false);
 
   const disabled = !targetId || sessionStatus !== "running" || socketStatus !== "open";
-  const showExpandedKeys = expanded && !keyboardVisible;
+  // The keyboard is persistently open now, so the extra row is purely the
+  // user's "Keys" toggle — no keyboard-visibility gating.
+  const showExpandedKeys = expanded;
   const speaking = dictation?.speaking ?? false;
   const lastText = dictation?.lastText;
 
@@ -236,7 +236,7 @@ export function CommandBar({
     terminalSocket.send({ type: "input", sessionId: targetId, data: key.value });
   }
 
-  function renderKey(key: ControlKey, compact: boolean) {
+  function renderKey(key: ControlKey) {
     return (
       <Pressable
         key={key.label}
@@ -247,7 +247,6 @@ export function CommandBar({
         accessibilityState={{ disabled }}
         style={({ pressed }) => [
           styles.key,
-          compact && styles.keyCompact,
           key.accent && styles.keyAccent,
           disabled && styles.faded,
           pressed && styles.keyPressed,
@@ -301,7 +300,7 @@ export function CommandBar({
     : 0;
 
   return (
-    <View style={[styles.container, keyboardVisible && styles.containerKeyboard, { paddingBottom: 8 + bottomInset }]}>
+    <View style={[styles.container, { paddingBottom: 8 + bottomInset }]}>
       <BlurView
         intensity={Platform.OS === "ios" ? 74 : 40}
         tint="systemChromeMaterialDark"
@@ -356,7 +355,6 @@ export function CommandBar({
       ) : null}
 
       <View style={styles.handleRow}>
-        {showMic && dictation ? renderMic(dictation) : null}
         <Pressable
           onPress={toggleExpanded}
           hitSlop={6}
@@ -370,12 +368,13 @@ export function CommandBar({
         </Pressable>
 
         <View style={styles.visibleKeys}>
-          {visibleKeys.map((key) => renderKey(key, keyboardVisible))}
+          {visibleKeys.map((key) => renderKey(key))}
         </View>
+        {showMic && dictation ? renderMic(dictation) : null}
       </View>
 
       {showExpandedKeys ? (
-        <View style={styles.keyRow}>{expandedKeys.map((key) => renderKey(key, false))}</View>
+        <View style={styles.keyRow}>{expandedKeys.map((key) => renderKey(key))}</View>
       ) : null}
     </View>
   );
@@ -392,10 +391,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 0,
     borderColor: GLASS_BORDER,
     paddingHorizontal: 12,
-    paddingTop: 11,
-    gap: 8,
-  },
-  containerKeyboard: {
+    // Sized for the keyboard-up steady state (the keyboard is always open now).
     paddingTop: 8,
     gap: 6,
   },
@@ -514,18 +510,13 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   key: {
-    minWidth: 44,
+    minWidth: 40,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: GLASS_RAISED,
     borderColor: GLASS_RAISED_BORDER,
     borderWidth: 1,
     borderRadius: radius.md,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  keyCompact: {
-    minWidth: 40,
     paddingHorizontal: 8,
     paddingVertical: 6,
   },

@@ -3,15 +3,16 @@ import { AlertCircle, Copy, CopyCheck, Download, Focus, KeyRound, Menu, Plus, Po
 import { CommandBar } from "@/components/CommandBar";
 import { ConnectionBadge } from "@/components/ConnectionBadge";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { ProjectTabs } from "@/components/ProjectTabs";
 import { SessionSidebar } from "@/components/SessionSidebar";
-import { TerminalSurface } from "@/components/TerminalSurface";
+import { TerminalSurface, type TerminalSurfaceHandle } from "@/components/TerminalSurface";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ApiError, createSession, getBootstrap } from "@/lib/api";
+import { ApiError, createProject, createSession, deleteProject, getBootstrap } from "@/lib/api";
 import { setAccessToken, withAccessToken } from "@/lib/access-token";
-import { buildTerminalTargets } from "@/lib/session-targets";
+import { buildTerminalTargets, type TerminalTarget } from "@/lib/session-targets";
 import { terminalSocket, type SocketStatus } from "@/lib/terminal-socket";
 import type {
   BootstrapPayload,
@@ -22,14 +23,26 @@ import type {
   ServerMessage,
   TerminalHostPeer,
   TerminalProfile,
+  TerminalProject,
   TerminalSessionSummary
 } from "@/lib/types";
+
+function selectPreferredTargetId(targets: TerminalTarget[], currentId?: string): string | undefined {
+  const current = targets.find((target) => target.id === currentId);
+  if (current?.session.status === "running") {
+    return current.id;
+  }
+
+  return targets.find((target) => target.session.status === "running")?.id ?? current?.id ?? targets[0]?.id;
+}
 
 export function App() {
   const [sessions, setSessions] = useState<TerminalSessionSummary[]>([]);
   const [profiles, setProfiles] = useState<TerminalProfile[]>([]);
   const [hostProcesses, setHostProcesses] = useState<HostTerminalProcess[]>([]);
   const [peerHosts, setPeerHosts] = useState<TerminalHostPeer[]>([]);
+  const [projects, setProjects] = useState<TerminalProject[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | undefined>();
   const [bridgeCommands, setBridgeCommands] = useState<BridgeCommandInfo | undefined>();
   const [serverInfo, setServerInfo] = useState<ServerInfo | undefined>();
   const [activeTargetId, setActiveTargetId] = useState<string | undefined>();
@@ -44,20 +57,52 @@ export function App() {
   const [copySignal, setCopySignal] = useState(0);
   const [focusSignal, setFocusSignal] = useState(0);
   const activeTargetIdRef = useRef<string | undefined>(activeTargetId);
+  const terminalSurfaceRef = useRef<TerminalSurfaceHandle | null>(null);
 
   const targets = useMemo(() => buildTerminalTargets(sessions, peerHosts), [sessions, peerHosts]);
-  const activeTarget = useMemo(() => targets.find((target) => target.id === activeTargetId) ?? targets[0], [activeTargetId, targets]);
+  const activeTarget = useMemo(() => {
+    const preferredId = selectPreferredTargetId(targets, activeTargetId);
+    return targets.find((target) => target.id === preferredId);
+  }, [activeTargetId, targets]);
   const activeSession = activeTarget?.session;
+  const activeProject = useMemo(() => projects.find((project) => project.id === activeProjectId), [activeProjectId, projects]);
+  const visibleSessions = useMemo(
+    () => (activeProject ? sessions.filter((session) => session.projectId === activeProject.id) : sessions),
+    [activeProject, sessions]
+  );
+  const projectSessionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const session of sessions) {
+      if (session.projectId) {
+        counts[session.projectId] = (counts[session.projectId] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [sessions]);
 
   useEffect(() => {
     activeTargetIdRef.current = activeTargetId;
   }, [activeTargetId]);
+
+  useEffect(() => {
+    setActiveTargetId((current) => {
+      const preferredId = selectPreferredTargetId(targets, current);
+      return preferredId === current ? current : preferredId;
+    });
+  }, [targets]);
+
+  useEffect(() => {
+    if (activeProjectId && !projects.some((project) => project.id === activeProjectId)) {
+      setActiveProjectId(undefined);
+    }
+  }, [activeProjectId, projects]);
 
   function applyBootstrap(payload: BootstrapPayload) {
     setSessions(payload.sessions);
     setProfiles(payload.profiles);
     setHostProcesses(payload.hostProcesses);
     setPeerHosts(payload.peerHosts ?? []);
+    setProjects(payload.projects ?? []);
     setBridgeCommands(payload.bridgeCommands);
     setServerInfo(payload.server);
     setActiveTargetId((current) => current ?? payload.sessions[0]?.id);
@@ -123,6 +168,10 @@ export function App() {
         }
       }
 
+      if (message.type === "projects") {
+        setProjects(message.projects);
+      }
+
       if (message.type === "host") {
         setHostProcesses(message.hostProcesses);
         setPeerHosts(message.peerHosts ?? []);
@@ -132,7 +181,7 @@ export function App() {
         setActionError(message.detail ? `${message.message} ${message.detail}` : message.message);
       }
 
-      if (message.type === "output") {
+      if (message.type === "output" || message.type === "activity") {
         setUnread((current) => {
           if (message.sessionId === activeTargetIdRef.current) {
             return current;
@@ -169,10 +218,50 @@ export function App() {
     setSidebarOpen(false);
   }
 
-  async function newSession(options: CreateSessionOptions = {}) {
+  function selectProject(projectId?: string) {
+    setActiveProjectId(projectId);
+    if (!projectId) {
+      return;
+    }
+
+    const projectSessions = sessions.filter((session) => session.projectId === projectId);
+    if (!projectSessions.some((session) => session.id === activeTarget?.session.id)) {
+      setActiveTargetId(projectSessions[0]?.id);
+    }
+  }
+
+  async function handleCreateProject(name: string, cwd: string) {
     setActionError("");
     try {
-      const session = await createSession(options);
+      const project = await createProject(name, cwd);
+      setActiveProjectId(project.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    setActionError("");
+    try {
+      await deleteProject(projectId);
+      if (activeProjectId === projectId) {
+        setActiveProjectId(undefined);
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  async function newSession(options: CreateSessionOptions = {}) {
+    setActionError("");
+    const nextOptions: CreateSessionOptions =
+      activeProject && !options.projectId
+        ? { ...options, projectId: activeProject.id, cwd: options.cwd ?? activeProject.cwd }
+        : options;
+    try {
+      const session = await createSession(nextOptions);
       setActiveTargetId(session.id);
       setSidebarOpen(false);
       return session;
@@ -291,7 +380,8 @@ export function App() {
         <div className="flex h-full min-h-0">
           <aside className="hidden w-[320px] shrink-0 border-r lg:block">
             <SessionSidebar
-              sessions={sessions}
+              sessions={visibleSessions}
+              projects={projects}
               activeTargetId={activeTarget?.id}
               hostProcesses={hostProcesses}
               peerHosts={peerHosts}
@@ -382,6 +472,15 @@ export function App() {
               </div>
             </header>
 
+            <ProjectTabs
+              projects={projects}
+              activeProjectId={activeProjectId}
+              sessionCounts={projectSessionCounts}
+              onSelectProject={selectProject}
+              onCreateProject={handleCreateProject}
+              onDeleteProject={handleDeleteProject}
+            />
+
             {actionError && !authRequired ? (
               <div className="flex shrink-0 items-start gap-2 border-b bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
@@ -434,6 +533,7 @@ export function App() {
             ) : (
               <>
                 <TerminalSurface
+                  ref={terminalSurfaceRef}
                   session={activeSession}
                   targetId={activeTarget?.id}
                   copySignal={copySignal}
@@ -441,7 +541,12 @@ export function App() {
                   socketStatus={socketStatus}
                   onCopied={onCopied}
                 />
-                <CommandBar session={activeSession} targetId={activeTarget?.id} socketStatus={socketStatus} />
+                <CommandBar
+                  session={activeSession}
+                  targetId={activeTarget?.id}
+                  socketStatus={socketStatus}
+                  onBeforeInput={() => terminalSurfaceRef.current?.settleBeforeInput()}
+                />
               </>
             )}
           </main>
@@ -454,7 +559,8 @@ export function App() {
             </SheetHeader>
             <div className="min-h-0 flex-1">
               <SessionSidebar
-                sessions={sessions}
+                sessions={visibleSessions}
+                projects={projects}
                 activeTargetId={activeTarget?.id}
                 hostProcesses={hostProcesses}
                 peerHosts={peerHosts}
@@ -472,7 +578,7 @@ export function App() {
             </div>
           </SheetContent>
         </Sheet>
-        <NewTerminalDialog open={newTerminalOpen} profiles={profiles} onOpenChange={setNewTerminalOpen} onCreate={newSession} />
+        <NewTerminalDialog open={newTerminalOpen} profiles={profiles} defaultCwd={activeProject?.cwd} onOpenChange={setNewTerminalOpen} onCreate={newSession} />
       </div>
     </TooltipProvider>
   );

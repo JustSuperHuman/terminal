@@ -45,6 +45,7 @@ namespace winrt::TerminalApp::implementation
         void NotifyTabTitleUpdated(const winrt::TerminalApp::Tab& tab);
         winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::Tab> FilteredTabs() const noexcept;
         void SelectTab(const winrt::TerminalApp::Tab& tab);
+        void SetProjectFilter(const winrt::hstring& projectId);
 
         til::typed_event<winrt::Windows::Foundation::IInspectable, winrt::TerminalApp::Tab> VerticalTabSelected;
         std::function<void(const winrt::TerminalApp::Tab&, uint32_t)> VerticalTabMoveRequested;
@@ -73,16 +74,24 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::FrameworkElement _verticalTabTitleToolTipOwner{ nullptr };
         std::vector<winrt::TerminalApp::Tab> _recentActivityTabs;
         std::vector<ActivityDebounce> _activityDebounces;
-        bool _updatingVerticalSelection{ false };
+        // Depth counter: >0 while we're programmatically mutating the vertical
+        // list selection or rebuilding _filteredTabs, so SelectionChanged
+        // callbacks raised by our own mutations don't re-enter tab focusing.
+        uint32_t _updatingVerticalSelection{ 0 };
+        // Debounces the expensive buffer-text search pass while typing.
+        SafeDispatcherTimer _bufferSearchTimer;
+        // Non-empty: only show tabs created under this terminal-web project.
+        winrt::hstring _projectFilter;
 
-        void _updateFilteredTabs();
+        void _updateFilteredTabs(const bool includeBufferSearch = true);
+        void _bufferSearchTimerTick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& e);
         void _setRecentActivitySortEnabled(const bool enabled);
         void _markTabRecentlyUpdated(const winrt::TerminalApp::Tab& tab);
         void _closeVerticalTabTitleToolTip();
         void _pruneActivityState();
         void _updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms);
         bool _tabIsTracked(const winrt::TerminalApp::Tab& tab) const;
-        bool _matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms) const;
+        bool _matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms, const bool allowBufferSearch) const;
         std::wstring _tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const;
         static bool _containsTab(const std::vector<winrt::TerminalApp::Tab>& tabs, const winrt::TerminalApp::Tab& tab);
         static bool _containsAllTerms(const std::wstring& text, const std::vector<std::wstring>& terms);
