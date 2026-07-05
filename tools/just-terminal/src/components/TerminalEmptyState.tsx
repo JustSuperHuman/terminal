@@ -1,5 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import type { CreateSpec } from "./SessionsDrawer";
+import type { CreateSpec } from "./SessionsScreen";
 import { resolveQuickLaunches } from "../lib/launchers";
 import type { TerminalProfile } from "../types";
 import { colors, font, radius } from "../theme";

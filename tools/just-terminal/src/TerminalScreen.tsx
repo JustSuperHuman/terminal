@@ -18,7 +18,7 @@ import { BlurTargetView } from "expo-blur";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import * as Haptics from "expo-haptics";
 import { CommandBar } from "./components/CommandBar";
-import { SessionsDrawer, type CreateSpec } from "./components/SessionsDrawer";
+import { SessionsScreen, type CreateSpec } from "./components/SessionsScreen";
 import { SessionSwitcher, type SessionSwitcherHandle } from "./components/SessionSwitcher";
 import { SwipeBar } from "./components/SwipeBar";
 import { TerminalView, type TerminalViewHandle } from "./components/TerminalView";
@@ -28,7 +28,7 @@ import { createSession as createSessionApi } from "./lib/api";
 import type { ServerEndpoint } from "./lib/endpoint";
 import { terminalSocket, type SocketStatus } from "./lib/socket";
 import { forgetCwd, loadRecentCwds, rememberCwd } from "./lib/storage";
-import type { ServerInfo, ServerMessage, TerminalProfile, TerminalProject, TerminalSessionSummary } from "./types";
+import type { ServerInfo, ServerMessage, TerminalProfile, TerminalSessionSummary } from "./types";
 import { colors, font } from "./theme";
 
 interface TerminalScreenProps {
@@ -95,7 +95,6 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const { height: windowHeight } = useWindowDimensions();
   const [sessions, setSessions] = useState<TerminalSessionSummary[]>([]);
   const [profiles, setProfiles] = useState<TerminalProfile[]>([]);
-  const [projects, setProjects] = useState<TerminalProject[]>([]);
   const [serverInfo, setServerInfo] = useState<ServerInfo | undefined>();
   const [activeId, setActiveId] = useState<string | undefined>();
   const [socketStatus, setSocketStatus] = useState<SocketStatus>(terminalSocket.currentStatus);
@@ -278,16 +277,12 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         case "hello":
           setSessions(message.sessions);
           setProfiles(message.profiles);
-          setProjects(message.projects ?? []);
           setServerInfo(message.server);
           setActiveId((current) => current ?? message.sessions[0]?.id);
           break;
         case "sessions":
           setSessions(message.sessions);
           setActiveId((current) => current ?? message.sessions[0]?.id);
-          break;
-        case "projects":
-          setProjects(message.projects);
           break;
         case "notify":
           // Desktop-side automation (e.g. Claude Code hooks POSTing to
@@ -515,10 +510,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         ) : null}
       </View>
 
-      <SessionsDrawer
+      <SessionsScreen
         visible={drawerOpen}
         sessions={sessions}
-        projects={projects}
         profiles={profiles}
         activeId={activeId}
         unread={unread}
