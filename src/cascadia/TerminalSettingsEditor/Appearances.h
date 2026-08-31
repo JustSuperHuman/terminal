@@ -22,7 +22,6 @@ Author(s):
 #include "AppearanceViewModel.g.h"
 #include "Utils.h"
 #include "ViewModelHelpers.h"
-#include "SettingContainer.h"
 
 namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
 {
@@ -123,7 +122,7 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
         hstring CurrentBackgroundImagePath() const;
         bool UseDesktopBGImage() const;
         void UseDesktopBGImage(const bool useDesktop);
-        bool BackgroundImageSettingsVisible() const;
+        bool BackgroundImageSettingsEnabled() const;
         void SetBackgroundImageOpacityFromPercentageValue(double percentageValue);
         void SetBackgroundImagePath(winrt::hstring path);
         hstring BackgroundImageAlignmentCurrentValue() const;
@@ -237,6 +236,7 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
         Windows::Foundation::Collections::IObservableVector<winrt::hstring> _FontAxesNames;
         Windows::Foundation::Collections::IObservableVector<winrt::hstring> _FontFeaturesNames;
         std::wstring _fontNameFilter;
+        bool _fontFaceBoxHasUserInput = false;
         bool _ShowAllFonts = false;
 
         static void _ViewModelChanged(const Windows::UI::Xaml::DependencyObject& d, const Windows::UI::Xaml::DependencyPropertyChangedEventArgs& e);

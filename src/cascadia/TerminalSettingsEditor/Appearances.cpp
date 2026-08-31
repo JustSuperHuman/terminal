@@ -224,7 +224,7 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
                 // into the path TextBox, we properly update the checkbox and stored
                 // _lastBgImagePath. Without this, then we'll permanently hide the text
                 // box, prevent it from ever being changed again.
-                _NotifyChanges(L"UseDesktopBGImage", L"BackgroundImageSettingsVisible", L"CurrentBackgroundImagePath");
+                _NotifyChanges(L"UseDesktopBGImage", L"BackgroundImageSettingsEnabled", L"CurrentBackgroundImagePath");
             }
             else if (viewModelProperty == L"BackgroundImageAlignment")
             {
@@ -1003,7 +1003,7 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
         }
     }
 
-    bool AppearanceViewModel::BackgroundImageSettingsVisible() const
+    bool AppearanceViewModel::BackgroundImageSettingsEnabled() const
     {
         return !BackgroundImagePath().Path().empty();
     }
@@ -1152,8 +1152,7 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
             {
                 if (const auto& controlToFocus{ strongThis->FindName(elementToFocus).try_as<Controls::Control>() })
                 {
-                    controlToFocus.as<FrameworkElement>().StartBringIntoView();
-                    controlToFocus.Focus(FocusState::Programmatic);
+                    winrt::Microsoft::Terminal::Settings::ExpandAncestorsAndBringIntoView(strongThis.as<FrameworkElement>(), controlToFocus);
                 }
                 strongThis->_loadedRevoker.revoke();
             }
@@ -1189,13 +1188,25 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
 
     void Appearances::FontFaceBox_GotFocus(const Windows::Foundation::IInspectable& sender, const RoutedEventArgs&)
     {
+        const auto box = sender.as<AutoSuggestBox>();
         _updateFontNameFilter({});
-        sender.as<AutoSuggestBox>().IsSuggestionListOpen(true);
+        box.IsSuggestionListOpen(true);
+        _fontFaceBoxHasUserInput = false;
     }
 
     void Appearances::FontFaceBox_LostFocus(const IInspectable& sender, const RoutedEventArgs&)
     {
-        _updateFontName(sender.as<AutoSuggestBox>().Text());
+        const auto box = sender.as<AutoSuggestBox>();
+        if (_fontFaceBoxHasUserInput)
+        {
+            _updateFontName(box.Text());
+        }
+        else
+        {
+            // AutoSuggestBox restores its cached user query when Tab closes the suggestion list.
+            // Programmatic Text updates don't synchronize that cache, so restore the committed value.
+            box.Text(Appearance().FontFace());
+        }
     }
 
     void Appearances::FontFaceBox_QuerySubmitted(const AutoSuggestBox& sender, const AutoSuggestBoxQuerySubmittedEventArgs& args)
@@ -1237,6 +1248,8 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
         Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weakThis{ get_weak() }, weakSender{ winrt::make_weak(sender) }, fontSpec{ std::move(fontSpec) }]() {
             if (const auto self{ weakThis.get() })
             {
+                self->_fontFaceBoxHasUserInput = false;
+
                 if (const auto box{ weakSender.get() })
                 {
                     box.Text(fontSpec);
@@ -1254,6 +1267,8 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
         {
             return;
         }
+
+        _fontFaceBoxHasUserInput = true;
 
         const auto fontSpec = sender.Text();
         std::wstring_view filter{ fontSpec };
