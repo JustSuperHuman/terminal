@@ -1,5 +1,11 @@
+import type { AcpBridgeState, AcpSessionView } from "./acp-types.js";
+
 export type SessionStatus = "running" | "exited";
 export type SessionSource = "managed" | "bridged";
+export type TerminalAgentId = "claude" | "codex" | "hermes";
+export type TerminalAgentSource = "profile" | "command" | "screen" | "osc";
+/** What the foreground agent is doing right now, from its rendered screen. */
+export type TerminalAgentActivity = "idle" | "working" | "awaiting";
 
 export interface TerminalProfile {
   id: string;
@@ -8,6 +14,10 @@ export interface TerminalProfile {
   args: string[];
   group: "shell" | "agent" | "custom";
   description?: string;
+  /** Agent identity inferred from the configured command, when applicable. */
+  agent?: TerminalAgentId;
+  /** Native Windows Terminal profile GUID used to launch the exact profile. */
+  terminalProfileGuid?: string;
 }
 
 export interface TerminalProject {
@@ -15,6 +25,8 @@ export interface TerminalProject {
   name: string;
   cwd: string;
   createdAt: string;
+  /** Present for projects inferred from a live terminal's current directory. */
+  automatic?: boolean;
 }
 
 export interface RecentProject {
@@ -30,6 +42,16 @@ export interface TerminalSessionSummary {
   args: string[];
   cwd: string;
   projectId?: string;
+  /** Foreground agent when known. This enables Terminal Assist; it is not an attached ACP session. */
+  agent?: TerminalAgentId;
+  /** How the foreground agent was classified. OSC is a short-lived runtime override. */
+  agentSource?: TerminalAgentSource;
+  /** Live agent activity, so every client can show what the agent is doing without polling. */
+  agentActivity?: TerminalAgentActivity;
+  /** Set once the user attaches this terminal's agent to an ACP conversation. */
+  acpSessionId?: string;
+  /** Special sessions (the orchestrator) are hidden from the normal session list. */
+  kind?: "orchestrator";
   source: SessionSource;
   pid?: number;
   status: SessionStatus;
@@ -97,8 +119,22 @@ export interface BridgeCommandInfo {
   claude?: string;
 }
 
+export type OrchestratorAgent = "claude" | "codex";
+
+export interface OrchestratorStatus {
+  state: "stopped" | "starting" | "running";
+  agent?: OrchestratorAgent;
+  sessionId?: string;
+  startedAt?: string;
+  lastExit?: { exitCode?: number; signal?: number; at: string };
+  availableAgents: OrchestratorAgent[];
+}
+
 export type ClientMessage =
-  | { type: "subscribe"; sessionId: string }
+  // A client can watch several sessions at once through named slots (main
+  // terminal + orchestrator panel); subscribing replaces only its own slot.
+  | { type: "subscribe"; sessionId: string; slot?: string }
+  | { type: "unsubscribe"; slot?: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
   | { type: "create"; title?: string; profileId?: string; shell?: string; args?: string[]; cwd?: string; projectId?: string }
@@ -112,8 +148,19 @@ export interface NotifyPayload {
   sound?: string;
 }
 
+export interface TerminalNotification {
+  id: string;
+  at: string;
+  origin: "api" | "bell" | "osc";
+  sessionId?: string;
+  sessionTitle?: string;
+  title?: string;
+  body?: string;
+  sound?: string;
+}
+
 export type BridgeClientMessage =
-  | { type: "register"; session: TerminalSessionSummary }
+  | { type: "register"; session: TerminalSessionSummary; replay?: string }
   | { type: "output"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
   | { type: "title"; sessionId: string; title: string }
@@ -137,10 +184,19 @@ export type ServerMessage =
       projects: TerminalProject[];
       server: ServerInfo;
       bridgeCommands: BridgeCommandInfo;
+      orchestrator: OrchestratorStatus;
+      acp: AcpBridgeState;
     }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
+  | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }
-  | { type: "notify"; title?: string; body?: string; sound?: string }
+  | { type: "orchestrator"; orchestrator: OrchestratorStatus }
+  | { type: "acp_state"; acp: AcpBridgeState }
+  | { type: "acp_session"; epoch: string; sequence: number; session: AcpSessionView }
+  | { type: "acp_session_removed"; epoch: string; sequence: number; sessionId: string }
+  // The optional identity/attribution fields are additive so older clients
+  // that only read title/body/sound keep working.
+  | { type: "notify"; title?: string; body?: string; sound?: string; id?: string; at?: string; origin?: "api" | "bell" | "osc"; sessionId?: string; sessionTitle?: string }
   | { type: "session"; session: TerminalSessionSummary }
   | { type: "snapshot"; sessionId: string; screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary }
   | { type: "output"; sessionId: string; seq: number; data: string }

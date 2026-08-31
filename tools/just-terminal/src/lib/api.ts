@@ -1,5 +1,5 @@
 import { apiUrl, type ServerEndpoint } from "./endpoint";
-import type { TerminalSessionSummary } from "../types";
+import type { TerminalNotification, TerminalSessionSummary } from "../types";
 
 export interface CreateSessionOptions {
   profileId?: string;
@@ -31,6 +31,20 @@ export async function createSession(
     throw new Error(`Create session failed (${response.status})`);
   }
   return (await response.json()) as TerminalSessionSummary;
+}
+
+/**
+ * Notifications recorded after `sinceMs` (epoch ms) — lets the app catch up on
+ * task-finish signals it missed while backgrounded or disconnected.
+ */
+export async function fetchNotifications(endpoint: ServerEndpoint, sinceMs: number): Promise<TerminalNotification[]> {
+  const response = await fetch(apiUrl(endpoint, `/api/notifications?since=${Math.floor(sinceMs)}`), {
+    headers: authHeaders(endpoint),
+  });
+  if (!response.ok) {
+    throw new Error(`Notification fetch failed (${response.status})`);
+  }
+  return (await response.json()) as TerminalNotification[];
 }
 
 /** Lightweight reachability probe used by the connect screen. */

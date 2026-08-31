@@ -23,6 +23,7 @@
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
 
         <!--
@@ -44,6 +45,27 @@
                         Orientation="Horizontal"
                         Spacing="4" />
         </ScrollViewer>
+
+        <!--
+            Orchestrator toggle: pinned to the window's right edge, outside the
+            scrolling project strip, so it stays put no matter how many
+            projects are open. Accented while the panel is open.
+        -->
+        <Border Grid.Row="0"
+                Grid.Column="2"
+                Background="{x:Bind TitlebarBrush, Mode=OneWay}">
+            <Button x:Name="OrchestratorToggleButton"
+                    Margin="4,4,6,4"
+                    Padding="8,2,8,2"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    AutomationProperties.Name="Orchestrator"
+                    ToolTipService.ToolTip="Orchestrator">
+                <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                          FontSize="12"
+                          Glyph="&#xE99A;" />
+            </Button>
+        </Border>
 
         <Grid x:Name="VerticalTabPane"
               Grid.Row="1"
@@ -119,6 +141,162 @@
             <Grid.Background>
                 <ImageBrush />
             </Grid.Background>
+        </Grid>
+
+        <!--
+            Orchestrator panel: a collapsible right-side pane hosting the
+            server-managed orchestrator session (Claude Code / Codex with
+            cross-session tools). The TermControl is attached in code once the
+            session exists; until then the empty state offers start buttons.
+        -->
+        <Grid x:Name="OrchestratorPane"
+              Grid.Row="1"
+              Grid.RowSpan="2"
+              Grid.Column="2"
+              Background="{x:Bind TitlebarBrush, Mode=OneWay}"
+              Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition x:Name="OrchestratorColumn"
+                                  Width="430"
+                                  MinWidth="320"
+                                  MaxWidth="800" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Border x:Name="OrchestratorResizeHandle"
+                    Grid.Row="0"
+                    Grid.RowSpan="2"
+                    Grid.Column="0"
+                    Background="Transparent"
+                    PointerCanceled="_OrchestratorResizePointerCanceled"
+                    PointerCaptureLost="_OrchestratorResizePointerCaptureLost"
+                    PointerEntered="_OrchestratorResizePointerEntered"
+                    PointerExited="_OrchestratorResizePointerExited"
+                    PointerMoved="_OrchestratorResizePointerMoved"
+                    PointerPressed="_OrchestratorResizePointerPressed"
+                    PointerReleased="_OrchestratorResizePointerReleased">
+                <Rectangle Width="1"
+                           HorizontalAlignment="Center"
+                           Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+            </Border>
+
+            <Grid Grid.Row="0"
+                  Grid.Column="1"
+                  Padding="12,8,6,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <FontIcon Grid.Column="0"
+                          Margin="0,0,10,0"
+                          VerticalAlignment="Center"
+                          FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                          FontSize="16"
+                          Glyph="&#xE99A;" />
+
+                <StackPanel Grid.Column="1"
+                            VerticalAlignment="Center">
+                    <TextBlock FontSize="13"
+                               FontWeight="SemiBold"
+                               Text="Orchestrator" />
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="6">
+                        <Ellipse x:Name="OrchestratorStatusDot"
+                                 Width="7"
+                                 Height="7"
+                                 VerticalAlignment="Center"
+                                 Fill="Gray" />
+                        <TextBlock x:Name="OrchestratorStatusText"
+                                   FontSize="11"
+                                   Opacity="0.75"
+                                   Text="Not running" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal"
+                            Spacing="2">
+                    <Button x:Name="OrchestratorRestartButton"
+                            Padding="6"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            ToolTipService.ToolTip="Restart orchestrator"
+                            Visibility="Collapsed">
+                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                  FontSize="13"
+                                  Glyph="&#xE72C;" />
+                    </Button>
+                    <Button x:Name="OrchestratorStopButton"
+                            Padding="6"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            ToolTipService.ToolTip="Stop orchestrator"
+                            Visibility="Collapsed">
+                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                  FontSize="13"
+                                  Glyph="&#xE7E8;" />
+                    </Button>
+                    <Button x:Name="OrchestratorCollapseButton"
+                            Padding="6"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            ToolTipService.ToolTip="Collapse panel">
+                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                  FontSize="13"
+                                  Glyph="&#xE76C;" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid x:Name="OrchestratorContent"
+                  Grid.Row="1"
+                  Grid.Column="1" />
+
+            <StackPanel x:Name="OrchestratorEmptyState"
+                        Grid.Row="1"
+                        Grid.Column="1"
+                        MaxWidth="300"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="10">
+                <FontIcon HorizontalAlignment="Center"
+                          FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                          FontSize="30"
+                          Glyph="&#xE99A;"
+                          Opacity="0.85" />
+                <TextBlock HorizontalAlignment="Center"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Text="Command every terminal" />
+                <TextBlock HorizontalAlignment="Center"
+                           FontSize="12"
+                           Opacity="0.7"
+                           Text="One agent that watches every session on this host — it summarizes, opens, closes, and drives them for you."
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+                <StackPanel HorizontalAlignment="Center"
+                            Orientation="Horizontal"
+                            Spacing="8">
+                    <Button x:Name="OrchestratorStartClaudeButton"
+                            Content="Start Claude"
+                            Style="{ThemeResource AccentButtonStyle}" />
+                    <Button x:Name="OrchestratorStartCodexButton"
+                            Content="Start Codex" />
+                </StackPanel>
+                <TextBlock x:Name="OrchestratorHintText"
+                           HorizontalAlignment="Center"
+                           FontSize="11"
+                           Opacity="0.6"
+                           Text=""
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+            </StackPanel>
         </Grid>
 
         <!--

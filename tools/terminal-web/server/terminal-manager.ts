@@ -4,8 +4,33 @@ import * as Headless from "@xterm/headless";
 import type { Terminal as HeadlessTerminalType } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import * as pty from "node-pty";
-import { getDefaultProfile, getShellProfiles } from "./shell-profiles.js";
-import type { TerminalProfile, TerminalSessionExport, TerminalSessionSummary, TranscriptChunk } from "./types.js";
+import { ShellProfileStore } from "./shell-profiles.js";
+import {
+  inferTerminalAgent,
+  terminalAgentSummaryMetadata,
+  updateTerminalAgentObservation,
+  updateTerminalAgentPresence,
+  type TerminalAgentObservation,
+  type TerminalAgentPresenceEvent,
+  type TerminalAssistAgent
+} from "./terminal-agent-metadata.js";
+import { extractPlainText, readTerminalModes, type TerminalModes } from "./terminal-text.js";
+import type {
+  TerminalAgentActivity,
+  TerminalAgentId,
+  TerminalAgentSource,
+  TerminalProfile,
+  TerminalSessionExport,
+  TerminalSessionSummary,
+  TranscriptChunk
+} from "./types.js";
+
+/** Everything the composer endpoints need to read off a live session at once. */
+export interface SessionInputSnapshot {
+  session: TerminalSessionSummary;
+  text: string;
+  modes: TerminalModes;
+}
 
 const HeadlessTerminal = ((Headless as any).Terminal ?? (Headless as any).default?.Terminal) as {
   new (options: ConstructorParameters<typeof Headless.Terminal>[0]): HeadlessTerminalType;
@@ -18,8 +43,13 @@ interface CreateSessionOptions {
   args?: string[];
   cwd?: string;
   projectId?: string;
+  kind?: "orchestrator";
   cols?: number;
   rows?: number;
+  /** Internal-only environment overrides (for ACP terminal authentication). */
+  env?: Record<string, string>;
+  /** Internal-only escape hatch for non-agent utility terminals such as ACP sign-in. */
+  detectAgent?: boolean;
 }
 
 interface ManagedTerminalSession {
@@ -29,6 +59,12 @@ interface ManagedTerminalSession {
   args: string[];
   cwd: string;
   projectId?: string;
+  kind?: "orchestrator";
+  baseAgent?: TerminalAgentId;
+  baseAgentSource?: Exclude<TerminalAgentSource, "osc" | "screen">;
+  runtimeAgent?: TerminalAssistAgent;
+  screenAgent?: TerminalAssistAgent;
+  agentActivity?: TerminalAgentActivity;
   pty: pty.IPty;
   headless: HeadlessTerminalType;
   serializer: SerializeAddon;
@@ -75,12 +111,26 @@ function windowsPtyOptions() {
 
 export class TerminalManager extends EventEmitter {
   private readonly sessions = new Map<string, ManagedTerminalSession>();
-  readonly profiles = getShellProfiles();
+  private readonly profileStore: ShellProfileStore;
+
+  constructor(profileStore = new ShellProfileStore()) {
+    super();
+    this.profileStore = profileStore;
+    this.profileStore.on("change", (profiles: TerminalProfile[]) => this.emit("profiles", profiles));
+  }
+
+  get profiles(): TerminalProfile[] {
+    return this.profileStore.profiles;
+  }
+
+  get defaultProfile(): TerminalProfile {
+    return this.profileStore.defaultProfile;
+  }
 
   createSession(options: CreateSessionOptions = {}): TerminalSessionSummary {
     const profile = options.profileId
-      ? this.profiles.find((candidate) => candidate.id === options.profileId) ?? getDefaultProfile()
-      : getDefaultProfile();
+      ? this.profiles.find((candidate) => candidate.id === options.profileId) ?? this.profileStore.defaultProfile
+      : this.profileStore.defaultProfile;
 
     const shell = options.shell ?? profile.shell;
     const args = options.args ?? profile.args;
@@ -89,6 +139,12 @@ export class TerminalManager extends EventEmitter {
     const rows = Math.max(8, Math.min(options.rows ?? 32, 200));
     const id = makeId();
     const title = options.title?.trim() || profileToTitle(profile);
+    const profileAgent = !options.shell && options.detectAgent !== false && !options.kind ? profile.agent : undefined;
+    const inferredAgent = options.detectAgent !== false && !options.kind
+      ? inferTerminalAgent(title, [shell, ...args].join(" "))
+      : undefined;
+    const baseAgent = profileAgent ?? inferredAgent;
+    const baseAgentSource = profileAgent ? "profile" : baseAgent ? "command" : undefined;
 
     const headless = new HeadlessTerminal({
       cols,
@@ -107,6 +163,7 @@ export class TerminalManager extends EventEmitter {
       ...windowsPtyOptions(),
       env: {
         ...process.env,
+        ...options.env,
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
         FORCE_COLOR: "1"
@@ -120,6 +177,9 @@ export class TerminalManager extends EventEmitter {
       args,
       cwd,
       projectId: options.projectId,
+      kind: options.kind,
+      baseAgent,
+      baseAgentSource,
       pty: term,
       headless,
       serializer,
@@ -176,6 +236,10 @@ export class TerminalManager extends EventEmitter {
     return this.createSession();
   }
 
+  dispose(): void {
+    this.profileStore.dispose();
+  }
+
   listSessions(): TerminalSessionSummary[] {
     return [...this.sessions.values()]
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
@@ -203,6 +267,19 @@ export class TerminalManager extends EventEmitter {
       screen,
       transcript: chunks.map((chunk) => chunk.data).join(""),
       chunks
+    };
+  }
+
+  getPlainText(id: string, tailLines: number): string {
+    return extractPlainText(this.requireSession(id).headless, tailLines);
+  }
+
+  getInputSnapshot(id: string, tailLines: number): SessionInputSnapshot {
+    const session = this.requireSession(id);
+    return {
+      session: this.toSummary(session),
+      text: extractPlainText(session.headless, tailLines),
+      modes: readTerminalModes(session.headless)
     };
   }
 
@@ -275,6 +352,72 @@ export class TerminalManager extends EventEmitter {
     return this.toSummary(session);
   }
 
+  updateCwd(id: string, cwd: string): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    const trimmed = cwd.trim();
+    if (!session || !trimmed) {
+      return session ? this.toSummary(session) : undefined;
+    }
+
+    const resolved = path.resolve(trimmed);
+    const unchanged = process.platform === "win32" ? session.cwd.toLowerCase() === resolved.toLowerCase() : session.cwd === resolved;
+    if (unchanged) {
+      return this.toSummary(session);
+    }
+
+    session.cwd = resolved;
+    session.updatedAt = new Date();
+    const summary = this.toSummary(session);
+    this.emit("session", summary);
+    this.emit("sessions", this.listSessions());
+    return summary;
+  }
+
+  updateAgentPresence(id: string, event: Omit<TerminalAgentPresenceEvent, "sessionId">): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return undefined;
+    }
+
+    if (!updateTerminalAgentPresence(session, event)) {
+      return this.toSummary(session);
+    }
+
+    session.updatedAt = new Date();
+    const summary = this.toSummary(session);
+    this.emit("session", summary);
+    this.emit("sessions", this.listSessions());
+    return summary;
+  }
+
+  updateAgentObservation(id: string, observation: TerminalAgentObservation): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session || session.kind) {
+      return session ? this.toSummary(session) : undefined;
+    }
+
+    if (!updateTerminalAgentObservation(session, observation)) {
+      return this.toSummary(session);
+    }
+
+    const summary = this.toSummary(session);
+    this.emit("session", summary);
+    return summary;
+  }
+
+  assignProject(id: string, projectId?: string): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session || session.projectId === projectId) {
+      return session ? this.toSummary(session) : undefined;
+    }
+
+    session.projectId = projectId;
+    session.updatedAt = new Date();
+    const summary = this.toSummary(session);
+    this.emit("session", summary);
+    return summary;
+  }
+
   private appendOutput(session: ManagedTerminalSession, data: string): void {
     session.seq += 1;
     session.updatedAt = new Date();
@@ -311,6 +454,8 @@ export class TerminalManager extends EventEmitter {
       args: session.args,
       cwd: path.resolve(session.cwd),
       projectId: session.projectId,
+      ...terminalAgentSummaryMetadata(session),
+      kind: session.kind,
       source: "managed",
       pid: session.pty.pid,
       status: session.status,

@@ -97,6 +97,137 @@ export async function forgetCwd(endpointId: string, cwd: string): Promise<string
   return next;
 }
 
+// Composer vs direct typing. Composer mode edits locally and sends whole
+// messages; direct mode hands every keystroke to the terminal. Persisted so
+// the app opens the way it was left.
+const COMPOSER_MODE_KEY = "justterminal.composerMode.v1";
+
+export async function loadComposerMode(): Promise<boolean> {
+  try {
+    // Composer-first is the default: it is what makes Claude/Codex usable on a
+    // phone. Only an explicit opt-out is stored as "0".
+    return (await AsyncStorage.getItem(COMPOSER_MODE_KEY)) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export async function saveComposerMode(value: boolean): Promise<void> {
+  try {
+    await AsyncStorage.setItem(COMPOSER_MODE_KEY, value ? "1" : "0");
+  } catch {
+    // best effort
+  }
+}
+
+// Unsent composer text, kept per session so switching away mid-thought (or
+// backgrounding the app) does not lose it. One record for all sessions: a key
+// per session would leak entries as sessions come and go.
+const DRAFTS_KEY = "justterminal.drafts.v1";
+const MAX_DRAFTS = 40;
+
+type DraftMap = Record<string, string>;
+
+function draftKey(endpointId: string, sessionId: string): string {
+  return `${endpointId}|${sessionId}`;
+}
+
+async function loadDrafts(): Promise<DraftMap> {
+  try {
+    const raw = await AsyncStorage.getItem(DRAFTS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? (parsed as DraftMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function loadDraft(endpointId: string, sessionId: string): Promise<string> {
+  return (await loadDrafts())[draftKey(endpointId, sessionId)] ?? "";
+}
+
+export async function saveDraft(endpointId: string, sessionId: string, text: string): Promise<void> {
+  const drafts = await loadDrafts();
+  const key = draftKey(endpointId, sessionId);
+  if (text.trim()) {
+    drafts[key] = text;
+  } else {
+    delete drafts[key];
+  }
+
+  // Oldest-first eviction is not worth tracking timestamps for; insertion
+  // order is close enough and keeps the record bounded.
+  const keys = Object.keys(drafts);
+  const trimmed: DraftMap = {};
+  for (const item of keys.slice(Math.max(0, keys.length - MAX_DRAFTS))) {
+    trimmed[item] = drafts[item]!;
+  }
+
+  try {
+    await AsyncStorage.setItem(DRAFTS_KEY, JSON.stringify(trimmed));
+  } catch {
+    // best effort
+  }
+}
+
+// Sent prompts, per host. Recalling "that long prompt I wrote yesterday" is
+// the single biggest time-saver when typing on a phone.
+const PROMPTS_PREFIX = "justterminal.prompts.";
+const MAX_PROMPTS = 120;
+
+export interface PromptHistoryEntry {
+  text: string;
+  at: number;
+  cwd?: string;
+}
+
+function promptsKey(endpointId: string): string {
+  return `${PROMPTS_PREFIX}${endpointId}`;
+}
+
+export async function loadPromptHistory(endpointId: string): Promise<PromptHistoryEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(promptsKey(endpointId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? (parsed as PromptHistoryEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function rememberPrompt(
+  endpointId: string,
+  text: string,
+  cwd?: string
+): Promise<PromptHistoryEntry[]> {
+  const value = text.trim();
+  if (!value) {
+    return loadPromptHistory(endpointId);
+  }
+
+  const current = await loadPromptHistory(endpointId);
+  const next = [{ text: value, at: Date.now(), cwd }, ...current.filter((item) => item.text !== value)].slice(
+    0,
+    MAX_PROMPTS
+  );
+  try {
+    await AsyncStorage.setItem(promptsKey(endpointId), JSON.stringify(next));
+  } catch {
+    // best effort
+  }
+  return next;
+}
+
+export async function forgetPrompt(endpointId: string, text: string): Promise<PromptHistoryEntry[]> {
+  const next = (await loadPromptHistory(endpointId)).filter((item) => item.text !== text);
+  try {
+    await AsyncStorage.setItem(promptsKey(endpointId), JSON.stringify(next));
+  } catch {
+    // best effort
+  }
+  return next;
+}
+
 // Sessions-drawer ordering: false = grouped by project in server order,
 // true = flat list by last update with the most recent at the bottom.
 const SORT_RECENT_KEY = "justterminal.sortRecent.v1";
@@ -112,26 +243,6 @@ export async function loadSortRecent(): Promise<boolean> {
 export async function saveSortRecent(value: boolean): Promise<void> {
   try {
     await AsyncStorage.setItem(SORT_RECENT_KEY, value ? "1" : "0");
-  } catch {
-    // best effort
-  }
-}
-
-// Whether the command-bar key toolbar is expanded. Defaults to true.
-const KEYS_KEY = "justterminal.keysExpanded.v1";
-
-export async function loadKeysExpanded(): Promise<boolean> {
-  try {
-    const raw = await AsyncStorage.getItem(KEYS_KEY);
-    return raw === null ? true : raw === "1";
-  } catch {
-    return true;
-  }
-}
-
-export async function saveKeysExpanded(value: boolean): Promise<void> {
-  try {
-    await AsyncStorage.setItem(KEYS_KEY, value ? "1" : "0");
   } catch {
     // best effort
   }

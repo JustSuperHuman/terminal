@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { AlertCircle, Copy, CopyCheck, Download, Focus, KeyRound, Menu, Plus, Power, X } from "lucide-react";
+import { AlertCircle, Copy, CopyCheck, Download, Focus, KeyRound, Menu, Plus, Power, Sparkles, X } from "lucide-react";
 import { CommandBar } from "@/components/CommandBar";
 import { ConnectionBadge } from "@/components/ConnectionBadge";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { OrchestratorPanel } from "@/components/OrchestratorPanel";
 import { ProjectTabs } from "@/components/ProjectTabs";
 import { SessionSidebar } from "@/components/SessionSidebar";
 import { TerminalSurface, type TerminalSurfaceHandle } from "@/components/TerminalSurface";
@@ -10,7 +11,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ApiError, createProject, createSession, deleteProject, getBootstrap } from "@/lib/api";
+import {
+  ApiError,
+  createProject,
+  createSession,
+  deleteProject,
+  getBootstrap,
+  startOrchestrator,
+  stopOrchestrator
+} from "@/lib/api";
 import { setAccessToken, withAccessToken } from "@/lib/access-token";
 import { buildTerminalTargets, type TerminalTarget } from "@/lib/session-targets";
 import { terminalSocket, type SocketStatus } from "@/lib/terminal-socket";
@@ -19,6 +28,8 @@ import type {
   BridgeCommandInfo,
   CreateSessionOptions,
   HostTerminalProcess,
+  OrchestratorAgent,
+  OrchestratorStatus,
   ServerInfo,
   ServerMessage,
   TerminalHostPeer,
@@ -56,10 +67,25 @@ export function App() {
   const [copied, setCopied] = useState(false);
   const [copySignal, setCopySignal] = useState(0);
   const [focusSignal, setFocusSignal] = useState(0);
+  const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | undefined>();
+  const [orchestratorOpen, setOrchestratorOpen] = useState(
+    () => window.localStorage.getItem("terminal-web.orchestrator.open") === "1"
+  );
+  const [orchestratorPulse, setOrchestratorPulse] = useState(false);
   const activeTargetIdRef = useRef<string | undefined>(activeTargetId);
+  const orchestratorSessionIdRef = useRef<string | undefined>();
+  const orchestratorOpenRef = useRef(orchestratorOpen);
   const terminalSurfaceRef = useRef<TerminalSurfaceHandle | null>(null);
 
-  const targets = useMemo(() => buildTerminalTargets(sessions, peerHosts), [sessions, peerHosts]);
+  // The orchestrator session lives exclusively in its own panel; keep it out
+  // of the regular target list and sidebar.
+  const terminalSessions = useMemo(() => sessions.filter((session) => session.kind !== "orchestrator"), [sessions]);
+  const orchestratorSession = useMemo(
+    () => sessions.find((session) => session.id === orchestrator?.sessionId),
+    [orchestrator?.sessionId, sessions]
+  );
+
+  const targets = useMemo(() => buildTerminalTargets(terminalSessions, peerHosts), [terminalSessions, peerHosts]);
   const activeTarget = useMemo(() => {
     const preferredId = selectPreferredTargetId(targets, activeTargetId);
     return targets.find((target) => target.id === preferredId);
@@ -67,22 +93,34 @@ export function App() {
   const activeSession = activeTarget?.session;
   const activeProject = useMemo(() => projects.find((project) => project.id === activeProjectId), [activeProjectId, projects]);
   const visibleSessions = useMemo(
-    () => (activeProject ? sessions.filter((session) => session.projectId === activeProject.id) : sessions),
-    [activeProject, sessions]
+    () => (activeProject ? terminalSessions.filter((session) => session.projectId === activeProject.id) : terminalSessions),
+    [activeProject, terminalSessions]
   );
   const projectSessionCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const session of sessions) {
+    for (const session of terminalSessions) {
       if (session.projectId) {
         counts[session.projectId] = (counts[session.projectId] ?? 0) + 1;
       }
     }
     return counts;
-  }, [sessions]);
+  }, [terminalSessions]);
 
   useEffect(() => {
     activeTargetIdRef.current = activeTargetId;
   }, [activeTargetId]);
+
+  useEffect(() => {
+    orchestratorSessionIdRef.current = orchestrator?.sessionId;
+  }, [orchestrator?.sessionId]);
+
+  useEffect(() => {
+    orchestratorOpenRef.current = orchestratorOpen;
+    window.localStorage.setItem("terminal-web.orchestrator.open", orchestratorOpen ? "1" : "0");
+    if (orchestratorOpen) {
+      setOrchestratorPulse(false);
+    }
+  }, [orchestratorOpen]);
 
   useEffect(() => {
     setActiveTargetId((current) => {
@@ -105,7 +143,9 @@ export function App() {
     setProjects(payload.projects ?? []);
     setBridgeCommands(payload.bridgeCommands);
     setServerInfo(payload.server);
-    setActiveTargetId((current) => current ?? payload.sessions[0]?.id);
+    setOrchestrator(payload.orchestrator);
+    orchestratorSessionIdRef.current = payload.orchestrator?.sessionId;
+    setActiveTargetId((current) => current ?? payload.sessions.find((session) => session.kind !== "orchestrator")?.id);
     setAuthRequired(false);
     setActionError("");
   }
@@ -145,7 +185,16 @@ export function App() {
 
       if (message.type === "sessions") {
         setSessions(message.sessions);
-        setActiveTargetId((current) => current ?? message.sessions[0]?.id);
+        setActiveTargetId((current) => current ?? message.sessions.find((session) => session.kind !== "orchestrator")?.id);
+      }
+
+      if (message.type === "profiles") {
+        setProfiles(message.profiles);
+      }
+
+      if (message.type === "orchestrator") {
+        setOrchestrator(message.orchestrator);
+        orchestratorSessionIdRef.current = message.orchestrator.sessionId;
       }
 
       if (message.type === "session" || message.type === "exit") {
@@ -182,6 +231,14 @@ export function App() {
       }
 
       if (message.type === "output" || message.type === "activity") {
+        if (message.sessionId === orchestratorSessionIdRef.current) {
+          // Orchestrator activity pulses its collapsed rail instead of the
+          // session list's unread badges.
+          if (!orchestratorOpenRef.current) {
+            setOrchestratorPulse(true);
+          }
+          return;
+        }
         setUnread((current) => {
           if (message.sessionId === activeTargetIdRef.current) {
             return current;
@@ -225,6 +282,11 @@ export function App() {
     }
 
     const projectSessions = sessions.filter((session) => session.projectId === projectId);
+    const project = projects.find((candidate) => candidate.id === projectId);
+    if (projectSessions.length === 0 && project) {
+      void newSession({ projectId: project.id, cwd: project.cwd }).catch(() => undefined);
+      return;
+    }
     if (!projectSessions.some((session) => session.id === activeTarget?.session.id)) {
       setActiveTargetId(projectSessions[0]?.id);
     }
@@ -234,6 +296,8 @@ export function App() {
     setActionError("");
     try {
       const project = await createProject(name, cwd);
+      await newSession({ projectId: project.id, cwd: project.cwd });
+      setProjects((current) => (current.some((candidate) => candidate.id === project.id) ? current : [...current, project]));
       setActiveProjectId(project.id);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
@@ -284,6 +348,14 @@ export function App() {
     if (activeTarget) {
       killSession(activeTarget.id);
     }
+  }
+
+  async function handleOrchestratorStart(agent: OrchestratorAgent, restart = false) {
+    setOrchestrator(await startOrchestrator(agent, restart));
+  }
+
+  async function handleOrchestratorStop() {
+    setOrchestrator(await stopOrchestrator());
   }
 
   function killSession(targetId: string) {
@@ -420,6 +492,32 @@ export function App() {
                 <ConnectionBadge status={socketStatus} />
                 <Tooltip>
                   <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="iconSm"
+                      className="relative"
+                      onClick={() => setOrchestratorOpen((current) => !current)}
+                    >
+                      <Sparkles className="h-4 w-4" aria-hidden="true" />
+                      <span
+                        className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
+                          orchestrator?.state === "running"
+                            ? "bg-emerald-500"
+                            : orchestrator?.state === "starting"
+                              ? "animate-pulse bg-amber-400"
+                              : orchestratorPulse
+                                ? "animate-pulse bg-primary"
+                                : "bg-transparent"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span className="sr-only">Toggle orchestrator</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Orchestrator</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
                     <Button variant="ghost" size="iconSm" onClick={() => setNewTerminalOpen(true)}>
                       <Plus className="h-4 w-4" aria-hidden="true" />
                       <span className="sr-only">New terminal</span>
@@ -550,6 +648,19 @@ export function App() {
               </>
             )}
           </main>
+
+          {!authRequired ? (
+            <OrchestratorPanel
+              orchestrator={orchestrator}
+              session={orchestratorSession}
+              socketStatus={socketStatus}
+              open={orchestratorOpen}
+              pulse={orchestratorPulse}
+              onOpenChange={setOrchestratorOpen}
+              onStart={handleOrchestratorStart}
+              onStop={handleOrchestratorStop}
+            />
+          ) : null}
         </div>
 
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

@@ -1,9 +1,12 @@
-# JustTerminal
+# Terminal Companion
 
 A React Native (Expo SDK 56) mobile client for the **Terminal Web Host**
 (`tools/terminal-web`). It connects to a running host over its WebSocket
-protocol and gives you a clean, phone-first terminal: live ANSI output, a
-control-key composer, and a streamlined session switcher.
+protocol and gives you a phone-first companion to Windows Terminal: live ANSI
+output, a control-key composer, and a streamlined session switcher — styled
+after WinUI 3 / Windows Terminal itself (Mica-grey Fluent dark chrome, the
+Windows accent, Selawik for UI text, Cascadia Mono in the terminal, and the
+Campbell color scheme).
 
 It deliberately drops the web sidebar's host-process list, peer hosts, bridge
 command helpers, and access-URL panel — the mobile drawer is just **sessions**
@@ -18,9 +21,17 @@ and **launch profiles**.
 - Type via the composer (Line / Paste modes, history) and a control-key row
   (Esc, Tab, arrows, Ctrl+C/D/L). Tap the terminal or the ⌨ button to type
   directly with the soft keyboard.
+- Answer Claude Code and Codex questions as native option cards. This works for
+  structured ACP Agent Workspace requests and for ordinary direct/bro-launched
+  terminal sessions through Terminal Assist; a live question hides the normal
+  text keyboard, validates that it is still current, and sends the exact TUI
+  interaction when an option is tapped.
+- Paste an image from the phone clipboard, or choose one from Photos, into the
+  active terminal prompt.
 - Switch, create, rename, and stop sessions from the drawer.
-- Quick-launch agents with bypass flags when the host has them on `PATH`:
-  `codex --yolo` and `claude --dangerously-skip-permissions`.
+- Launch the desktop's visible Windows Terminal profiles. The host monitors its
+  `settings.json`, so profile additions, removals, renames, and hidden-state
+  changes appear on connected phones without restarting the app.
 
 ## Run
 
@@ -30,7 +41,7 @@ cd ..\terminal-web
 npm install
 npm run dev            # binds 127.0.0.1:10001
 
-# 2. Start JustTerminal
+# 2. Start Terminal Companion
 cd ..\just-terminal
 npm install
 npx expo start
@@ -60,13 +71,19 @@ Then enter the host's LAN address and the token in the connect screen.
 The native side owns one reconnecting WebSocket to `/ws` and speaks the same
 JSON protocol as the web client (`subscribe`, `input`, `resize`, `create`,
 `rename`, `kill`; receives `hello`, `sessions`, `session`, `snapshot`,
-`output`, `exit`). Session creation uses `POST /api/sessions` so custom
-`shell`/`args` (the quick-launch flags) are honored and the new session id is
-returned for auto-selection.
+`profiles`, `output`, `exit`). Session creation uses `POST /api/sessions`; a
+profile launch carries its live profile id so Windows Terminal opens that exact
+configured profile and the new session id is returned for auto-selection.
 
 Terminal rendering happens in a WebView that hosts xterm.js. The native side
 forwards `snapshot`/`output` into the page via `injectJavaScript`, and the page
 posts keystrokes/resize back via `window.ReactNativeWebView.postMessage`.
+
+The separate Agent Workspace is the full ACP surface. Existing terminal TUIs
+cannot be converted into ACP sessions after launch; they appear in the same
+session list with a Claude/Codex identity and use Terminal Assist instead, so
+the question-and-answer UX stays consistent without pretending the underlying
+protocol is attached.
 
 ## Layout
 
@@ -79,5 +96,5 @@ src/lib/endpoint.ts         address -> http/ws URLs + token
 src/lib/api.ts              REST: create session, reachability probe
 src/lib/storage.ts          remembered servers (AsyncStorage)
 src/components/             ConnectScreen, Header, TerminalView, CommandBar, SessionsDrawer
-src/theme.ts                palette ported from the web client's oklch tokens
+src/theme.ts                WinUI 3 dark design tokens (Mica ramp, Fluent hues)
 ```

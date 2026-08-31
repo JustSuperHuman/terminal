@@ -86,6 +86,71 @@ new-tab dropdown has a "Copy Connection Token" item that copies
 Set `WT_BRIDGE_SERVER` to point the dev host at another server (or to `off` to
 disable mirroring entirely).
 
+## Agent Sessions
+
+Every terminal on this host is watched for a foreground Claude or Codex, and
+what it finds is pushed with the session summary itself — so the web sidebar,
+the mobile session list, and any other client show the agent and what it is
+doing without asking a second endpoint:
+
+| Field | Meaning |
+|---|---|
+| `agent` | `claude` / `codex` / `hermes`, or absent for a plain shell |
+| `agentSource` | `osc` (wrapper handshake) > `screen` (live fingerprint) > `command` / `profile` (launch) |
+| `agentActivity` | `working`, `awaiting` (blocked on a question), or `idle` |
+
+Screen detection outranks the launch command deliberately: a `pwsh` tab that
+later ran `claude` **is** an agent terminal, and a `claude` tab that has exited
+back to its shell is not. Detection runs on a 180 ms settle after output, plus a
+4 s sweep over quiet sessions so a terminal that was already sitting at a prompt
+when this host started is classified without waiting for its next byte.
+
+### The rich agent view
+
+Two protocol paths sit behind one experience:
+
+| Path | What the companion can do |
+|---|---|
+| **ACP** | Typed protocol events: tool calls, permission requests, plans, diffs, images, structured elicitation, usage. Started, loaded, resumed, and forked through the agent's ACP adapter. |
+| **Terminal Assist** | Any terminal running an agent, including one launched by hand from a shell. The host parses the rendered question, raises a session-attributed alert, and offers safe one-tap choices with stale-question validation. |
+
+ACP cannot attach retroactively to a conversation that a separate Claude or
+Codex TUI process already owns — that process holds the session. So Terminal
+Assist is always on for a detected agent, and the ACP view is one explicit tap
+away:
+
+```text
+GET    /api/sessions/:id/agent[?prepare=1]   what is running here, and what it could attach to
+POST   /api/sessions/:id/agent/attach        { remoteSessionId?, cwd?, agent? }
+DELETE /api/sessions/:id/agent/attach[?close=1]
+```
+
+`GET .../agent` ranks that agent's own conversation history against the
+terminal's working directory — exact directory first, then recency, then
+conversations from a parent or child directory — and returns it as attach
+candidates. `prepare=1` starts the ACP adapter first, because a stopped adapter
+knows about no conversations at all and would read as "you have never worked
+here"; it is sent by the tap that opens the picker, never by background polling.
+
+`POST .../agent/attach` with a candidate loads that conversation's typed
+history; without one it starts a fresh conversation in the terminal's
+directory. Either way the terminal keeps running — attaching adds a surface, it
+does not seize the one you had. The pairing appears as `acpSessionId` on the
+terminal session summary, and `DELETE` forgets it (the conversation itself is
+only ended with `?close=1`).
+
+Interactive `bro` launches identify their foreground Claude/Codex process with
+a small TTY-only OSC lifecycle frame. It contains only protocol version, agent
+name, and active/inactive state; no profile, path, arguments, account data, or
+credentials. Headless/non-TTY runs emit nothing.
+
+On a desktop-bridge restart, WindowsTerminalDev re-registers each live terminal
+with a bounded recent render tail and the latest agent-presence frame. This
+restores an already-visible question without re-firing historical bell
+notifications. A terminal outside WindowsTerminalDev (or one not launched
+through the standalone bridge) still cannot be controlled because its ConPTY
+stream is not available to this host.
+
 ## Input Model
 
 Click the terminal surface for full interactive keyboard input. The bottom
@@ -150,8 +215,10 @@ npm run start
 - Other terminal-web instances on the host are discovered as peer hosts and
   proxied as switchable terminal targets.
 - Managed, bridged, and peer sessions can be renamed from the sidebar.
-- `codex` and `claude` are detected from `PATH` and shown as agent launch
-  profiles when available.
+- Visible profiles are read from the active Windows Terminal `settings.json`
+  (including JSONC comments and trailing commas), monitored for changes, and
+  broadcast to connected web/mobile clients. Launching one opens that exact
+  native profile by GUID. `TERMINAL_WEB_SETTINGS_PATH` can override the file.
 - External host terminal and shell processes are discovered and shown with
   managed-session and bridge-copy actions when the process can be matched.
 - Existing external Windows Terminal tabs cannot be safely attached to after the fact

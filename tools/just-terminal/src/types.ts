@@ -4,8 +4,14 @@
 // WebSocket message stream. Peer hosts, host processes, bridge commands, and
 // access URLs from the web sidebar are intentionally omitted.
 
+import type { AcpBridgeState, AcpSessionView } from "./acpTypes";
+
 export type SessionStatus = "running" | "exited";
 export type SessionSource = "managed" | "bridged";
+export type TerminalAgentId = "claude" | "codex" | "hermes";
+export type TerminalAgentSource = "profile" | "command" | "screen" | "osc";
+/** What the foreground agent is doing right now, from its rendered screen. */
+export type TerminalAgentActivity = "idle" | "working" | "awaiting";
 
 export interface TerminalProfile {
   id: string;
@@ -14,6 +20,8 @@ export interface TerminalProfile {
   args: string[];
   group: "shell" | "agent" | "custom";
   description?: string;
+  agent?: "claude" | "codex" | "hermes";
+  terminalProfileGuid?: string;
 }
 
 export interface TerminalProject {
@@ -30,6 +38,13 @@ export interface TerminalSessionSummary {
   args: string[];
   cwd: string;
   projectId?: string;
+  /** Foreground agent when known. Direct terminals use Terminal Assist, not ACP. */
+  agent?: TerminalAgentId;
+  agentSource?: TerminalAgentSource;
+  /** Live agent state, pushed with the session so rows never have to poll. */
+  agentActivity?: TerminalAgentActivity;
+  /** Present once this terminal has been attached to an ACP conversation. */
+  acpSessionId?: string;
   source: SessionSource;
   pid?: number;
   status: SessionStatus;
@@ -66,10 +81,28 @@ export type ServerMessage =
       projects: TerminalProject[];
       server: ServerInfo;
       bridgeCommands: unknown;
+      /** Optional so a saved connection to an older bridge still opens. */
+      acp?: AcpBridgeState;
     }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
+  | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }
-  | { type: "notify"; title?: string; body?: string; sound?: string }
+  | { type: "acp_state"; acp: AcpBridgeState }
+  | { type: "acp_session"; epoch: string; sequence: number; session: AcpSessionView }
+  | { type: "acp_session_removed"; epoch: string; sequence: number; sessionId: string }
+  | {
+      type: "notify";
+      title?: string;
+      body?: string;
+      sound?: string;
+      // Attribution fields (server ≥ notification-history): which session rang
+      // and when, so the client can badge/jump and de-dupe against catch-up.
+      id?: string;
+      at?: string;
+      origin?: "api" | "bell" | "osc";
+      sessionId?: string;
+      sessionTitle?: string;
+    }
   | { type: "session"; session: TerminalSessionSummary }
   | { type: "snapshot"; sessionId: string; screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary }
   | { type: "output"; sessionId: string; seq: number; data: string }
@@ -79,6 +112,18 @@ export type ServerMessage =
   | { type: "exit"; sessionId: string; exitCode?: number; signal?: number; session: TerminalSessionSummary }
   | { type: "host"; hostProcesses: unknown[]; peerHosts: unknown[] }
   | { type: "error"; message: string; detail?: string };
+
+// A recorded notification from GET /api/notifications (missed-signal catch-up).
+export interface TerminalNotification {
+  id: string;
+  at: string;
+  origin: "api" | "bell" | "osc";
+  sessionId?: string;
+  sessionTitle?: string;
+  title?: string;
+  body?: string;
+  sound?: string;
+}
 
 export type ClientMessage =
   | { type: "subscribe"; sessionId: string }

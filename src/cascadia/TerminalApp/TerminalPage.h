@@ -373,6 +373,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowLargePasteWarningDialog();
 
         void _CreateNewTabFlyout();
+        void _UpdateNewTabProfileButtons();
         std::vector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase> _CreateNewTabFlyoutItems(winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry> entries);
         winrt::Windows::UI::Xaml::Controls::IconElement _CreateNewTabFlyoutIcon(const winrt::hstring& icon);
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutProfile(const Microsoft::Terminal::Settings::Model::Profile profile, int profileIndex, const winrt::hstring& iconPathOverride);
@@ -402,7 +403,12 @@ namespace winrt::TerminalApp::implementation
         void _BridgeStatusTimerTick(const IInspectable& sender, const IInspectable& e);
         SafeDispatcherTimer _bridgeStatusTimer;
         winrt::hstring _bridgeStatus;
-        uint32_t _bridgeStatusTicks{ 0 };
+
+        // Polls each tab's cwd for its git branch; title updates refresh a
+        // single tab immediately so `cd` feels instant.
+        void _GitBranchTimerTick(const IInspectable& sender, const IInspectable& e);
+        safe_void_coroutine _RefreshTabGitBranch(winrt::TerminalApp::Tab tab);
+        SafeDispatcherTimer _gitBranchTimer;
 
         // Horizontal project tabs, backed by the terminal-web project store.
         struct BridgeProject
@@ -439,6 +445,46 @@ namespace winrt::TerminalApp::implementation
         std::vector<winrt::hstring> _recentProjectDirs;
         safe_void_coroutine _FetchRecentProjectDirs();
         safe_void_coroutine _ProjectDropReorder(winrt::hstring draggedId, float dropX);
+
+        // Orchestrator panel: a collapsible right-side pane hosting the
+        // server-managed orchestrator session (a Claude Code / Codex TUI with
+        // cross-session MCP tools), attached over the terminal-web WebSocket.
+        struct OrchestratorStatus
+        {
+            winrt::hstring State; // "stopped" | "starting" | "running"
+            winrt::hstring Agent;
+            winrt::hstring SessionId;
+
+            bool operator==(const OrchestratorStatus&) const = default;
+        };
+        OrchestratorStatus _orchestratorStatus;
+        winrt::hstring _orchestratorAttachedSessionId;
+        winrt::Microsoft::Terminal::Control::TermControl _orchestratorControl{ nullptr };
+        winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection _orchestratorConnection{ nullptr };
+        std::atomic<bool> _orchestratorFetchInFlight{ false };
+        bool _orchestratorPaneOpen{ false };
+
+        void _ToggleOrchestratorPane();
+        safe_void_coroutine _RefreshOrchestratorStatus();
+        void _ApplyOrchestratorStatus(const OrchestratorStatus& status);
+        void _AttachOrchestratorSession(const winrt::hstring& sessionId);
+        void _DetachOrchestratorSession();
+        safe_void_coroutine _PostOrchestratorCommand(std::wstring path, std::string body);
+
+        // Orchestrator pane resize (mirrors the vertical tab rail's handle,
+        // but the pane hangs off the right edge so dragging left widens it).
+        bool _resizingOrchestratorPane{ false };
+        double _orchestratorResizeStartX{ 0 };
+        double _orchestratorResizeStartWidth{ 0 };
+        void _SetOrchestratorPaneWidth(double width);
+        void _StopOrchestratorResize(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerEntered(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerExited(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerPressed(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerMoved(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerReleased(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerCanceled(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+        void _OrchestratorResizePointerCaptureLost(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
         void _KeyDownHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
         static ::Microsoft::Terminal::Core::ControlKeyStates _GetPressedModifierKeys() noexcept;

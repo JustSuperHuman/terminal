@@ -272,12 +272,10 @@ namespace winrt::TerminalApp::implementation
     // - Handle changes in tab layout.
     void TerminalPage::_UpdateTabView()
     {
-        // The tab row should only be visible if:
-        // - we're not in focus mode
-        // - we're not in full screen, or the user has enabled fullscreen tabs
-        // - there is more than one tab, or the user has chosen to always show tabs
+        // The vertical rail is the only tab surface, so unlike the upstream
+        // horizontal tab row it stays visible in fullscreen; focus mode is
+        // the way to get a chrome-free view.
         const auto isVisible = !_isInFocusMode &&
-                               (!_isFullscreen || _showTabsFullscreen) &&
                                (_settings.GlobalSettings().ShowTabsInTitlebar() ||
                                 (_tabs.Size() > 1) ||
                                 _settings.GlobalSettings().AlwaysShowTabs());
@@ -293,6 +291,18 @@ namespace winrt::TerminalApp::implementation
             _tabRow.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
             // NaN is the special value XAML uses for "Auto" sizing.
             _tabRow.Height(NAN);
+        }
+        // Collapse the whole pane (rail + resize handle), not just the rail;
+        // otherwise hiding the tabs leaves an empty fixed-width strip behind.
+        if (const auto pane = VerticalTabPane())
+        {
+            pane.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
+        }
+        // The project strip is tab-navigation chrome too: keep it in
+        // fullscreen, drop it in focus mode.
+        if (const auto projects = ProjectTabScroller())
+        {
+            projects.Visibility(_isInFocusMode ? Visibility::Collapsed : Visibility::Visible);
         }
     }
 

@@ -77,6 +77,11 @@ interface TerminalSurfaceProps {
   copySignal: number;
   focusSignal: number;
   socketStatus: SocketStatus;
+  /**
+   * Server-side subscription slot. Surfaces with different slots (main
+   * terminal vs orchestrator panel) can stream different sessions at once.
+   */
+  slot?: string;
   onCopied?: () => void;
 }
 
@@ -85,7 +90,7 @@ export interface TerminalSurfaceHandle {
 }
 
 export const TerminalSurface = forwardRef<TerminalSurfaceHandle, TerminalSurfaceProps>(function TerminalSurface(
-  { session, targetId, copySignal, focusSignal, socketStatus, onCopied },
+  { session, targetId, copySignal, focusSignal, socketStatus, slot = "main", onCopied },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -549,7 +554,7 @@ export const TerminalSurface = forwardRef<TerminalSurfaceHandle, TerminalSurface
       subscribedTargetRef.current = targetId;
     }
 
-    terminalSocket.send({ type: "subscribe", sessionId: targetId });
+    terminalSocket.send({ type: "subscribe", sessionId: targetId, slot });
     window.setTimeout(() => {
       applyTerminalLayout();
       claimActiveViewportSize();
@@ -557,7 +562,19 @@ export const TerminalSurface = forwardRef<TerminalSurfaceHandle, TerminalSurface
         term.focus();
       }
     }, 0);
-  }, [session?.id, session?.status, socketStatus, targetId]);
+  }, [session?.id, session?.status, socketStatus, targetId, slot]);
+
+  // Secondary surfaces release their slot on unmount so the server stops
+  // streaming a session nobody is watching. The main slot persists: the app
+  // always has a main terminal, and its next subscribe replaces the slot.
+  useEffect(() => {
+    if (slot === "main") {
+      return;
+    }
+    return () => {
+      terminalSocket.send({ type: "unsubscribe", slot });
+    };
+  }, [slot]);
 
   useEffect(() => {
     if (focusSignal === 0) {

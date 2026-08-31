@@ -4,8 +4,6 @@ import * as Haptics from "expo-haptics";
 import type { TerminalSessionSummary } from "../types";
 import { colors, font, radius } from "../theme";
 
-const GOLD_BORDER = "rgba(255, 191, 0, 0.42)";
-
 // Session scrubber picker: a full-screen overlay (live terminal preview behind
 // a translucent card wheel) summoned by the SwipeBar's horizontal drag (or a
 // stationary press-and-hold, for a look-first scrub). The bar owns the touch;
@@ -44,6 +42,13 @@ interface SessionSwitcherProps {
 
 function shellName(session: TerminalSessionSummary) {
   return session.shell.split(/[\\/]/).pop() ?? session.shell;
+}
+
+function sessionKind(session: TerminalSessionSummary): string {
+  if (session.agent === "claude") return "Claude · Terminal Assist";
+  if (session.agent === "codex") return "Codex · Terminal Assist";
+  if (session.agent === "hermes") return "Hermes";
+  return shellName(session);
 }
 
 function shortPath(path: string, max = 24): string {
@@ -182,7 +187,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
       {active ? (
         <Animated.View style={[StyleSheet.absoluteFill, styles.overlay, { opacity: fade }]} pointerEvents="none">
           <View style={styles.topHint}>
-            <Text style={styles.topHintText}>SWITCH TERMINAL</Text>
+            <Text style={styles.topHintText}>Switch terminal</Text>
             <Text style={styles.topHintSub}>
               {selected + 1} / {sessions.length}
             </Text>
@@ -236,7 +241,10 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
                         ) : null}
                       </View>
                       <Text style={styles.cardSub} numberOfLines={1}>
-                        {shellName(session)} · {shortPath(session.cwd)}
+                        {/* Name exited status — at scrub speed the 9px dot alone
+                            doesn't read. */}
+                        {session.status !== "running" ? "exited · " : ""}
+                        {sessionKind(session)} · {shortPath(session.cwd)}
                       </Text>
                     </View>
                   </View>
@@ -258,7 +266,7 @@ const styles = StyleSheet.create({
   overlay: {
     // Translucent so the live terminal preview is visible behind the picker as
     // the user scrubs between sessions.
-    backgroundColor: "rgba(8, 10, 13, 0.5)",
+    backgroundColor: colors.overlaySoft,
   },
   topHint: {
     position: "absolute",
@@ -268,17 +276,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 3,
   },
+  // Fluent Caption, sentence case — never all-caps or tracked-out.
   topHintText: {
-    color: colors.primary,
-    fontSize: 11,
-    fontFamily: font.bold,
-    letterSpacing: 1.6,
+    color: colors.accentCyan,
+    fontSize: 12,
+    fontFamily: font.semibold,
   },
   topHintSub: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 11,
     fontFamily: font.mono,
   },
+  // Quiet WinUI focus frame — the selected card's accent pill does the
+  // pointing; the frame is just a hairline stop for the scrub.
   selectionFrame: {
     position: "absolute",
     left: 14,
@@ -286,8 +296,7 @@ const styles = StyleSheet.create({
     height: ROW_HEIGHT,
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: GOLD_BORDER,
-    backgroundColor: "rgba(255, 191, 0, 0.06)",
+    borderColor: colors.borderStrong,
   },
   list: {
     position: "absolute",
@@ -311,14 +320,17 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   cardSelected: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.selection,
   },
+  // WinUI selection indicator: 3px accent pill, ~16px tall, centred on the
+  // card's left edge.
   cardBar: {
     position: "absolute",
     left: 0,
-    top: 12,
-    bottom: 12,
+    top: "50%",
+    marginTop: -8,
     width: 3,
+    height: 16,
     borderRadius: 2,
     backgroundColor: colors.primary,
   },
@@ -336,19 +348,21 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
+  // Fluent BodyStrong; unselected cards use secondary text so the centre
+  // frame's white title is the clear focal point.
   cardTitle: {
     flexShrink: 1,
-    color: colors.sidebarForeground,
-    fontSize: 15,
+    color: colors.secondaryForeground,
+    fontSize: 14,
     fontFamily: font.semibold,
   },
   cardTitleSelected: {
     color: colors.foreground,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   cardSub: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 11,
     fontFamily: font.mono,
     marginTop: 2,
   },
@@ -363,7 +377,7 @@ const styles = StyleSheet.create({
   badgeText: {
     color: colors.primaryForeground,
     fontSize: 10.5,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   bottomHint: {
     position: "absolute",
@@ -374,7 +388,7 @@ const styles = StyleSheet.create({
   },
   bottomHintText: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 12,
     fontFamily: font.medium,
   },
 });

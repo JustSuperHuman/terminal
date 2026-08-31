@@ -133,6 +133,7 @@ namespace winrt::TerminalApp::implementation
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, GitBranch, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, ReadOnly, PropertyChanged.raise, false);
         WINRT_PROPERTY(winrt::Microsoft::UI::Xaml::Controls::TabViewItem, TabViewItem, nullptr);
 

@@ -4,9 +4,25 @@ import * as Headless from "@xterm/headless";
 import type { Terminal as HeadlessTerminalType } from "@xterm/headless";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebSocket } from "ws";
+import {
+  inferTerminalAgent,
+  isTerminalAgentId,
+  terminalAgentSummaryMetadata,
+  updateTerminalAgentObservation,
+  updateTerminalAgentPresence,
+  type MutableTerminalAgentMetadata,
+  type TerminalAgentObservation,
+  type TerminalAgentPresenceEvent,
+  type TerminalAssistAgent
+} from "./terminal-agent-metadata.js";
+import { extractPlainText, readTerminalModes } from "./terminal-text.js";
+import type { SessionInputSnapshot } from "./terminal-manager.js";
 import type {
   BridgeClientMessage,
   BridgeServerMessage,
+  TerminalAgentActivity,
+  TerminalAgentId,
+  TerminalAgentSource,
   TerminalSessionExport,
   TerminalSessionSummary,
   TranscriptChunk
@@ -26,6 +42,11 @@ interface BridgedSession {
   seq: number;
   transcript: TranscriptChunk[];
   bufferedBytes: number;
+  baseAgent?: TerminalAgentId;
+  baseAgentSource?: Exclude<TerminalAgentSource, "osc" | "screen">;
+  runtimeAgent?: TerminalAssistAgent;
+  screenAgent?: TerminalAssistAgent;
+  agentActivity?: TerminalAgentActivity;
 }
 
 function byteLength(value: string): number {
@@ -42,6 +63,31 @@ function clampRows(value: number): number {
 
 function cleanTitle(value: string): string {
   return value.trim().replace(/\s+/g, " ").slice(0, 80);
+}
+
+function classifyLaunch(summary: TerminalSessionSummary): {
+  agent?: TerminalAgentId;
+  source?: Exclude<TerminalAgentSource, "osc" | "screen">;
+} {
+  const explicit = isTerminalAgentId(summary.agent) ? summary.agent : undefined;
+  const args = Array.isArray(summary.args) ? summary.args : [];
+  const agent = explicit ?? inferTerminalAgent(summary.title, [summary.shell, ...args].join(" "));
+  const source = agent
+    ? explicit && summary.agentSource === "profile"
+      ? "profile"
+      : "command"
+    : undefined;
+  return { agent, source };
+}
+
+function withAgentMetadata(
+  summary: TerminalSessionSummary,
+  metadata: MutableTerminalAgentMetadata
+): TerminalSessionSummary {
+  return {
+    ...summary,
+    ...terminalAgentSummaryMetadata(metadata)
+  };
 }
 
 function send(socket: WebSocket, message: BridgeServerMessage): void {
@@ -98,6 +144,19 @@ export class BridgeRegistry extends EventEmitter {
 
   hasSession(id: string): boolean {
     return this.sessions.has(id);
+  }
+
+  getPlainText(id: string, tailLines: number): string {
+    return extractPlainText(this.requireSession(id).headless, tailLines);
+  }
+
+  getInputSnapshot(id: string, tailLines: number): SessionInputSnapshot {
+    const session = this.requireSession(id);
+    return {
+      session: session.summary,
+      text: extractPlainText(session.headless, tailLines),
+      modes: readTerminalModes(session.headless)
+    };
   }
 
   getSnapshot(id: string): { screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary } {
@@ -199,7 +258,7 @@ export class BridgeRegistry extends EventEmitter {
   private handleMessage(socket: WebSocket, message: BridgeClientMessage): void {
     switch (message.type) {
       case "register":
-        this.register(socket, message.session);
+        this.register(socket, message.session, message.replay);
         break;
       case "output":
         this.appendOutput(message.sessionId, message.data);
@@ -234,6 +293,21 @@ export class BridgeRegistry extends EventEmitter {
     this.emit("session", session.summary);
   }
 
+  updateAgentObservation(id: string, observation: TerminalAgentObservation): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return undefined;
+    }
+
+    if (!updateTerminalAgentObservation(session, observation)) {
+      return session.summary;
+    }
+
+    session.summary = withAgentMetadata(session.summary, session);
+    this.emit("session", session.summary);
+    return session.summary;
+  }
+
   assignProject(id: string, projectId?: string): TerminalSessionSummary | undefined {
     const session = this.sessions.get(id);
     if (!session || session.summary.projectId === projectId) {
@@ -249,11 +323,51 @@ export class BridgeRegistry extends EventEmitter {
     return session.summary;
   }
 
-  private register(socket: WebSocket, summary: TerminalSessionSummary): void {
+  updateCwd(id: string, cwd: string): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    const trimmed = cwd.trim();
+    if (!session || !trimmed) {
+      return session?.summary;
+    }
+
+    const resolved = path.resolve(trimmed);
+    const unchanged = process.platform === "win32" ? session.summary.cwd.toLowerCase() === resolved.toLowerCase() : session.summary.cwd === resolved;
+    if (unchanged) {
+      return session.summary;
+    }
+
+    session.summary = {
+      ...session.summary,
+      cwd: resolved,
+      updatedAt: new Date().toISOString()
+    };
+    this.emit("session", session.summary);
+    this.emit("sessions", this.listSessions());
+    return session.summary;
+  }
+
+  updateAgentPresence(id: string, event: Omit<TerminalAgentPresenceEvent, "sessionId">): TerminalSessionSummary | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return undefined;
+    }
+
+    if (!updateTerminalAgentPresence(session, event)) {
+      return session.summary;
+    }
+
+    session.summary = withAgentMetadata({ ...session.summary, updatedAt: new Date().toISOString() }, session);
+    this.emit("session", session.summary);
+    this.emit("sessions", this.listSessions());
+    return session.summary;
+  }
+
+  private register(socket: WebSocket, summary: TerminalSessionSummary, replay?: string): void {
     const now = new Date().toISOString();
     const cols = clampCols(summary.cols);
     const rows = clampRows(summary.rows);
     const existing = this.sessions.get(summary.id);
+    const launch = classifyLaunch(summary);
 
     if (existing) {
       if (existing.summary.status === "running" && existing.socket.readyState === WebSocket.OPEN) {
@@ -261,7 +375,9 @@ export class BridgeRegistry extends EventEmitter {
       }
 
       existing.socket = socket;
-      existing.summary = {
+      existing.baseAgent = launch.agent;
+      existing.baseAgentSource = launch.source;
+      existing.summary = withAgentMetadata({
         ...existing.summary,
         ...summary,
         cwd: path.resolve(summary.cwd),
@@ -273,7 +389,7 @@ export class BridgeRegistry extends EventEmitter {
         exitCode: undefined,
         signal: undefined,
         bufferedBytes: existing.bufferedBytes
-      };
+      }, existing);
       existing.headless.resize(cols, rows);
       this.addSocketSession(socket, existing.summary.id);
 
@@ -292,7 +408,7 @@ export class BridgeRegistry extends EventEmitter {
     const serializer = new SerializeAddon();
     headless.loadAddon(serializer);
 
-    const normalized: TerminalSessionSummary = {
+    const normalized: TerminalSessionSummary = withAgentMetadata({
       ...summary,
       cwd: path.resolve(summary.cwd),
       source: "bridged",
@@ -302,7 +418,7 @@ export class BridgeRegistry extends EventEmitter {
       cols,
       rows,
       bufferedBytes: 0
-    };
+    }, { baseAgent: launch.agent, baseAgentSource: launch.source });
 
     const bridged: BridgedSession = {
       summary: normalized,
@@ -311,14 +427,23 @@ export class BridgeRegistry extends EventEmitter {
       serializer,
       seq: 0,
       transcript: [],
-      bufferedBytes: 0
+      bufferedBytes: 0,
+      baseAgent: launch.agent,
+      baseAgentSource: launch.source
     };
 
     this.sessions.set(normalized.id, bridged);
     this.addSocketSession(socket, normalized.id);
 
-    send(socket, { type: "registered", session: normalized, replay: true });
-    this.emit("session", normalized);
+    // A native client can include its bounded recent output with a fresh
+    // registration after this server restarts. Replaying before the session is
+    // announced restores the rendered question, runtime agent OSC, and input
+    // modes without duplicating output when the old registry still exists.
+    const boundedReplay = typeof replay === "string" ? replay.slice(-512_000) : "";
+    if (boundedReplay) this.appendOutput(normalized.id, boundedReplay, true);
+    const registered = this.sessions.get(normalized.id)!.summary;
+    send(socket, { type: "registered", session: registered, replay: !boundedReplay });
+    this.emit("session", registered);
     this.emit("sessions", this.listSessions());
   }
 
@@ -328,7 +453,7 @@ export class BridgeRegistry extends EventEmitter {
     this.socketSessions.set(socket, socketSessionIds);
   }
 
-  private appendOutput(id: string, data: string): void {
+  private appendOutput(id: string, data: string, replay = false): void {
     const session = this.sessions.get(id);
     if (!session) {
       return;
@@ -363,7 +488,8 @@ export class BridgeRegistry extends EventEmitter {
     this.emit("output", {
       sessionId: id,
       seq: session.seq,
-      data
+      data,
+      replay
     });
   }
 

@@ -1,38 +1,70 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { LayoutAnimation, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Animated, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { BlurView } from "expo-blur";
 import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
-import { loadKeysExpanded, saveKeysExpanded } from "../lib/storage";
+import type { ComposerToken } from "./Composer";
 import type { SessionStatus } from "../types";
 import type { DictationUiStatus } from "../useDictation";
-import { MicIcon } from "./icons";
-import { colors, font, radius } from "../theme";
-
-// Frosted-glass palette for the tools bar, in the spirit of JustGains-Mobile's
-// GlassSurface (BlurView + sheen + translucent raised controls).
-const GLASS_TINT = "rgba(10, 12, 16, 0.40)";
-const GLASS_RAISED = "rgba(255, 255, 255, 0.055)";
-const GLASS_RAISED_BORDER = "rgba(255, 255, 255, 0.09)";
-const GLASS_PRESSED = "rgba(255, 255, 255, 0.13)";
-const GLASS_BORDER = "rgba(255, 255, 255, 0.10)";
-const SHEEN_TOP = "rgba(255, 255, 255, 0.08)";
-const SHEEN_MID = "rgba(255, 255, 255, 0.015)";
-const SHEEN_BOTTOM = "rgba(255, 255, 255, 0)";
-const ACCENT_GLASS = "rgba(245, 45, 45, 0.12)";
-const ACCENT_GLASS_BORDER = "rgba(245, 45, 45, 0.34)";
-const MIC_ACTIVE_BG = "rgba(255, 191, 0, 0.16)";
-const MIC_ACTIVE_BORDER = "rgba(255, 191, 0, 0.40)";
-const MIC_ERROR_BG = "rgba(245, 45, 45, 0.14)";
-const METER_TRACK = "rgba(255, 255, 255, 0.08)";
-const GLASS_RADIUS = 24;
+import { ImageIcon, KeyboardIcon, MicIcon } from "./icons";
+import { colors, font, glass, radius, withAlpha } from "../theme";
 
 // After a hold-to-dictate ends, the transcript is armed to "submit" (Enter) once
-// this countdown elapses — tapping Retry first cancels it so you can redo/edit.
+// this countdown elapses — tapping Cancel first stops it so you can redo/edit.
 const ARM_SECONDS = 3;
 
-type ControlKey = { label: string; value: string; accent?: boolean; a11y?: string };
+// Width of the fade hinting that the key row scrolls past the edges.
+const EDGE_FADE_WIDTH = 20;
+
+type ControlKey = { label: string; value: string; strong?: boolean; a11y?: string };
+
+// Every control key lives in one horizontally scrolling row, organized into
+// clusters that each own a Fluent hue: the Windows accent for system keys,
+// cyan for navigation, coral for the control chords (interrupts and friends).
+// Clusters are frequency-ranked left to right — Esc/Tab and the arrows stay
+// visible without scrolling, the interrupt cluster sits one flick away, and
+// the rarely-needed Home/End pair takes the overflow.
+type KeyGroup = { id: string; tint: string; keys: ControlKey[] };
+
+const keyGroups: KeyGroup[] = [
+  {
+    id: "system",
+    tint: colors.primary,
+    keys: [
+      { label: "Esc", value: "\x1b", a11y: "Escape" },
+      { label: "Tab", value: "\t", a11y: "Tab" },
+    ],
+  },
+  {
+    id: "arrows",
+    tint: colors.accentCyan,
+    keys: [
+      { label: "↑", value: "\x1b[A", a11y: "Up arrow" },
+      { label: "↓", value: "\x1b[B", a11y: "Down arrow" },
+      { label: "←", value: "\x1b[D", a11y: "Left arrow" },
+      { label: "→", value: "\x1b[C", a11y: "Right arrow" },
+    ],
+  },
+  {
+    id: "control",
+    tint: colors.accentCoral,
+    keys: [
+      { label: "^C", value: "\x03", strong: true, a11y: "Control C, interrupt" },
+      { label: "^D", value: "\x04", a11y: "Control D" },
+      { label: "^Z", value: "\x1a", a11y: "Control Z, suspend" },
+      { label: "^L", value: "\x0c", a11y: "Control L, clear" },
+    ],
+  },
+  {
+    id: "jump",
+    tint: colors.accentCyan,
+    keys: [
+      { label: "Home", value: "\x1b[H", a11y: "Home" },
+      { label: "End", value: "\x1b[F", a11y: "End" },
+    ],
+  },
+];
 
 // Live voice-dictation state + control, supplied by `useDictation`. Omitted (or
 // status "unsupported") hides the mic — e.g. in Expo Go where the native speech
@@ -60,29 +92,20 @@ interface CommandBarProps {
   // Ref to the BlurTargetView behind the bar; required for real blur on Android.
   blurTarget?: RefObject<View | null>;
   dictation?: DictationControl;
+  /** Open the explicit clipboard/photo image chooser. */
+  onAttachImage?: () => void;
+  /** True while an image upload is in flight (dims the attach control). */
+  attachingImage?: boolean;
+  /**
+   * True while the Composer owns text entry. The key row then drops the mic
+   * (the composer has its own) and gains `/` and `@` shortcuts that open the
+   * composer's pickers rather than sending bytes.
+   */
+  composerMode?: boolean;
+  onInsertToken?: (token: ComposerToken) => void;
+  /** Switch between composing messages and typing straight into the terminal. */
+  onToggleComposer?: () => void;
 }
-
-// Typing and pasting now happen directly in the terminal (the soft keyboard
-// follows a tap), so this bar is purely a control-key accessory. The arrows the
-// user reaches for most — Up/Down for shell history and TUI navigation — live in
-// the always-visible row; the rest stay in the collapsible row.
-const visibleKeys: ControlKey[] = [
-  { label: "Esc", value: "\x1b", a11y: "Escape" },
-  { label: "Tab", value: "\t", a11y: "Tab" },
-  { label: "↑", value: "\x1b[A", a11y: "Up arrow" },
-  { label: "↓", value: "\x1b[B", a11y: "Down arrow" },
-  { label: "^C", value: "\x03", accent: true, a11y: "Control C, interrupt" },
-];
-
-const expandedKeys: ControlKey[] = [
-  { label: "←", value: "\x1b[D", a11y: "Left arrow" },
-  { label: "→", value: "\x1b[C", a11y: "Right arrow" },
-  { label: "Home", value: "\x1b[H", a11y: "Home" },
-  { label: "End", value: "\x1b[F", a11y: "End" },
-  { label: "^D", value: "\x04", a11y: "Control D" },
-  { label: "^L", value: "\x0c", a11y: "Control L, clear" },
-  { label: "^Z", value: "\x1a", a11y: "Control Z, suspend" },
-];
 
 // One-line status shown above the keys while dictation is engaged.
 function describeDictation(d: DictationControl): string {
@@ -111,8 +134,12 @@ export function CommandBar({
   bottomInset = 0,
   blurTarget,
   dictation,
+  onAttachImage,
+  attachingImage = false,
+  composerMode = false,
+  onInsertToken,
+  onToggleComposer,
 }: CommandBarProps) {
-  const [expanded, setExpanded] = useState(true);
   // Seconds left on the post-dictation auto-submit countdown; null when disarmed.
   const [armSeconds, setArmSeconds] = useState<number | null>(null);
   const armSubmitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,17 +147,13 @@ export function CommandBar({
   // True for the duration of a press-and-hold; gates whether speech was heard.
   const holdingRef = useRef(false);
   const spokeRef = useRef(false);
+  // Dictation strip entrance (fade + 4px rise) and smoothed meter fill.
+  const stripAnim = useRef(new Animated.Value(0)).current;
+  const meterAnim = useRef(new Animated.Value(0)).current;
 
   const disabled = !targetId || sessionStatus !== "running" || socketStatus !== "open";
-  // The keyboard is persistently open now, so the extra row is purely the
-  // user's "Keys" toggle — no keyboard-visibility gating.
-  const showExpandedKeys = expanded;
   const speaking = dictation?.speaking ?? false;
   const lastText = dictation?.lastText;
-
-  useEffect(() => {
-    loadKeysExpanded().then(setExpanded);
-  }, []);
 
   const clearArm = useCallback(() => {
     if (armSubmitRef.current) {
@@ -213,22 +236,13 @@ export function CommandBar({
     }
   }
 
-  function toggleExpanded() {
-    LayoutAnimation.configureNext(LayoutAnimation.create(160, "easeInEaseOut", "opacity"));
-    setExpanded((current) => {
-      const next = !current;
-      saveKeysExpanded(next);
-      return next;
-    });
-  }
-
   function send(key: ControlKey) {
     if (disabled || !targetId) {
       return;
     }
     // A control key is a deliberate, discrete action — give it a tactile tap.
     // The interrupt (^C) gets a heavier hit so it feels consequential.
-    if (key.accent) {
+    if (key.strong) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     } else {
       Haptics.selectionAsync().catch(() => {});
@@ -236,7 +250,9 @@ export function CommandBar({
     terminalSocket.send({ type: "input", sessionId: targetId, data: key.value });
   }
 
-  function renderKey(key: ControlKey) {
+  // A key wears its cluster's hue: tinted fill + border with the accent as the
+  // label color, so the groups read at a glance without shouting.
+  function renderKey(key: ControlKey, tint: string) {
     return (
       <Pressable
         key={key.label}
@@ -247,14 +263,15 @@ export function CommandBar({
         accessibilityState={{ disabled }}
         style={({ pressed }) => [
           styles.key,
-          key.accent && styles.keyAccent,
+          {
+            backgroundColor: withAlpha(tint, key.strong ? 0.18 : 0.14),
+            borderColor: withAlpha(tint, key.strong ? 0.42 : 0.26),
+          },
           disabled && styles.faded,
-          pressed && styles.keyPressed,
+          pressed && { backgroundColor: withAlpha(tint, 0.32) },
         ]}
       >
-        <Text style={[styles.keyText, key.accent && styles.keyTextAccent, disabled && styles.keyTextDisabled]}>
-          {key.label}
-        </Text>
+        <Text style={[styles.keyText, { color: tint }, disabled && styles.keyTextDisabled]}>{key.label}</Text>
       </Pressable>
     );
   }
@@ -264,7 +281,7 @@ export function CommandBar({
     // The control still works while a session is missing only to release a hold.
     const danger = d.status === "error";
     const glow = d.active && (d.status === "listening" || d.status === "recognizing");
-    const iconColor = danger ? colors.destructive : d.active ? colors.primary : colors.secondaryForeground;
+    const iconColor = danger ? colors.accentCoral : d.active ? colors.accentMint : colors.secondaryForeground;
     return (
       <Pressable
         onPressIn={() => micPressIn(d)}
@@ -276,11 +293,11 @@ export function CommandBar({
         style={({ pressed }) => [
           styles.mic,
           d.active && styles.micActive,
-          // Mic glows with the live input level while listening/transcribing.
-          glow && { backgroundColor: `rgba(255, 191, 0, ${0.16 + Math.min(0.5, d.level * 0.6)})` },
+          // Mic glows mint with the live input level while listening/transcribing.
+          glow && { backgroundColor: withAlpha(colors.accentMint, 0.16 + Math.min(0.5, d.level * 0.6)) },
           danger && styles.micError,
           disabled && !d.active && styles.faded,
-          pressed && styles.keyPressed,
+          pressed && styles.pressed,
         ]}
       >
         <MicIcon size={18} color={iconColor} />
@@ -288,16 +305,118 @@ export function CommandBar({
     );
   }
 
-  const showMic = Boolean(dictation && dictation.status !== "unsupported");
+  function attach() {
+    if (disabled || attachingImage || !onAttachImage) {
+      return;
+    }
+    Haptics.selectionAsync().catch(() => {});
+    onAttachImage();
+  }
+
+  // Head of the key row while composing: shortcuts that type into the message,
+  // not into the terminal. `⏎` is here because Enter itself now sends, so this
+  // is the only way to put a deliberate line break in a longer prompt.
+  function renderTokenKeys() {
+    const tokens: Array<{ token: ComposerToken; label: string; a11y: string }> = [
+      { token: "/", label: "/", a11y: "Slash commands" },
+      { token: "@", label: "@", a11y: "Mention a file" },
+      { token: "newline", label: "⏎", a11y: "Insert a line break" },
+    ];
+
+    return (
+      <View style={[styles.group, styles.groupSpacedRight]}>
+        {tokens.map(({ token, label, a11y }) => (
+          <Pressable
+            key={token}
+            disabled={disabled}
+            onPress={() => {
+              Haptics.selectionAsync().catch(() => {});
+              onInsertToken?.(token);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={a11y}
+            accessibilityState={{ disabled }}
+            style={({ pressed }) => [
+              styles.key,
+              {
+                backgroundColor: withAlpha(colors.primary, 0.16),
+                borderColor: withAlpha(colors.primary, 0.42),
+              },
+              disabled && styles.faded,
+              pressed && { backgroundColor: withAlpha(colors.primary, 0.32) },
+            ]}
+          >
+            <Text style={[styles.keyText, { color: colors.primary }, disabled && styles.keyTextDisabled]}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
+    );
+  }
+
+  function renderComposerToggle() {
+    return (
+      <Pressable
+        onPress={() => {
+          Haptics.selectionAsync().catch(() => {});
+          onToggleComposer?.();
+        }}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel={composerMode ? "Type directly into the terminal" : "Compose a message instead"}
+        accessibilityState={{ selected: !composerMode }}
+        style={({ pressed }) => [styles.pinnedButton, !composerMode && styles.pinnedButtonActive, pressed && styles.pressed]}
+      >
+        <KeyboardIcon size={18} color={composerMode ? colors.secondaryForeground : colors.primary} />
+      </Pressable>
+    );
+  }
+
+  function renderAttach() {
+    // Pictures go to remote Claude/Codex as pasted file paths: the host saves
+    // the upload locally and bracket-pastes the path into the session.
+    return (
+      <Pressable
+        onPress={attach}
+        hitSlop={10}
+        accessibilityRole="button"
+        accessibilityLabel="Attach or paste an image"
+        accessibilityState={{ disabled: disabled || attachingImage }}
+        style={({ pressed }) => [
+          styles.pinnedButton,
+          (disabled || attachingImage) && styles.faded,
+          pressed && styles.pressed,
+        ]}
+      >
+        <ImageIcon size={18} color={attachingImage ? colors.accentAmber : colors.secondaryForeground} />
+      </Pressable>
+    );
+  }
+
+  // While composing, dictation dictates into the message: the composer owns the
+  // mic and reports its own status, so this bar shows neither.
+  const showMic = Boolean(dictation && dictation.status !== "unsupported") && !composerMode;
   const arming = armSeconds !== null;
-  const showDictationStrip = Boolean(
-    dictation && (arming || (dictation.status !== "idle" && dictation.status !== "unsupported"))
-  );
+  const showDictationStrip =
+    !composerMode && Boolean(dictation && (arming || (dictation.status !== "idle" && dictation.status !== "unsupported")));
   const meterPercent = dictation
     ? dictation.status === "downloading"
       ? Math.max(0, Math.min(100, dictation.downloadPercent ?? 0))
       : Math.round(Math.max(0, Math.min(1, dictation.level)) * 100)
     : 0;
+
+  // Ease the strip in when dictation engages; it unmounts on the way out, so
+  // only the entrance animates (the bar snapping back is the "done" cue).
+  useEffect(() => {
+    if (showDictationStrip) {
+      stripAnim.setValue(0);
+      Animated.timing(stripAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+    }
+  }, [showDictationStrip, stripAnim]);
+
+  // Smooth the meter between level samples so it breathes instead of stepping.
+  useEffect(() => {
+    Animated.timing(meterAnim, { toValue: meterPercent, duration: 150, useNativeDriver: false }).start();
+  }, [meterPercent, meterAnim]);
 
   return (
     <View style={[styles.container, { paddingBottom: 8 + bottomInset }]}>
@@ -309,17 +428,17 @@ export function CommandBar({
         style={StyleSheet.absoluteFill}
       />
       <View style={[StyleSheet.absoluteFill, styles.glassTint]} pointerEvents="none" />
-      <LinearGradient
-        colors={[SHEEN_TOP, SHEEN_MID, SHEEN_BOTTOM]}
-        locations={[0, 0.4, 1]}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 1 }}
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none"
-      />
 
       {showDictationStrip && dictation ? (
-        <View style={styles.dictationStrip}>
+        <Animated.View
+          style={[
+            styles.dictationStrip,
+            {
+              opacity: stripAnim,
+              transform: [{ translateY: stripAnim.interpolate({ inputRange: [0, 1], outputRange: [4, 0] }) }],
+            },
+          ]}
+        >
           {arming ? (
             <>
               <View style={styles.armBadge}>
@@ -333,15 +452,20 @@ export function CommandBar({
                 hitSlop={8}
                 accessibilityRole="button"
                 accessibilityLabel="Cancel auto-send"
-                style={({ pressed }) => [styles.retry, pressed && styles.keyPressed]}
+                style={({ pressed }) => [styles.retry, pressed && styles.pressed]}
               >
-                <Text style={styles.retryText}>Retry</Text>
+                <Text style={styles.retryText}>Cancel</Text>
               </Pressable>
             </>
           ) : (
             <>
               <View style={styles.dictationMeterTrack}>
-                <View style={[styles.dictationMeterFill, { width: `${meterPercent}%` }]} />
+                <Animated.View
+                  style={[
+                    styles.dictationMeterFill,
+                    { width: meterAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }) },
+                  ]}
+                />
               </View>
               <Text
                 style={[styles.dictationText, dictation.status === "error" && styles.dictationTextError]}
@@ -351,31 +475,48 @@ export function CommandBar({
               </Text>
             </>
           )}
-        </View>
+        </Animated.View>
       ) : null}
 
-      <View style={styles.handleRow}>
-        <Pressable
-          onPress={toggleExpanded}
-          hitSlop={6}
-          accessibilityRole="button"
-          accessibilityLabel={expanded ? "Hide extra keys" : "Show extra keys"}
-          accessibilityState={{ expanded }}
-          style={({ pressed }) => [styles.handle, pressed && styles.pressed]}
-        >
-          <Text style={styles.handleGlyph}>{expanded ? "⌄" : "⌃"}</Text>
-          <Text style={styles.handleText}>Keys</Text>
-        </Pressable>
-
-        <View style={styles.visibleKeys}>
-          {visibleKeys.map((key) => renderKey(key))}
+      <View style={styles.toolbarRow}>
+        {/* All control keys in one horizontally scrolling strip, in clusters.
+            Edge fades hint that there is more to the sides. */}
+        <View style={styles.scrollWrap}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyboardShouldPersistTaps="always"
+            overScrollMode="never"
+            contentContainerStyle={styles.scrollContent}
+          >
+            {composerMode && onInsertToken ? renderTokenKeys() : null}
+            {keyGroups.map((group, index) => (
+              <View key={group.id} style={[styles.group, index > 0 && styles.groupSpaced]}>
+                {group.keys.map((key) => renderKey(key, group.tint))}
+              </View>
+            ))}
+          </ScrollView>
+          <LinearGradient
+            colors={[glass.tint, withAlpha(colors.background, 0)]}
+            start={{ x: 0, y: 0.5 }}
+            end={{ x: 1, y: 0.5 }}
+            style={[styles.edgeFade, styles.edgeFadeLeft]}
+            pointerEvents="none"
+          />
+          <LinearGradient
+            colors={[withAlpha(colors.background, 0), glass.tint]}
+            start={{ x: 0, y: 0.5 }}
+            end={{ x: 1, y: 0.5 }}
+            style={[styles.edgeFade, styles.edgeFadeRight]}
+            pointerEvents="none"
+          />
         </View>
+
+        {/* The most-used controls stay pinned outside the scroll area. */}
+        {onAttachImage ? renderAttach() : null}
         {showMic && dictation ? renderMic(dictation) : null}
+        {onToggleComposer ? renderComposerToggle() : null}
       </View>
-
-      {showExpandedKeys ? (
-        <View style={styles.keyRow}>{expandedKeys.map((key) => renderKey(key))}</View>
-      ) : null}
     </View>
   );
 }
@@ -385,36 +526,33 @@ const styles = StyleSheet.create({
     position: "relative",
     overflow: "hidden",
     backgroundColor: "transparent",
-    borderTopLeftRadius: GLASS_RADIUS,
-    borderTopRightRadius: GLASS_RADIUS,
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    borderColor: GLASS_BORDER,
-    paddingHorizontal: 12,
+    borderTopWidth: 1,
+    borderColor: glass.border,
     // Sized for the keyboard-up steady state (the keyboard is always open now).
     paddingTop: 8,
+    paddingHorizontal: 10,
     gap: 6,
   },
   glassTint: {
-    backgroundColor: GLASS_TINT,
+    backgroundColor: glass.tint,
   },
   dictationStrip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 9,
-    paddingHorizontal: 2,
+    gap: 8,
+    paddingHorizontal: 4,
   },
   dictationMeterTrack: {
     width: 56,
     height: 6,
     borderRadius: 3,
-    backgroundColor: METER_TRACK,
+    backgroundColor: glass.track,
     overflow: "hidden",
   },
   dictationMeterFill: {
     height: "100%",
     borderRadius: 3,
-    backgroundColor: colors.primary,
+    backgroundColor: colors.accentMint,
   },
   dictationText: {
     flex: 1,
@@ -423,51 +561,102 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   dictationTextError: {
-    color: colors.destructive,
+    color: colors.accentCoral,
   },
-  handleRow: {
+  toolbarRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
-  handle: {
+  scrollWrap: {
+    flex: 1,
+    position: "relative",
+  },
+  scrollContent: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: radius.pill,
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
+    paddingHorizontal: EDGE_FADE_WIDTH / 2,
+  },
+  // 8px between keys keeps neighbors — ^C beside ^D especially — out of each
+  // other's fat-finger radius while staying on the 4px grid.
+  group: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  // Cluster spacing doubles as the group separator — a clear visual breath
+  // between hue families without extra chrome.
+  groupSpaced: {
+    marginLeft: 16,
+  },
+  groupSpacedRight: {
+    marginRight: 16,
+  },
+  edgeFade: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    width: EDGE_FADE_WIDTH,
+  },
+  edgeFadeLeft: {
+    left: 0,
+  },
+  edgeFadeRight: {
+    right: 0,
+  },
+  // 44px both ways — the minimum comfortable touch target for the most-used
+  // surface in the app.
+  key: {
+    minWidth: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
   },
-  handleGlyph: {
-    color: colors.primary,
-    fontSize: 12,
-    fontFamily: font.bold,
+  // Key legends in Cascadia Mono SemiBold — exactly Windows Terminal's face.
+  // (The weight lives in the family name: a synthetic fontWeight would knock
+  // Android off the loaded custom font.)
+  keyText: {
+    fontFamily: font.monoSemibold,
+    fontSize: 14,
   },
-  handleText: {
-    color: colors.secondaryForeground,
-    fontSize: 11.5,
-    fontFamily: font.semibold,
+  keyTextDisabled: {
+    color: colors.faint,
   },
-  mic: {
-    width: 54,
-    height: 40,
+  // Pinned controls (attach + mic) share one quiet raised-glass look; state
+  // colors the icon, not the chrome, so the row stays calm.
+  pinnedButton: {
+    width: 46,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.md,
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
+    backgroundColor: glass.raised,
+    borderColor: glass.raisedBorder,
+    borderWidth: 1,
+  },
+  pinnedButtonActive: {
+    backgroundColor: withAlpha(colors.primary, 0.18),
+    borderColor: withAlpha(colors.primary, 0.45),
+  },
+  mic: {
+    width: 56,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.md,
+    backgroundColor: glass.raised,
+    borderColor: glass.raisedBorder,
     borderWidth: 1,
   },
   micActive: {
-    backgroundColor: MIC_ACTIVE_BG,
-    borderColor: MIC_ACTIVE_BORDER,
+    backgroundColor: withAlpha(colors.accentMint, 0.18),
+    borderColor: withAlpha(colors.accentMint, 0.5),
   },
   micError: {
-    backgroundColor: MIC_ERROR_BG,
-    borderColor: ACCENT_GLASS_BORDER,
+    backgroundColor: withAlpha(colors.accentCoral, 0.14),
+    borderColor: withAlpha(colors.accentCoral, 0.4),
   },
   armBadge: {
     width: 22,
@@ -475,71 +664,31 @@ const styles = StyleSheet.create({
     borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: MIC_ACTIVE_BG,
-    borderColor: MIC_ACTIVE_BORDER,
+    backgroundColor: withAlpha(colors.accentMint, 0.18),
+    borderColor: withAlpha(colors.accentMint, 0.5),
     borderWidth: 1,
   },
   armCount: {
-    color: colors.primary,
+    color: colors.accentMint,
     fontFamily: font.bold,
     fontSize: 12,
   },
+  // WinUI buttons are 4px-cornered, never pill-shaped.
   retry: {
     paddingHorizontal: 12,
     paddingVertical: 5,
-    borderRadius: radius.pill,
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
+    borderRadius: radius.sm,
+    backgroundColor: glass.raised,
+    borderColor: glass.raisedBorder,
     borderWidth: 1,
   },
   retryText: {
-    color: colors.primary,
+    color: colors.accentCyan,
     fontFamily: font.semibold,
     fontSize: 12.5,
   },
-  visibleKeys: {
-    flex: 1,
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    flexWrap: "nowrap",
-    gap: 6,
-  },
-  keyRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 6,
-  },
-  key: {
-    minWidth: 40,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: GLASS_RAISED,
-    borderColor: GLASS_RAISED_BORDER,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-  },
-  keyAccent: {
-    backgroundColor: ACCENT_GLASS,
-    borderColor: ACCENT_GLASS_BORDER,
-  },
-  keyPressed: {
-    backgroundColor: GLASS_PRESSED,
-  },
-  keyText: {
-    color: colors.secondaryForeground,
-    fontFamily: font.mono,
-    fontSize: 13,
-  },
-  keyTextAccent: {
-    color: colors.destructive,
-  },
-  keyTextDisabled: {
-    color: colors.faint,
-  },
   pressed: {
-    backgroundColor: GLASS_PRESSED,
+    backgroundColor: glass.pressed,
   },
   faded: {
     opacity: 0.4,

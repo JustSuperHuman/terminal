@@ -177,6 +177,27 @@ function displayAccessUrl(value: string) {
   return parsed.host;
 }
 
+function agentName(session: TerminalSessionSummary): string | undefined {
+  if (session.agent === "claude") return "Claude";
+  if (session.agent === "codex") return "Codex";
+  if (session.agent === "hermes") return "Hermes";
+  return undefined;
+}
+
+/**
+ * The agent line for a session row: who is running and what they are doing.
+ * The transport behind it is deliberately unnamed — a person picking a session
+ * cares that Claude needs them, not how the host found that out.
+ */
+function agentLine(session: TerminalSessionSummary): { text: string; attention: boolean } | undefined {
+  const name = agentName(session);
+  if (!name) return undefined;
+  if (session.status !== "running") return { text: name, attention: false };
+  if (session.agentActivity === "awaiting") return { text: `${name} · needs you`, attention: true };
+  if (session.agentActivity === "working") return { text: `${name} · working`, attention: false };
+  return { text: name, attention: false };
+}
+
 export function SessionSidebar({
   sessions,
   projects = [],
@@ -257,6 +278,7 @@ export function SessionSidebar({
   function renderSessionRow(session: TerminalSessionSummary) {
     const selected = session.id === activeTargetId;
     const unreadCount = unread[session.id] ?? 0;
+    const agent = agentLine(session);
     const editing = editingTargetId === session.id;
     return (
       <div
@@ -315,7 +337,7 @@ export function SessionSidebar({
                   selected ? "border-primary/60 bg-primary/12 text-primary" : "border-border bg-background/50"
                 )}
               >
-                <Terminal className="h-4 w-4" aria-hidden="true" />
+                {agent ? <Bot className="h-4 w-4" aria-hidden="true" /> : <Terminal className="h-4 w-4" aria-hidden="true" />}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2">
@@ -323,10 +345,27 @@ export function SessionSidebar({
                   {unreadCount > 0 ? <Badge variant="warning">{unreadCount}</Badge> : null}
                 </span>
                 <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-                  <span className={cn("h-1.5 w-1.5 rounded-full", session.status === "running" ? "bg-primary" : "bg-muted-foreground")} />
-                  {session.source === "bridged" ? <span>bridge</span> : null}
-                  {session.source === "bridged" ? <span aria-hidden="true">·</span> : null}
-                  <span className="truncate">{shellName(session)}</span>
+                  <span
+                    className={cn(
+                      "h-1.5 w-1.5 rounded-full",
+                      session.status !== "running"
+                        ? "bg-muted-foreground"
+                        : agent?.attention
+                          ? "bg-accent"
+                          : session.agentActivity === "working"
+                            ? "animate-pulse bg-primary"
+                            : "bg-primary"
+                    )}
+                  />
+                  {agent ? (
+                    <span className={cn("truncate", agent.attention && "font-medium text-accent")}>{agent.text}</span>
+                  ) : (
+                    <>
+                      {session.source === "bridged" ? <span>bridge</span> : null}
+                      {session.source === "bridged" ? <span aria-hidden="true">·</span> : null}
+                      <span className="truncate">{shellName(session)}</span>
+                    </>
+                  )}
                   <span>{timeLabel(session.updatedAt)}</span>
                 </span>
               </span>

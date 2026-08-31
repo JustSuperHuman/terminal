@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -12,8 +14,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ServerEndpoint } from "../lib/endpoint";
-import { colors, font, radius } from "../theme";
-import { JustGainsMark } from "./icons";
+import { colors, font, glass, radius, withAlpha } from "../theme";
+import { CloseIcon, TerminalCompanionMark } from "./icons";
 
 interface ConnectScreenProps {
   servers: ServerEndpoint[];
@@ -31,6 +33,32 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
   const [address, setAddress] = useState("");
   const [token, setToken] = useState("");
   const [label, setLabel] = useState("");
+  const [focused, setFocused] = useState<"address" | "token" | "label" | null>(null);
+
+  // Fluent entrance: the whole page fades in with a small rise on mount.
+  const entrance = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(entrance, {
+      toValue: 1,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [entrance]);
+
+  // The error notice fades/slides in rather than popping.
+  const errorAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (error) {
+      errorAnim.setValue(0);
+      Animated.timing(errorAnim, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [error, errorAnim]);
 
   const canConnect = address.trim().length > 0 && !connecting;
 
@@ -48,18 +76,22 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
       >
+        <Animated.View
+          style={{
+            opacity: entrance,
+            transform: [{ translateY: entrance.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
+          }}
+        >
         <View style={styles.brand}>
           <View style={styles.brandMark}>
-            <JustGainsMark size={96} color={colors.foreground} />
+            <TerminalCompanionMark size={44} color={colors.primary} />
           </View>
-          <Text style={styles.title}>
-            Just<Text style={styles.titleAccent}>Terminal</Text>
-          </Text>
+          <Text style={styles.title}>Terminal Companion</Text>
           <Text style={styles.subtitle}>Connect to a Terminal Web host</Text>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.label}>Server address</Text>
+          <Text style={[styles.label, styles.labelFirst]}>Server address</Text>
           <TextInput
             value={address}
             onChangeText={setAddress}
@@ -70,8 +102,10 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
             keyboardType="url"
             returnKeyType="go"
             onSubmitEditing={submit}
+            onFocus={() => setFocused("address")}
+            onBlur={() => setFocused((f) => (f === "address" ? null : f))}
             accessibilityLabel="Server address"
-            style={styles.input}
+            style={[styles.input, focused === "address" && styles.inputFocused]}
             editable={!connecting}
           />
 
@@ -81,13 +115,15 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
               <TextInput
                 value={token}
                 onChangeText={setToken}
-                placeholder="optional"
+                placeholder="Optional"
                 placeholderTextColor={colors.faint}
                 autoCapitalize="none"
                 autoCorrect={false}
                 secureTextEntry
+                onFocus={() => setFocused("token")}
+                onBlur={() => setFocused((f) => (f === "token" ? null : f))}
                 accessibilityLabel="Access token (optional)"
-                style={styles.input}
+                style={[styles.input, focused === "token" && styles.inputFocused]}
                 editable={!connecting}
               />
             </View>
@@ -96,23 +132,34 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
               <TextInput
                 value={label}
                 onChangeText={setLabel}
-                placeholder="optional"
+                placeholder="Optional"
                 placeholderTextColor={colors.faint}
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="go"
                 onSubmitEditing={submit}
+                onFocus={() => setFocused("label")}
+                onBlur={() => setFocused((f) => (f === "label" ? null : f))}
                 accessibilityLabel="Server label (optional)"
-                style={styles.input}
+                style={[styles.input, focused === "label" && styles.inputFocused]}
                 editable={!connecting}
               />
             </View>
           </View>
 
           {error ? (
-            <View style={styles.errorBox}>
+            <Animated.View
+              style={[
+                styles.errorBox,
+                {
+                  opacity: errorAnim,
+                  transform: [{ translateY: errorAnim.interpolate({ inputRange: [0, 1], outputRange: [-4, 0] }) }],
+                },
+              ]}
+              accessibilityLiveRegion="polite"
+            >
               <Text style={styles.errorText}>{error}</Text>
-            </View>
+            </Animated.View>
           ) : null}
 
           <Pressable
@@ -131,7 +178,14 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
           </Pressable>
 
           {__DEV__ ? (
-            <Pressable onPress={() => setAddress(EMULATOR_HOST)} style={styles.hintChip} disabled={connecting}>
+            <Pressable
+              onPress={() => setAddress(EMULATOR_HOST)}
+              style={styles.hintChip}
+              disabled={connecting}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={`Use emulator host ${EMULATOR_HOST}`}
+            >
               <Text style={styles.hintChipText}>Use emulator host · {EMULATOR_HOST}</Text>
             </Pressable>
           ) : null}
@@ -139,23 +193,33 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
 
         {servers.length > 0 ? (
           <View style={styles.recent}>
-            <Text style={styles.recentTitle}>Recent</Text>
+            <Text style={styles.recentTitle}>Recent servers</Text>
             {servers.map((server) => (
               <View key={server.id} style={styles.recentRow}>
                 <Pressable style={styles.recentMain} onPress={() => onSelectSaved(server)} disabled={connecting}>
-                  <View style={styles.recentDot} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.recentLabel} numberOfLines={1}>
-                      {server.label ?? server.host}
-                    </Text>
-                    <Text style={styles.recentHost} numberOfLines={1}>
-                      {server.host}
-                      {server.token ? " · token" : ""}
-                    </Text>
-                  </View>
+                  {({ pressed }) => (
+                    <>
+                      <View style={[styles.selectionPill, pressed && styles.selectionPillActive]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.recentLabel} numberOfLines={1}>
+                          {server.label ?? server.host}
+                        </Text>
+                        <Text style={styles.recentHost} numberOfLines={1}>
+                          {server.host}
+                          {server.token ? " · token" : ""}
+                        </Text>
+                      </View>
+                    </>
+                  )}
                 </Pressable>
-                <Pressable onPress={() => onForget(server.id)} hitSlop={10} style={styles.forget}>
-                  <Text style={styles.forgetText}>✕</Text>
+                <Pressable
+                  onPress={() => onForget(server.id)}
+                  hitSlop={10}
+                  style={styles.forget}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Forget ${server.label ?? server.host}`}
+                >
+                  <CloseIcon size={14} color={colors.mutedForeground} />
                 </Pressable>
               </View>
             ))}
@@ -163,9 +227,10 @@ export function ConnectScreen({ servers, connecting, error, onConnect, onSelectS
         ) : null}
 
         <Text style={styles.footnote}>
-          Start the host with <Text style={styles.code}>npm run dev</Text> in tools/terminal-web. For LAN access use{" "}
+          Start the host with <Text style={styles.code}>bun run dev</Text> in tools/terminal-web. For LAN access use{" "}
           <Text style={styles.code}>--host 0.0.0.0</Text> and supply the token.
         </Text>
+        </Animated.View>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -180,66 +245,73 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   brand: {
-    alignItems: "center",
-    marginBottom: 26,
+    alignItems: "flex-start",
+    marginBottom: 24,
   },
   brandMark: {
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 20,
+    width: 64,
+    height: 64,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    marginBottom: 16,
   },
   title: {
     color: colors.foreground,
-    fontSize: 26,
-    fontFamily: font.extrabold,
-    letterSpacing: 0.2,
-  },
-  titleAccent: {
-    color: colors.primary,
+    fontSize: 28,
+    fontFamily: font.semibold,
   },
   subtitle: {
     color: colors.mutedForeground,
-    fontSize: 13.5,
-    fontFamily: font.medium,
-    marginTop: 5,
+    fontSize: 14,
+    fontFamily: font.regular,
+    marginTop: 4,
   },
   card: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: radius.lg,
-    padding: 18,
+    padding: 16,
   },
   label: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.bold,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
+    color: colors.secondaryForeground,
+    fontSize: 12,
+    fontFamily: font.regular,
     marginBottom: 6,
     marginTop: 12,
+  },
+  // The card's own padding provides the top inset; the first label adds none.
+  labelFirst: {
+    marginTop: 0,
   },
   input: {
     backgroundColor: colors.input,
     borderColor: colors.border,
     borderWidth: 1,
-    borderRadius: radius.md,
+    borderRadius: radius.sm,
     color: colors.foreground,
-    fontSize: 15,
+    fontSize: 14,
     fontFamily: font.mono,
-    paddingHorizontal: 13,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  inputFocused: {
+    borderColor: colors.primary,
   },
   rowFields: {
     flexDirection: "row",
-    gap: 10,
+    gap: 12,
   },
   errorBox: {
-    marginTop: 14,
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.destructive,
+    marginTop: 16,
+    backgroundColor: withAlpha(colors.destructive, 0.08),
+    borderColor: withAlpha(colors.destructive, 0.5),
     borderWidth: 1,
-    borderRadius: radius.md,
+    borderRadius: radius.sm,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
@@ -251,12 +323,12 @@ const styles = StyleSheet.create({
   },
   connect: {
     backgroundColor: colors.primary,
-    borderRadius: radius.md,
+    borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 14,
-    marginTop: 18,
-    minHeight: 50,
+    paddingVertical: 12,
+    marginTop: 16,
+    minHeight: 44,
   },
   connectDisabled: {
     opacity: 0.45,
@@ -266,16 +338,16 @@ const styles = StyleSheet.create({
   },
   connectText: {
     color: colors.primaryForeground,
-    fontSize: 16,
-    fontFamily: font.extrabold,
+    fontSize: 14,
+    fontFamily: font.semibold,
   },
   hintChip: {
     alignSelf: "center",
-    marginTop: 14,
-    paddingVertical: 7,
+    marginTop: 16,
+    paddingVertical: 8,
     paddingHorizontal: 14,
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.sm,
+    backgroundColor: glass.raised,
     borderColor: colors.border,
     borderWidth: 1,
   },
@@ -285,14 +357,12 @@ const styles = StyleSheet.create({
     fontFamily: font.mono,
   },
   recent: {
-    marginTop: 26,
+    marginTop: 24,
   },
   recentTitle: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.bold,
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
+    color: colors.secondaryForeground,
+    fontSize: 14,
+    fontFamily: font.semibold,
     marginBottom: 8,
     marginLeft: 4,
   },
@@ -302,26 +372,32 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: 1,
-    borderRadius: radius.md,
+    borderRadius: radius.sm,
     marginBottom: 8,
   },
   recentMain: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 11,
-    paddingHorizontal: 14,
+    gap: 12,
+    paddingLeft: 8,
+    paddingRight: 14,
     paddingVertical: 12,
   },
-  recentDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+  // WinUI selection indicator: a 3px accent pill on the row's left edge,
+  // shown while the row is pressed.
+  selectionPill: {
+    width: 3,
+    height: 16,
+    borderRadius: radius.pill,
+    backgroundColor: "transparent",
+  },
+  selectionPillActive: {
     backgroundColor: colors.primary,
   },
   recentLabel: {
     color: colors.foreground,
-    fontSize: 15,
+    fontSize: 14,
     fontFamily: font.semibold,
   },
   recentHost: {
@@ -331,19 +407,17 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   forget: {
+    alignSelf: "stretch",
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  forgetText: {
-    color: colors.mutedForeground,
-    fontSize: 15,
   },
   footnote: {
     color: colors.faint,
     fontSize: 12,
     fontFamily: font.regular,
     lineHeight: 18,
-    marginTop: 26,
+    marginTop: 24,
     textAlign: "center",
   },
   code: {

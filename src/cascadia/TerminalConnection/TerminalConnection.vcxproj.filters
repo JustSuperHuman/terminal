@@ -20,6 +20,7 @@
     <ClCompile Include="init.cpp" />
     <ClCompile Include="CTerminalHandoff.cpp" />
     <ClCompile Include="TerminalBridge.cpp" />
+    <ClCompile Include="WebSessionConnection.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
@@ -29,6 +30,7 @@
     <ClInclude Include="CTerminalHandoff.h" />
     <ClInclude Include="BaseTerminalConnection.h" />
     <ClInclude Include="TerminalBridge.h" />
+    <ClInclude Include="WebSessionConnection.h" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="ITerminalConnection.idl" />
@@ -36,6 +38,7 @@
     <Midl Include="AzureConnection.idl" />
     <Midl Include="ConptyConnection.idl" />
     <Midl Include="ConnectionInformation.idl" />
+    <Midl Include="WebSessionConnection.idl" />
   </ItemGroup>
   <ItemGroup>
     <Natvis Include="$(SolutionDir)tools\ConsoleTypes.natvis" />

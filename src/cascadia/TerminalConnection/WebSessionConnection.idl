@@ -1,0 +1,15 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+import "ITerminalConnection.idl";
+
+namespace Microsoft.Terminal.TerminalConnection
+{
+    // Attaches a TermControl to a session owned by the local terminal-web
+    // server (e.g. the orchestrator session) over its /ws WebSocket.
+    [default_interface]
+    runtimeclass WebSessionConnection : ITerminalConnection
+    {
+        WebSessionConnection(String sessionId);
+    };
+}

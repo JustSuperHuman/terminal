@@ -21,23 +21,20 @@ export function PlugIcon({ size = 18, color = colors.foreground }: IconProps) {
   );
 }
 
-// JustGains leaf mark — the glyph from JustGains-Admin's `just-gains-logo-gray.svg`
-// (mark only, wordmark stripped). Brand gold by default.
-const JG_W = 16.3;
-const JG_H = 19.3;
-const JG_PATH =
-  "M10.6841 4.85384C10.4668 5.22534 10.066 5.31692 9.63665 5.23615C8.0037 4.92926 6.47273 5.18459 5.03864 5.99834C4.6543 6.21638 4.23649 6.26156 3.89196 5.95298C3.47825 5.58245 3.09971 5.16847 3.28231 4.53299C3.42167 4.04818 3.74272 3.77015 4.2366 3.68482C5.14011 3.52888 6.04554 3.3827 6.95012 3.2323C7.819 3.08782 8.68752 2.94081 9.55708 2.80015C10.1461 2.70483 10.5876 2.90187 10.8577 3.41143C11.1286 3.92263 10.9403 4.41592 10.6841 4.85384ZM10.5897 11.802C9.70142 12.5603 8.79685 13.3012 7.87701 14.0222C7.31612 14.4618 6.94044 14.3298 6.77362 13.6412C6.63044 13.0497 6.55172 12.4435 6.44447 11.8439L6.44174 11.8443C6.3438 11.2967 6.22473 10.7517 6.15311 10.201C6.05273 9.4295 6.34116 9.17208 7.05958 9.4174C8.17712 9.79881 9.28681 10.2054 10.3872 10.6332C11.0951 10.9085 11.1648 11.311 10.5897 11.802ZM14.7994 14.9587C14.6008 14.5973 14.5345 14.2304 14.6839 13.8405C14.7301 13.7201 14.7978 13.6051 14.8262 13.481C15.3778 11.0604 14.902 8.89364 13.1034 7.07246C12.7021 6.66619 12.586 6.25356 12.7918 5.71903C13.0818 4.96564 13.3579 4.20045 13.164 3.47863C12.8442 1.60799 11.2593 0.381407 9.47088 0.628203C7.49676 0.90066 5.53527 1.25947 3.57169 1.59898C2.89862 1.7154 2.34533 2.07516 1.89215 2.5683C0.56041 4.01729 0.782913 5.98639 2.2002 7.49206C2.60771 7.92491 2.68728 8.24291 2.43505 8.77076C1.97778 9.72786 1.74494 10.7286 1.79155 11.7944C1.88256 13.8755 2.74981 15.5753 4.44908 16.8247C6.89188 18.6206 9.91545 18.6295 12.3991 16.8981C12.6521 16.7218 12.9235 16.6172 13.2434 16.6511C13.855 16.7157 14.4685 16.7638 15.0791 16.8368C15.5284 16.8904 15.6653 16.6031 15.4831 16.2573C15.255 15.8245 15.035 15.3876 14.7994 14.9587Z";
-
-export function JustGainsMark({ size = 22, color = colors.primary }: IconProps) {
+// Terminal Companion brand mark — a ">_" prompt (angle chevron + underscore
+// cursor bar) echoing the Windows Terminal icon; defaults to the accent.
+export function TerminalCompanionMark({ size = 22, color = colors.primary }: IconProps) {
   return (
-    <Svg width={(size * JG_W) / JG_H} height={size} viewBox={`0 0 ${JG_W} ${JG_H}`} fill="none">
-      <Path d={JG_PATH} fill={color} />
+    <Svg width={size} height={size} viewBox="0 0 48 48" fill="none">
+      <G stroke={color} strokeWidth={5.5} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M8 13l12 11-12 11" />
+        <Path d="M26 35h14" />
+      </G>
     </Svg>
   );
 }
 
-// Anthropic / Claude mark — from JustGains-Admin's `public/images/claude-icon.svg`.
-// Keeps the brand clay colour by default.
+// Anthropic / Claude mark. Keeps the brand clay colour by default.
 const CLAUDE_PATH =
   "M 233.959793 800.214905 L 468.644287 668.536987 L 472.590637 657.100647 L 468.644287 650.738403 L 457.208069 650.738403 L 417.986633 648.322144 L 283.892639 644.69812 L 167.597321 639.865845 L 54.926208 633.825623 L 26.577238 627.785339 L 3.3e-05 592.751709 L 2.73832 575.27533 L 26.577238 559.248352 L 60.724873 562.228149 L 136.187973 567.382629 L 249.422867 575.194763 L 331.570496 580.026978 L 453.261841 592.671082 L 472.590637 592.671082 L 475.328857 584.859009 L 468.724915 580.026978 L 463.570557 575.194763 L 346.389313 495.785217 L 219.543671 411.865906 L 153.100723 363.543762 L 117.181267 339.060425 L 99.060455 316.107361 L 91.248367 266.01355 L 123.865784 230.093994 L 167.677887 233.073853 L 178.872513 236.053772 L 223.248367 270.201477 L 318.040283 343.570496 L 441.825592 434.738342 L 459.946411 449.798706 L 467.194672 444.64447 L 468.080597 441.020203 L 459.946411 427.409485 L 392.617493 305.718323 L 320.778564 181.932983 L 288.80542 130.630859 L 280.348999 99.865845 C 277.369171 87.221436 275.194641 76.590698 275.194641 63.624268 L 312.322174 13.20813 L 332.8591 6.604126 L 382.389313 13.20813 L 403.248352 31.328979 L 434.013519 101.71814 L 483.865753 212.537048 L 561.181274 363.221497 L 583.812134 407.919434 L 595.892639 449.315491 L 600.40271 461.959839 L 608.214783 461.959839 L 608.214783 454.711609 L 614.577271 369.825623 L 626.335632 265.61084 L 637.771851 131.516846 L 641.718201 93.745117 L 660.402832 48.483276 L 697.530334 24.000122 L 726.52356 37.852417 L 750.362549 72 L 747.060486 94.067139 L 732.886047 186.201416 L 705.100708 330.52356 L 686.979919 427.167847 L 697.530334 427.167847 L 709.61084 415.087341 L 758.496704 350.174561 L 840.644348 247.490051 L 876.885925 206.738342 L 919.167847 161.71814 L 946.308838 140.29541 L 997.61084 140.29541 L 1035.38269 196.429626 L 1018.469849 254.416199 L 965.637634 321.422852 L 921.825562 378.201538 L 859.006714 462.765259 L 819.785278 530.41626 L 823.409424 535.812073 L 832.75177 534.92627 L 974.657776 504.724915 L 1051.328979 490.872559 L 1142.818848 475.167786 L 1184.214844 494.496582 L 1188.724854 514.147644 L 1172.456421 554.335693 L 1074.604126 578.496765 L 959.838989 601.449829 L 788.939636 641.879272 L 786.845764 643.409485 L 789.261841 646.389343 L 866.255127 653.637634 L 899.194702 655.409424 L 979.812134 655.409424 L 1129.932861 666.604187 L 1169.154419 692.537109 L 1192.671265 724.268677 L 1188.724854 748.429688 L 1128.322144 779.194641 L 1046.818848 759.865845 L 856.590759 714.604126 L 791.355774 698.335754 L 782.335693 698.335754 L 782.335693 703.731567 L 836.69812 756.885986 L 936.322205 846.845581 L 1061.073975 962.81897 L 1067.436279 991.490112 L 1051.409424 1014.120911 L 1034.496704 1011.704712 L 924.885986 929.234924 L 882.604126 892.107544 L 786.845764 811.48999 L 780.483276 811.48999 L 780.483276 819.946289 L 802.550415 852.241699 L 919.087341 1027.409424 L 925.127625 1081.127686 L 916.671204 1098.604126 L 886.469849 1109.154419 L 853.288696 1103.114136 L 785.073914 1007.355835 L 714.684631 899.516785 L 657.906067 802.872498 L 650.979858 806.81897 L 617.476624 1167.704834 L 601.771851 1186.147705 L 565.530212 1200 L 535.328857 1177.046997 L 519.302124 1139.919556 L 535.328857 1066.550537 L 554.657776 970.792053 L 570.362488 894.68457 L 584.536926 800.134277 L 592.993347 768.724976 L 592.429626 766.630859 L 585.503479 767.516968 L 514.22821 865.369263 L 405.825531 1011.865906 L 320.053711 1103.677979 L 299.516815 1111.812256 L 263.919525 1093.369263 L 267.221497 1060.429688 L 287.114136 1031.114136 L 405.825531 880.107361 L 477.422913 786.52356 L 523.651062 732.483276 L 523.328918 724.671265 L 520.590698 724.671265 L 205.288605 929.395935 L 149.154434 936.644409 L 124.993355 914.01355 L 127.973183 876.885986 L 139.409409 864.80542 L 234.201385 799.570435 L 233.879227 799.8927 Z";
 
@@ -79,6 +76,122 @@ export function MicIcon({ size = 18, color = colors.foreground }: IconProps) {
         <Path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
         <Path d="M19 10v2a7 7 0 0 1-14 0v-2" />
         <Path d="M12 19v3" />
+      </G>
+    </Svg>
+  );
+}
+
+// Picture mark (Lucide "image") — stroke glyph for the attach-image control.
+export function ImageIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        <Path d="M9 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" />
+        <Path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </G>
+    </Svg>
+  );
+}
+
+// Clipboard mark (Lucide "clipboard-paste") for the explicit image-paste row.
+export function ClipboardIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M9 5h6" />
+        <Path d="M9 3h6a2 2 0 0 1 2 2v1h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2V5a2 2 0 0 1 2-2Z" />
+        <Path d="m8 14 3 3 5-6" />
+      </G>
+    </Svg>
+  );
+}
+
+// Paper-plane mark (Lucide "send-horizontal") — the composer's send action.
+export function SendIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M3.7 3.3 21 12 3.7 20.7 6 12Z" />
+        <Path d="M6 12h15" />
+      </G>
+    </Svg>
+  );
+}
+
+// Clock-with-arrow mark (Lucide "history") — recall an earlier prompt.
+export function HistoryIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+        <Path d="M3 3v5h5" />
+        <Path d="M12 7v5l3.5 2" />
+      </G>
+    </Svg>
+  );
+}
+
+// Keyboard mark (Lucide "keyboard") — switch between composing a message and
+// typing straight into the terminal.
+export function KeyboardIcon({ size = 18, color = colors.foreground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M2 6a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z" />
+        <Path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01" />
+        <Path d="M10 13h4" />
+        <Path d="M8 16h8" />
+      </G>
+    </Svg>
+  );
+}
+
+// File and folder marks for `@` mention results.
+export function FileIcon({ size = 16, color = colors.mutedForeground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+        <Path d="M14 2v6h6" />
+      </G>
+    </Svg>
+  );
+}
+
+export function FolderIcon({ size = 16, color = colors.mutedForeground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+      </G>
+    </Svg>
+  );
+}
+
+// Dismiss mark (Lucide "x") — forget/close affordances; matches the stroke set
+// so dismissal doesn't fall back to a text "✕" glyph.
+export function CloseIcon({ size = 16, color = colors.mutedForeground }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        <Path d="M18 6 6 18" />
+        <Path d="m6 6 12 12" />
+      </G>
+    </Svg>
+  );
+}
+
+// Chevrons for the session stepper on the switcher bar.
+export function ChevronIcon({
+  size = 13,
+  color = colors.accentCyan,
+  direction = "right",
+}: IconProps & { direction?: "left" | "right" }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <G stroke={color} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+        <Path d={direction === "left" ? "M15 5l-7 7 7 7" : "M9 5l7 7-7 7"} />
       </G>
     </Svg>
   );

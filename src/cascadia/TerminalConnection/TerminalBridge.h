@@ -43,6 +43,10 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             Disabled = 0,
             Connecting = 1,
             Connected = 2,
+            // The spawn owner has watched its server child die quickly several
+            // times in a row; reconnects continue, but the UI should point at
+            // the server log instead of a bare "offline".
+            ServerFailing = 3,
         };
 
         static TerminalBridge& Instance();
@@ -79,17 +83,29 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             winrt::weak_ref<winrt::Windows::Foundation::IInspectable> connection;
             std::string registerMessage; // cached JSON used to re-register after a reconnect
             std::wstring lastTitle; // dedupes title updates
+            // A bounded tail lets a fresh terminal-web process reconstruct the
+            // visible screen and any prompt that was already awaiting input.
+            std::deque<std::wstring> replayChunks;
+            size_t replayChars{ 0 };
+            // Keep the latest bro-cli presence marker even after it scrolls
+            // out of the replay tail, so Claude/Codex identity survives a
+            // desktop bridge restart. The server still validates the marker.
+            std::wstring agentScanBuffer;
+            std::wstring agentPresenceSequence;
         };
 
         void _ensureStarted();
         void _enqueue(std::string message);
+        std::string _buildReplayRegister(const SessionEntry& entry) const noexcept;
 
         void _ensureServerRunning() noexcept;
         std::wstring _serverRoot() const noexcept;
 
         void _sendLoop() noexcept;
         void _receiveLoop() noexcept;
-        bool _connect() noexcept;
+        bool _connectAny() noexcept;
+        bool _connect(INTERNET_PORT port) noexcept;
+        INTERNET_PORT _readRecordedServerPort() const noexcept;
         void _receiveUntilError() noexcept;
         void _closeSocket() noexcept;
         void _dispatchServerMessage(const std::string& utf8) noexcept;
@@ -106,6 +122,10 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         bool _enabled{ false };
         std::wstring _host{ L"127.0.0.1" };
         INTERNET_PORT _port{ 10001 };
+        // The port we most recently connected on. Usually equal to _port, but
+        // the server records its actual port in .terminal-web-server.json when
+        // the default is taken and it has to walk up, and we follow it there.
+        std::atomic<uint32_t> _activePort{ 0 };
         std::wstring _path{ L"/bridge" };
 
         std::once_flag _startFlag;
@@ -132,12 +152,16 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 
         // Keep-alive for the local terminal-web server process. While any
         // session is registered and the server is unreachable, we (re)spawn it
-        // from the repo's tools/terminal-web package.
+        // from the repo's tools/terminal-web package. The child's stdout and
+        // stderr land in <root>\.terminal-web-server.log so failures are
+        // diagnosable, and each spawn runs `bun install` first so a missing or
+        // stale node_modules heals itself instead of crash-looping silently.
         std::mutex _serverMutex;
         wil::unique_handle _serverProcess;
         wil::unique_handle _spawnOwnerMutex;
-        bool _spawnOwnershipChecked{ false };
         bool _spawnOwner{ false };
         ULONGLONG _lastSpawnTick{ 0 };
+        uint32_t _quickExitCount{ 0 };
+        std::atomic<bool> _serverFailing{ false };
     };
 }

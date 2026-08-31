@@ -421,9 +421,59 @@ namespace winrt::TerminalApp::implementation
         _bridgeStatusTimer.Tick({ get_weak(), &TerminalPage::_BridgeStatusTimerTick });
         _bridgeStatusTimer.Start();
 
+        // Refresh each tab's git branch periodically. Title updates already
+        // refresh the branch immediately when the shell changes directory;
+        // this poll catches checkouts made without a cwd change (e.g. from
+        // another window or an editor).
+        _gitBranchTimer.Interval(std::chrono::milliseconds(3000));
+        _gitBranchTimer.Tick({ get_weak(), &TerminalPage::_GitBranchTimerTick });
+        _gitBranchTimer.Start();
+
         // Populate the project strip ("All" + "+") immediately; the timer
         // tick keeps it in sync with the terminal-web store afterwards.
         _RebuildProjectTabs();
+
+        // Orchestrator panel buttons (right-edge toggle + header + empty state).
+        {
+            const auto weakThis{ get_weak() };
+            OrchestratorToggleButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_ToggleOrchestratorPane();
+                }
+            });
+            OrchestratorCollapseButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_ToggleOrchestratorPane();
+                }
+            });
+            OrchestratorStartClaudeButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":"claude"})");
+                }
+            });
+            OrchestratorStartCodexButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":"codex"})");
+                }
+            });
+            OrchestratorRestartButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    const auto agent = page->_orchestratorStatus.Agent.empty() ? std::string{ "claude" } : winrt::to_string(page->_orchestratorStatus.Agent);
+                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":")" + agent + R"(","restart":true})");
+                }
+            });
+            OrchestratorStopButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_PostOrchestratorCommand(L"/api/orchestrator/stop", "{}");
+                }
+            });
+        }
 
         // Accept project-tab drags for reordering.
         {
@@ -1415,6 +1465,72 @@ namespace winrt::TerminalApp::implementation
             }
         });
         _newTabButton.Flyout(newTabFlyout);
+
+        _UpdateNewTabProfileButtons();
+    }
+
+    // Method Description:
+    // - Rebuilds the row of icon-only profile launcher buttons that sits next
+    //   to the new tab split button at the bottom of the vertical tab rail.
+    //   Every active profile gets a button; TabRowControl collapses the ones
+    //   that don't fit, so the split button's dropdown chevron never gets
+    //   clipped and no button renders partially.
+    void TerminalPage::_UpdateNewTabProfileButtons()
+    {
+        if (!_tabRow)
+        {
+            return;
+        }
+
+        const auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
+        const auto panel = tabRowImpl->NewTabProfilesPanel();
+        panel.Children().Clear();
+
+        const auto activeProfiles = _settings.ActiveProfiles();
+        const auto profileCount = activeProfiles.Size();
+        for (uint32_t profileIndex = 0; profileIndex < profileCount; profileIndex++)
+        {
+            const auto profile = activeProfiles.GetAt(profileIndex);
+
+            auto button = WUX::Controls::Button{};
+            button.Width(32);
+            button.Height(32);
+            button.Padding({ 0, 0, 0, 0 });
+            button.Margin({ 4, 0, 0, 0 });
+            button.BorderThickness({ 0, 0, 0, 0 });
+            button.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+
+            if (const auto icon = _CreateNewTabFlyoutIcon(profile.Icon().Resolved()))
+            {
+                icon.Width(16);
+                icon.Height(16);
+                button.Content(icon);
+            }
+            else
+            {
+                WUX::Controls::FontIcon fallbackIcon{};
+                fallbackIcon.Glyph(L"\xE756"); // CommandPrompt
+                fallbackIcon.FontSize(12);
+                fallbackIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                button.Content(fallbackIcon);
+            }
+
+            const auto profileName = profile.Name();
+            WUX::Controls::ToolTipService::SetToolTip(button, box_value(profileName));
+            Automation::AutomationProperties::SetName(button, profileName);
+
+            button.Click([profileIndex, weakThis{ get_weak() }](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    NewTerminalArgs newTerminalArgs{ gsl::narrow_cast<int32_t>(profileIndex) };
+                    page->_OpenNewTerminalViaDropdown(newTerminalArgs);
+                }
+            });
+
+            panel.Children().Append(button);
+        }
+
+        tabRowImpl->FitNewTabProfileButtons();
     }
 
     // Method Description:
@@ -2087,11 +2203,226 @@ namespace winrt::TerminalApp::implementation
             TitleChanged.raise(*this, nullptr);
         }
 
-        // Refresh the project tabs from the terminal-web store every third
-        // tick (~6s), and immediately on the first tick after startup.
-        if ((_bridgeStatusTicks++ % 3) == 0)
+        // Directory-backed projects can change whenever a shell runs `cd`.
+        // Refresh on every bridge tick so the native strip follows within a
+        // couple of seconds without adding another UI timer.
+        _RefreshBridgeProjects();
+
+        // The orchestrator panel shares the same 2s cadence while it's open
+        // (status transitions + attaching the session once it exists).
+        if (_orchestratorPaneOpen)
         {
-            _RefreshBridgeProjects();
+            _RefreshOrchestratorStatus();
+        }
+    }
+
+    // Reads the first line of a small git bookkeeping file (HEAD, .git stubs).
+    static std::string _readGitLine(const std::filesystem::path& path)
+    {
+        std::ifstream file{ path };
+        std::string line;
+        if (file)
+        {
+            std::getline(file, line);
+        }
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+        {
+            line.pop_back();
+        }
+        return line;
+    }
+
+    // Resolves the git branch name (or a short detached-HEAD hash) for a
+    // directory by walking up to the repository root and reading HEAD
+    // directly; spawning git.exe per tab per tick would be far too heavy.
+    // Returns an empty string when the directory isn't inside a repository.
+    static std::wstring _gitBranchForDirectory(std::wstring cwd)
+    {
+        if (cwd.empty())
+        {
+            return {};
+        }
+
+        std::error_code ec;
+        std::filesystem::path dir{ std::move(cwd) };
+        if (!std::filesystem::is_directory(dir, ec) || ec)
+        {
+            return {};
+        }
+
+        while (true)
+        {
+            const auto gitPath = dir / L".git";
+            std::filesystem::path headPath;
+            if (std::filesystem::is_directory(gitPath, ec) && !ec)
+            {
+                headPath = gitPath / L"HEAD";
+            }
+            else if (std::filesystem::is_regular_file(gitPath, ec) && !ec)
+            {
+                // Worktrees and submodules leave a pointer file behind:
+                // "gitdir: <path-to-the-real-git-dir>"
+                auto line = _readGitLine(gitPath);
+                static constexpr std::string_view gitdirPrefix{ "gitdir:" };
+                if (line.starts_with(gitdirPrefix))
+                {
+                    line.erase(0, gitdirPrefix.size());
+                    while (!line.empty() && line.front() == ' ')
+                    {
+                        line.erase(0, 1);
+                    }
+                    std::filesystem::path gitdir{ til::u8u16(line) };
+                    if (gitdir.is_relative())
+                    {
+                        gitdir = dir / gitdir;
+                    }
+                    headPath = std::move(gitdir) / L"HEAD";
+                }
+            }
+
+            if (!headPath.empty())
+            {
+                const auto head = _readGitLine(headPath);
+                static constexpr std::string_view refPrefix{ "ref: refs/heads/" };
+                if (head.starts_with(refPrefix))
+                {
+                    return til::u8u16(head.substr(refPrefix.size()));
+                }
+                if (head.starts_with("ref: "))
+                {
+                    return til::u8u16(head.substr(5));
+                }
+                if (head.size() >= 8)
+                {
+                    // Detached HEAD: show the short commit hash.
+                    return til::u8u16(head.substr(0, 8));
+                }
+                return {};
+            }
+
+            auto parent = dir.parent_path();
+            if (parent == dir)
+            {
+                return {};
+            }
+            dir = std::move(parent);
+        }
+    }
+
+    static std::wstring _projectDirectoryKey(std::wstring_view cwd)
+    {
+        if (cwd.empty())
+        {
+            return {};
+        }
+
+        try
+        {
+            auto normalized = std::filesystem::path{ cwd }.lexically_normal();
+            normalized.make_preferred();
+            auto key = normalized.wstring();
+            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+            return key;
+        }
+        catch (...)
+        {
+            auto key = std::wstring{ cwd };
+            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+            return key;
+        }
+    }
+
+    // Method Description:
+    // - Polls every tab for its git branch: a couple of small file reads per
+    //   tab, off the UI thread. This catches branch changes that don't move
+    //   the cwd (checkouts from another window, an editor, etc.).
+    void TerminalPage::_GitBranchTimerTick(const IInspectable&, const IInspectable&)
+    {
+        for (const auto& tab : _tabs)
+        {
+            _RefreshTabGitBranch(tab);
+        }
+    }
+
+    // Method Description:
+    // - Recomputes the git branch for the tab's active pane's cwd on a
+    //   background thread and publishes it onto the Tab, where the vertical
+    //   rail's row template binds it.
+    safe_void_coroutine TerminalPage::_RefreshTabGitBranch(winrt::TerminalApp::Tab tab)
+    {
+        std::wstring cwd;
+        const auto tabImpl{ _GetTabImpl(tab) };
+        if (tabImpl)
+        {
+            if (const auto control{ tabImpl->GetActiveTerminalControl() })
+            {
+                cwd = std::wstring{ control.WorkingDirectory() };
+            }
+        }
+
+        // A project's identity follows the active pane's live working
+        // directory. The server discovers/names directories centrally; once
+        // its refreshed list contains this cwd, move the tab into that filter
+        // and mirror the assignment back to web/mobile clients.
+        if (tabImpl && !cwd.empty())
+        {
+            const auto cwdKey{ _projectDirectoryKey(cwd) };
+            const auto project = std::find_if(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& candidate) {
+                return _projectDirectoryKey(candidate.Cwd) == cwdKey;
+            });
+
+            if (project != _bridgeProjects.end() && tab.ProjectId() != project->Id)
+            {
+                const auto previousProjectId{ tab.ProjectId() };
+                tabImpl->ProjectId(project->Id);
+
+                if (const auto control{ tabImpl->GetActiveTerminalControl() })
+                {
+                    if (const auto conn{ control.Connection() })
+                    {
+                        if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
+                        {
+                            conpty.SetBridgeProject(project->Id);
+                        }
+                    }
+                }
+
+                // If the user is looking at the project this focused tab just
+                // left, follow the tab to its new project. Otherwise just
+                // refresh the filtered rail in place.
+                const auto focused{ _GetFocusedTab() };
+                if (!_activeProjectId.empty() && _activeProjectId == previousProjectId && focused && focused == tab)
+                {
+                    _SelectProject(project->Id, project->Cwd);
+                }
+                else if (_tabRow)
+                {
+                    winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectFilter(_activeProjectId);
+                }
+            }
+        }
+
+        // Nothing to resolve and nothing to clear? Skip the thread hops.
+        if (cwd.empty() && tab.GitBranch().empty())
+        {
+            co_return;
+        }
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        const auto branch = _gitBranchForDirectory(std::move(cwd));
+
+        co_await wil::resume_foreground(dispatcher);
+
+        if (const auto page{ weakThis.get() })
+        {
+            if (const auto tabImpl{ page->_GetTabImpl(tab) })
+            {
+                tabImpl->GitBranch(winrt::hstring{ branch });
+            }
         }
     }
 
@@ -2151,6 +2482,14 @@ namespace winrt::TerminalApp::implementation
         if (fetched && page->_bridgeProjects != projects)
         {
             page->_bridgeProjects = std::move(projects);
+
+            // Project discovery is driven by live cwd changes. Remap tabs as
+            // soon as the refreshed directory list arrives instead of waiting
+            // for the next git-branch timer tick.
+            for (const auto& tab : page->_tabs)
+            {
+                page->_RefreshTabGitBranch(tab);
+            }
 
             // If the active project disappeared (deleted remotely), fall back
             // to "All"; _SelectProject rebuilds the strip either way.
@@ -2317,21 +2656,320 @@ namespace winrt::TerminalApp::implementation
         _RebuildProjectTabs();
 
         // If the focused tab isn't part of the newly selected project, move
-        // focus to the project's first tab.
+        // focus to the project's first tab. A newly created project has no
+        // tab yet, so selecting it also launches one in its directory.
         if (!projectId.empty())
         {
             const auto focused{ _GetFocusedTab() };
-            if (!focused || focused.ProjectId() != projectId)
+            auto foundProjectTab = false;
+            for (const auto& tab : _tabs)
             {
-                for (const auto& tab : _tabs)
+                if (tab.ProjectId() == projectId)
                 {
-                    if (tab.ProjectId() == projectId)
+                    foundProjectTab = true;
+                    if (!focused || focused.ProjectId() != projectId)
                     {
                         _SetFocusedTab(tab);
-                        break;
                     }
+                    break;
                 }
             }
+
+            if (!foundProjectTab && !projectCwd.empty())
+            {
+                NewTerminalArgs args;
+                args.StartingDirectory(projectCwd);
+                _OpenNewTerminalViaDropdown(args);
+            }
+        }
+    }
+
+    // Method Description:
+    // - Shows or hides the orchestrator panel. While open, the bridge status
+    //   timer keeps its status fresh and attaches the session's TermControl.
+    void TerminalPage::_ToggleOrchestratorPane()
+    {
+        _orchestratorPaneOpen = !_orchestratorPaneOpen;
+        OrchestratorPane().Visibility(_orchestratorPaneOpen ? Visibility::Visible : Visibility::Collapsed);
+
+        // Accent the right-edge toggle while the panel is open.
+        try
+        {
+            const auto accentStyle = Application::Current().Resources().Lookup(winrt::box_value(L"AccentButtonStyle")).try_as<WUX::Style>();
+            if (_orchestratorPaneOpen && accentStyle)
+            {
+                OrchestratorToggleButton().Style(accentStyle);
+            }
+            else
+            {
+                OrchestratorToggleButton().Style(nullptr);
+            }
+        }
+        CATCH_LOG();
+
+        if (_orchestratorPaneOpen)
+        {
+            _RefreshOrchestratorStatus();
+            if (_orchestratorControl)
+            {
+                _orchestratorControl.Focus(FocusState::Programmatic);
+            }
+        }
+    }
+
+    // Orchestrator pane resize: same handle mechanics as the vertical tab
+    // rail, mirrored for a right-docked pane (dragging left widens it). The
+    // pane's column is Auto-sized in the root grid, so the terminal content
+    // column reflows automatically as the pane width changes.
+    void TerminalPage::_SetOrchestratorPaneWidth(const double width)
+    {
+        const auto column{ OrchestratorColumn() };
+        const auto minWidth{ column.MinWidth() };
+        auto maxWidth{ column.MaxWidth() };
+
+        const auto rootWidth{ Root().ActualWidth() };
+        if (rootWidth > 0)
+        {
+            const auto occupied{ VerticalTabPane().ActualWidth() + OrchestratorResizeHandle().ActualWidth() };
+            const auto maxWidthWithContent{ std::max(minWidth, rootWidth - occupied - MinimumTerminalContentWidth) };
+            maxWidth = std::min(maxWidth, maxWidthWithContent);
+        }
+
+        const auto clampedWidth{ std::clamp(width, minWidth, maxWidth) };
+        column.Width(GridLengthHelper::FromValueAndType(clampedWidth, GridUnitType::Pixel));
+    }
+
+    void TerminalPage::_OrchestratorResizePointerEntered(const IInspectable&,
+                                                         const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        _SetVerticalTabResizeCursor(true);
+    }
+
+    void TerminalPage::_OrchestratorResizePointerExited(const IInspectable&,
+                                                        const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
+    {
+        if (!_resizingOrchestratorPane)
+        {
+            _SetVerticalTabResizeCursor(false);
+        }
+    }
+
+    void TerminalPage::_OrchestratorResizePointerPressed(const IInspectable& sender,
+                                                         const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        const auto resizeHandle{ sender.try_as<WUX::UIElement>() };
+        if (!resizeHandle)
+        {
+            return;
+        }
+
+        resizeHandle.CapturePointer(e.Pointer());
+        const auto point{ e.GetCurrentPoint(Root()) };
+        _orchestratorResizeStartX = point.Position().X;
+        _orchestratorResizeStartWidth = OrchestratorColumn().ActualWidth();
+        _resizingOrchestratorPane = true;
+        _SetVerticalTabResizeCursor(true);
+        e.Handled(true);
+    }
+
+    void TerminalPage::_OrchestratorResizePointerMoved(const IInspectable&,
+                                                       const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        if (!_resizingOrchestratorPane)
+        {
+            return;
+        }
+
+        const auto point{ e.GetCurrentPoint(Root()) };
+        _SetOrchestratorPaneWidth(_orchestratorResizeStartWidth + (_orchestratorResizeStartX - point.Position().X));
+        e.Handled(true);
+    }
+
+    void TerminalPage::_StopOrchestratorResize(const IInspectable& sender,
+                                               const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        if (const auto resizeHandle{ sender.try_as<WUX::UIElement>() })
+        {
+            resizeHandle.ReleasePointerCapture(e.Pointer());
+        }
+
+        if (_resizingOrchestratorPane)
+        {
+            _resizingOrchestratorPane = false;
+            _SetVerticalTabResizeCursor(false);
+            e.Handled(true);
+        }
+    }
+
+    void TerminalPage::_OrchestratorResizePointerReleased(const IInspectable& sender,
+                                                          const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopOrchestratorResize(sender, e);
+    }
+
+    void TerminalPage::_OrchestratorResizePointerCanceled(const IInspectable& sender,
+                                                          const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopOrchestratorResize(sender, e);
+    }
+
+    void TerminalPage::_OrchestratorResizePointerCaptureLost(const IInspectable& sender,
+                                                             const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        _StopOrchestratorResize(sender, e);
+    }
+
+    // Method Description:
+    // - Fetches /api/orchestrator from the terminal-web server on a
+    //   background thread and applies the result to the panel.
+    safe_void_coroutine TerminalPage::_RefreshOrchestratorStatus()
+    {
+        if (_orchestratorFetchInFlight.exchange(true))
+        {
+            co_return;
+        }
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        OrchestratorStatus status;
+        auto fetched = false;
+        auto reachable = false;
+        if (const auto response{ _projectServerRequest(L"GET", L"/api/orchestrator") })
+        {
+            // A pre-orchestrator server serves the SPA's index.html for
+            // unknown /api paths, so "reachable but unparseable" means the
+            // server is running an older build and needs a restart.
+            reachable = true;
+            WDJ::JsonObject obj{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), obj))
+            {
+                fetched = true;
+                status.State = obj.GetNamedString(L"state", L"stopped");
+                status.Agent = obj.GetNamedString(L"agent", L"");
+                status.SessionId = obj.GetNamedString(L"sessionId", L"");
+            }
+        }
+
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        page->_orchestratorFetchInFlight.store(false);
+
+        if (fetched)
+        {
+            page->_ApplyOrchestratorStatus(status);
+        }
+        else
+        {
+            page->OrchestratorStatusText().Text(reachable ? L"Server outdated — restart terminal-web" : L"Bridge server offline");
+            page->OrchestratorStatusDot().Fill(SolidColorBrush{ Colors::Gray() });
+        }
+    }
+
+    // Method Description:
+    // - Applies an orchestrator status snapshot to the panel: status line and
+    //   dot, header buttons, and attaching/detaching the session's control.
+    void TerminalPage::_ApplyOrchestratorStatus(const OrchestratorStatus& status)
+    {
+        const auto running = status.State == L"running";
+        const auto starting = status.State == L"starting";
+        const auto live = (running || starting) && !status.SessionId.empty();
+
+        const auto agentLabel = status.Agent == L"claude" ? winrt::hstring{ L"Claude Code" } :
+                                status.Agent == L"codex"  ? winrt::hstring{ L"Codex" } :
+                                                            status.Agent;
+        OrchestratorStatusText().Text(running  ? agentLabel + L" · running" :
+                                      starting ? agentLabel + L" · starting" :
+                                                 winrt::hstring{ L"Not running" });
+        OrchestratorStatusDot().Fill(SolidColorBrush{ running  ? ColorHelper::FromArgb(255, 16, 185, 129) :
+                                                      starting ? ColorHelper::FromArgb(255, 251, 191, 36) :
+                                                                 Colors::Gray() });
+
+        OrchestratorRestartButton().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
+        OrchestratorStopButton().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
+        OrchestratorEmptyState().Visibility(live ? Visibility::Collapsed : Visibility::Visible);
+        OrchestratorContent().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
+
+        if (live)
+        {
+            if (_orchestratorAttachedSessionId != status.SessionId)
+            {
+                _AttachOrchestratorSession(status.SessionId);
+            }
+        }
+        else if (_orchestratorAttachedSessionId != winrt::hstring{})
+        {
+            _DetachOrchestratorSession();
+        }
+
+        _orchestratorStatus = status;
+    }
+
+    // Method Description:
+    // - Builds a TermControl over a WebSessionConnection attached to the
+    //   orchestrator session and hosts it in the panel. Default-profile
+    //   settings give it the user's font/theme; the connection streams the
+    //   shared server-side session, so web/mobile/native all see one TUI.
+    void TerminalPage::_AttachOrchestratorSession(const winrt::hstring& sessionId)
+    {
+        _DetachOrchestratorSession();
+
+        try
+        {
+            NewTerminalArgs defaultArgs;
+            const auto profile{ _settings.GetProfileForArgs(defaultArgs) };
+            const auto controlSettings{ Settings::TerminalSettings::CreateWithProfile(_settings, profile) };
+            TerminalConnection::WebSessionConnection connection{ sessionId };
+            const auto control{ _CreateNewControlAndContent(controlSettings, connection) };
+
+            OrchestratorContent().Children().Clear();
+            OrchestratorContent().Children().Append(control);
+            _orchestratorControl = control;
+            _orchestratorConnection = connection;
+            _orchestratorAttachedSessionId = sessionId;
+            control.Focus(FocusState::Programmatic);
+        }
+        CATCH_LOG();
+    }
+
+    void TerminalPage::_DetachOrchestratorSession()
+    {
+        if (_orchestratorConnection)
+        {
+            try
+            {
+                _orchestratorConnection.Close();
+            }
+            CATCH_LOG();
+        }
+        _orchestratorConnection = nullptr;
+        _orchestratorControl = nullptr;
+        _orchestratorAttachedSessionId = {};
+        OrchestratorContent().Children().Clear();
+    }
+
+    // Method Description:
+    // - POSTs an orchestrator command (start/stop/restart) to the server on a
+    //   background thread, then refreshes the panel.
+    safe_void_coroutine TerminalPage::_PostOrchestratorCommand(std::wstring path, std::string body)
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        std::ignore = _projectServerRequest(L"POST", path, body);
+        co_await wil::resume_foreground(dispatcher);
+
+        if (const auto page{ weakThis.get() })
+        {
+            page->_RefreshOrchestratorStatus();
         }
     }
 
@@ -2970,6 +3608,10 @@ namespace winrt::TerminalApp::implementation
         {
             winrt::get_self<implementation::TabRowControl>(_tabRow)->NotifyTabTitleUpdated(tab);
         }
+
+        // Shells that emit title changes do so right after changing directory,
+        // so this keeps the tab's git branch in step with `cd`.
+        _RefreshTabGitBranch(tab);
 
         if (tab == _GetFocusedTab())
         {
@@ -4026,6 +4668,12 @@ namespace winrt::TerminalApp::implementation
         if (bridge == L"connected")
         {
             return hstring{ title + L" \x2022 Bridge: connected" };
+        }
+        if (bridge == L"failing")
+        {
+            // The spawn owner keeps watching its server child die on startup;
+            // the child's output is in tools\terminal-web\.terminal-web-server.log.
+            return hstring{ title + L" \x2022 Bridge: server error (see .terminal-web-server.log)" };
         }
         if (bridge == L"connecting")
         {

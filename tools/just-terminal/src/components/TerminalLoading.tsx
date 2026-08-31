@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
 import type { TerminalSessionSummary } from "../types";
-import { colors, font, radius } from "../theme";
-import { launchGlyph, launchLabel } from "./icons";
+import { colors, font } from "../theme";
+import { launchLabel } from "./icons";
 
 // Derive a launch key (e.g. "pwsh", "wsl", "claude") from a session's shell path.
 function launchKeyFor(session?: TerminalSessionSummary): string {
@@ -13,20 +13,21 @@ function launchKeyFor(session?: TerminalSessionSummary): string {
   return base.replace(/\.(exe|cmd|bat|com)$/i, "").toLowerCase();
 }
 
-const BAR_WIDTHS = ["100%", "82%", "60%"] as const;
-
 // Themed placeholder shown over the terminal while a freshly-created session
-// connects and prints its first bytes. The glyph/label track the action being
-// launched (Claude / Codex / Hermes / PowerShell / WSL …) so the wait reads as
-// "starting <thing>" rather than a blank screen.
+// connects and prints its first bytes: a Cascadia Mono ">_" prompt with a
+// blinking cursor on the Campbell background — exactly what Windows Terminal
+// looks like the instant before a shell paints. The label tracks the action
+// being launched (Claude / Codex / Hermes / PowerShell / WSL …) so the wait
+// reads as "starting <thing>" rather than a blank screen.
 export function TerminalLoading({ session }: { session?: TerminalSessionSummary }) {
   const pulse = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: 720, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 0, duration: 720, useNativeDriver: true }),
+        // ~600ms per phase matches Windows Terminal's default caret blink rate.
+        Animated.timing(pulse, { toValue: 1, duration: 600, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 600, useNativeDriver: true }),
       ])
     );
     loop.start();
@@ -34,21 +35,17 @@ export function TerminalLoading({ session }: { session?: TerminalSessionSummary 
   }, [pulse]);
 
   const key = launchKeyFor(session);
-  const shimmer = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.85] });
-  const glow = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
+  // Hard on/off blink (no fade) so the cursor reads as a terminal caret.
+  const blink = pulse.interpolate({ inputRange: [0, 0.5, 0.5001, 1], outputRange: [1, 1, 0, 0] });
 
   return (
     <View style={styles.overlay} pointerEvents="none">
       <View style={styles.center}>
-        <Animated.View style={[styles.iconWrap, { opacity: glow }]}>
-          {launchGlyph(key, 34, colors.primary)}
-        </Animated.View>
-        <Text style={styles.label}>Starting {launchLabel(key)}…</Text>
-        <View style={styles.bars}>
-          {BAR_WIDTHS.map((width, index) => (
-            <Animated.View key={index} style={[styles.bar, { width, opacity: shimmer }]} />
-          ))}
+        <View style={styles.prompt}>
+          <Text style={styles.promptGlyph}>&gt;</Text>
+          <Animated.Text style={[styles.promptGlyph, styles.cursor, { opacity: blink }]}>_</Animated.Text>
         </View>
+        <Text style={styles.label}>Starting {launchLabel(key)}…</Text>
       </View>
     </View>
   );
@@ -67,35 +64,27 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   center: {
-    width: "100%",
-    maxWidth: 260,
     alignItems: "center",
     paddingHorizontal: 24,
   },
-  iconWrap: {
-    width: 64,
-    height: 64,
-    borderRadius: radius.lg,
+  prompt: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderWidth: 1,
-    marginBottom: 18,
+    marginBottom: 16,
+  },
+  promptGlyph: {
+    // Campbell's default foreground is what the shell prompt renders in.
+    color: colors.secondaryForeground,
+    fontSize: 40,
+    fontFamily: font.mono,
+  },
+  cursor: {
+    color: colors.primary,
+    marginLeft: 2,
   },
   label: {
-    color: colors.foreground,
-    fontSize: 15,
-    fontFamily: font.semibold,
-    marginBottom: 20,
-  },
-  bars: {
-    width: "100%",
-    gap: 10,
-  },
-  bar: {
-    height: 10,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surfaceHi,
+    color: colors.secondaryForeground,
+    fontSize: 13,
+    fontFamily: font.regular,
   },
 });

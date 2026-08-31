@@ -1,5 +1,8 @@
 export type SessionStatus = "running" | "exited";
 export type SessionSource = "managed" | "bridged";
+export type TerminalAgentId = "claude" | "codex" | "hermes";
+export type TerminalAgentSource = "profile" | "command" | "screen" | "osc";
+export type TerminalAgentActivity = "idle" | "working" | "awaiting";
 
 export interface TerminalProfile {
   id: string;
@@ -8,6 +11,8 @@ export interface TerminalProfile {
   args: string[];
   group: "shell" | "agent" | "custom";
   description?: string;
+  agent?: TerminalAgentId;
+  terminalProfileGuid?: string;
 }
 
 export interface TerminalProject {
@@ -15,6 +20,8 @@ export interface TerminalProject {
   name: string;
   cwd: string;
   createdAt: string;
+  /** Present for projects inferred from a live terminal's current directory. */
+  automatic?: boolean;
 }
 
 export interface RecentProject {
@@ -30,6 +37,13 @@ export interface TerminalSessionSummary {
   args: string[];
   cwd: string;
   projectId?: string;
+  /** Terminal Assist classification only; real ACP sessions use the ACP state contract. */
+  agent?: TerminalAgentId;
+  agentSource?: TerminalAgentSource;
+  agentActivity?: TerminalAgentActivity;
+  acpSessionId?: string;
+  /** Special sessions (the orchestrator) are hidden from the normal session list. */
+  kind?: "orchestrator";
   source: SessionSource;
   pid?: number;
   status: SessionStatus;
@@ -97,6 +111,17 @@ export interface BridgeCommandInfo {
   claude?: string;
 }
 
+export type OrchestratorAgent = "claude" | "codex";
+
+export interface OrchestratorStatus {
+  state: "stopped" | "starting" | "running";
+  agent?: OrchestratorAgent;
+  sessionId?: string;
+  startedAt?: string;
+  lastExit?: { exitCode?: number; signal?: number; at: string };
+  availableAgents: OrchestratorAgent[];
+}
+
 export interface BootstrapPayload {
   sessions: TerminalSessionSummary[];
   profiles: TerminalProfile[];
@@ -105,6 +130,7 @@ export interface BootstrapPayload {
   projects: TerminalProject[];
   server: ServerInfo;
   bridgeCommands: BridgeCommandInfo;
+  orchestrator?: OrchestratorStatus;
 }
 
 export interface CreateSessionOptions {
@@ -126,9 +152,12 @@ export type ServerMessage =
       projects: TerminalProject[];
       server: ServerInfo;
       bridgeCommands: BridgeCommandInfo;
+      orchestrator?: OrchestratorStatus;
     }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
+  | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }
+  | { type: "orchestrator"; orchestrator: OrchestratorStatus }
   | { type: "notify"; title?: string; body?: string; sound?: string }
   | { type: "session"; session: TerminalSessionSummary }
   | { type: "snapshot"; sessionId: string; screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary }
@@ -141,7 +170,10 @@ export type ServerMessage =
   | { type: "error"; message: string; detail?: string };
 
 export type ClientMessage =
-  | { type: "subscribe"; sessionId: string }
+  // Slots let one client watch several sessions at once (main terminal +
+  // orchestrator panel); subscribing replaces only the caller's slot.
+  | { type: "subscribe"; sessionId: string; slot?: string }
+  | { type: "unsubscribe"; slot?: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
   | ({ type: "create" } & CreateSessionOptions)

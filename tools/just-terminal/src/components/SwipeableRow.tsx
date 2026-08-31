@@ -71,11 +71,28 @@ export function SwipeableRow({ children, onDelete, enabled = true, onSwipeStateC
     outputRange: [1, 0.35, 0],
     extrapolate: "clamp",
   });
+  // The label tracks the drag toward the commit point — it drifts in and grows
+  // to full size exactly at THRESHOLD, so "will release delete?" is readable
+  // from the motion itself, not just the fill's opacity.
+  const deleteShift = translateX.interpolate({
+    inputRange: [-THRESHOLD, 0],
+    outputRange: [0, 16],
+    extrapolate: "clamp",
+  });
+  const deleteScale = translateX.interpolate({
+    inputRange: [-THRESHOLD, -24, 0],
+    outputRange: [1, 0.86, 0.86],
+    extrapolate: "clamp",
+  });
 
   return (
     <View style={styles.wrap}>
       <Animated.View style={[styles.deleteLayer, { opacity: deleteOpacity }]} pointerEvents="none">
-        <Text style={styles.deleteText}>Delete</Text>
+        <Animated.Text
+          style={[styles.deleteText, { transform: [{ translateX: deleteShift }, { scale: deleteScale }] }]}
+        >
+          Delete
+        </Animated.Text>
       </Animated.View>
       <Animated.View style={{ transform: [{ translateX }] }} {...panResponder.panHandlers}>
         {children}
@@ -100,10 +117,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingRight: 22,
   },
+  // Fluent BodyStrong on the critical fill — sentence case, no tracking.
   deleteText: {
     color: colors.destructiveForeground,
-    fontFamily: font.bold,
-    fontSize: 13.5,
-    letterSpacing: 0.3,
+    fontFamily: font.semibold,
+    fontSize: 14,
   },
 });

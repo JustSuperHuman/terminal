@@ -923,6 +923,8 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             return L"connected";
         case TerminalBridge::Status::Connecting:
             return L"connecting";
+        case TerminalBridge::Status::ServerFailing:
+            return L"failing";
         default:
             return L"disabled";
         }

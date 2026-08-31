@@ -80,7 +80,7 @@ async function ensureMicPermission(): Promise<boolean> {
   }
   const result = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO, {
     title: "Microphone access",
-    message: "JustTerminal transcribes your voice on-device to type into the command line.",
+    message: "Terminal Companion transcribes your voice on-device to type into the command line.",
     buttonPositive: "Allow",
     buttonNegative: "Not now",
   });

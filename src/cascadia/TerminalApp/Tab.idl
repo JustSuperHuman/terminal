@@ -9,6 +9,9 @@ namespace TerminalApp
     {
         String Title { get; };
         String Icon { get; };
+        // Git branch of the active pane's current working directory ("" when
+        // the directory isn't inside a git repository).
+        String GitBranch { get; };
         Boolean ReadOnly { get; };
         Microsoft.Terminal.Settings.Model.TabCloseButtonVisibility CloseButtonVisibility { get; set; };
 

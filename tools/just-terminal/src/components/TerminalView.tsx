@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-import { Pressable, StyleSheet, Text, type LayoutChangeEvent, View } from "react-native";
+import { Animated, Easing, Pressable, StyleSheet, Text, type LayoutChangeEvent, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { terminalSocket, type SocketStatus } from "../lib/socket";
 import type { ServerMessage, TerminalSessionSummary } from "../types";
 import { TERMINAL_HTML } from "../terminalHtml";
-import { colors, font, radius } from "../theme";
+import { colors, font, glass, radius } from "../theme";
+import { Acrylic } from "./Acrylic";
 import { TerminalLoading } from "./TerminalLoading";
 
 // Hard cap on how long the cold-start skeleton lingers if a session never prints.
@@ -66,6 +67,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
   // the previous frame stays visible until the next snapshot swaps atomically,
   // so a loading skeleton would just flash over real content.
   const [rendered, setRendered] = useState(false);
+  // Jump-to-latest fades in/out instead of popping; kept mounted while the
+  // exit fade plays.
+  const [jumpMounted, setJumpMounted] = useState(false);
+  const jumpFade = useRef(new Animated.Value(0)).current;
 
   const postToWeb = useCallback((message: Record<string, unknown>) => {
     if (!webRef.current) {
@@ -197,6 +202,30 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       clearFitTimers();
     };
   }, [clearFitTimers]);
+
+  const showJump = scroll.canScroll && !scroll.atBottom;
+  useEffect(() => {
+    if (showJump) {
+      setJumpMounted(true);
+      Animated.timing(jumpFade, {
+        toValue: 1,
+        duration: 150,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+    Animated.timing(jumpFade, {
+      toValue: 0,
+      duration: 150,
+      easing: Easing.in(Easing.quad),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) {
+        setJumpMounted(false);
+      }
+    });
+  }, [showJump, jumpFade]);
 
   useImperativeHandle(
     ref,
@@ -368,10 +397,18 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         onRenderProcessGone={onWebViewProcessGone}
       />
 
-      {scroll.canScroll && !scroll.atBottom ? (
-        <Pressable style={({ pressed }) => [styles.jump, pressed && styles.jumpPressed]} onPress={() => postToWeb({ type: "scrollToBottom" })} hitSlop={8}>
-          <Text style={styles.jumpText}>↓ Latest</Text>
-        </Pressable>
+      {jumpMounted ? (
+        <Animated.View style={[styles.jumpWrap, { opacity: jumpFade }]} pointerEvents={showJump ? "auto" : "none"}>
+          <Pressable
+            style={({ pressed }) => [styles.jump, pressed && styles.jumpPressed]}
+            onPress={() => postToWeb({ type: "scrollToBottom" })}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel="Jump to latest output"
+          >
+            <Text style={styles.jumpText}>↓ Latest</Text>
+          </Pressable>
+        </Animated.View>
       ) : null}
 
       {/* Cold-start skeleton only: first-ever paint or a post-crash blank page.
@@ -382,15 +419,18 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       {/* Informative (non-blocking) pill while the socket is actually down and
           retrying. "idle" is an intentional disconnect — no pill. */}
       {socketStatus === "connecting" || socketStatus === "closed" ? (
-        <View style={styles.reconnect} pointerEvents="none">
-          <Text style={styles.reconnectText}>Reconnecting…</Text>
+        <View style={styles.statusPill} pointerEvents="none" accessibilityLiveRegion="polite">
+          <Acrylic />
+          <View style={[styles.statusDot, styles.reconnectDot]} />
+          <Text style={styles.statusText}>Reconnecting…</Text>
         </View>
       ) : null}
 
       {socketStatus === "open" && session?.status === "exited" ? (
-        <View style={styles.exited} pointerEvents="none">
-          <View style={styles.exitedDot} />
-          <Text style={styles.exitedText}>
+        <View style={[styles.statusPill, styles.exited]} pointerEvents="none" accessibilityLiveRegion="polite">
+          <Acrylic />
+          <View style={[styles.statusDot, styles.exitedDot]} />
+          <Text style={styles.statusText}>
             Session ended{typeof session.exitCode === "number" ? ` · exit ${session.exitCode}` : ""}
           </Text>
         </View>
@@ -408,20 +448,23 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.terminal,
   },
-  jump: {
+  jumpWrap: {
     position: "absolute",
     bottom: 12,
     right: 12,
     zIndex: 1,
+    shadowColor: "#000",
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  jump: {
+    // Filled accent button (WinUI dark: light accent fill, near-black text).
     backgroundColor: colors.primary,
-    borderRadius: radius.pill,
+    borderRadius: radius.sm,
     paddingHorizontal: 14,
     paddingVertical: 8,
-    shadowColor: "#000",
-    shadowOpacity: 0.35,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 4,
+    elevation: 3,
   },
   jumpPressed: {
     backgroundColor: colors.primaryDim,
@@ -429,50 +472,47 @@ const styles = StyleSheet.create({
   jumpText: {
     color: colors.primaryForeground,
     fontSize: 12,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
-  reconnect: {
+  // Shared state pill: acrylic like the rest of the floating chrome (a solid
+  // card over live output read heavier than the toast/command bar), with a
+  // semantic-hue dot so the state reads before the text does.
+  statusPill: {
     position: "absolute",
     top: 10,
     right: 10,
     zIndex: 2,
-    backgroundColor: colors.surface,
-    borderColor: colors.borderStrong,
-    borderWidth: 1,
-    borderRadius: radius.pill,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-  },
-  reconnectText: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.semibold,
-  },
-  exited: {
-    position: "absolute",
-    top: 10,
-    // Clears the floating menu button that overlays the terminal's top-left.
-    left: 58,
-    zIndex: 2,
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
-    backgroundColor: colors.surface,
-    borderColor: colors.borderStrong,
+    // Clips the Acrylic backing to the rounded corners.
+    overflow: "hidden",
+    borderColor: glass.border,
     borderWidth: 1,
-    borderRadius: radius.pill,
-    paddingHorizontal: 12,
+    borderRadius: radius.sm,
+    paddingHorizontal: 10,
     paddingVertical: 5,
   },
-  exitedDot: {
+  exited: {
+    right: undefined,
+    // Clears the floating menu button that overlays the terminal's top-left.
+    left: 60,
+  },
+  statusDot: {
     width: 7,
     height: 7,
     borderRadius: 4,
+  },
+  reconnectDot: {
+    // Caution amber: transient trouble, not a dead session.
+    backgroundColor: colors.accentAmber,
+  },
+  exitedDot: {
     backgroundColor: colors.destructive,
   },
-  exitedText: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.semibold,
+  statusText: {
+    color: colors.secondaryForeground,
+    fontSize: 12,
+    fontFamily: font.regular,
   },
 });

@@ -51,7 +51,7 @@ export function BottomSheet({ visible, title, onClose, children }: BottomSheetPr
   const translateY = progress.interpolate({ inputRange: [0, 1], outputRange: [sheetH + insets.bottom, 0] });
 
   return (
-    <View style={StyleSheet.absoluteFill}>
+    <View style={[StyleSheet.absoluteFill, styles.overlay]}>
       <Animated.View style={[StyleSheet.absoluteFill, styles.scrim, { opacity: progress }]}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
       </Animated.View>
@@ -63,7 +63,13 @@ export function BottomSheet({ visible, title, onClose, children }: BottomSheetPr
         {title ? (
           <View style={styles.head}>
             <Text style={styles.title}>{title}</Text>
-            <Pressable onPress={onClose} hitSlop={10} style={({ pressed }) => [styles.close, pressed && styles.closePressed]}>
+            <Pressable
+              onPress={onClose}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+              style={({ pressed }) => [styles.close, pressed && styles.closePressed]}
+            >
               <Text style={styles.closeGlyph}>✕</Text>
             </Pressable>
           </View>
@@ -75,6 +81,13 @@ export function BottomSheet({ visible, title, onClose, children }: BottomSheetPr
 }
 
 const styles = StyleSheet.create({
+  overlay: {
+    // Bottom sheets may be mounted beside the terminal WebView rather than
+    // inside a native Modal. Keep the whole interaction layer above that
+    // surface on both iOS and Android/Fabric.
+    zIndex: 100,
+    elevation: 100,
+  },
   scrim: {
     backgroundColor: colors.overlay,
   },
@@ -108,11 +121,11 @@ const styles = StyleSheet.create({
   title: {
     color: colors.foreground,
     fontSize: 15,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   close: {
-    width: 32,
-    height: 32,
+    width: 36,
+    height: 36,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: radius.sm,

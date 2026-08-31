@@ -1,4 +1,11 @@
-import type { BootstrapPayload, CreateSessionOptions, TerminalProject, TerminalSessionSummary } from "./types";
+import type {
+  BootstrapPayload,
+  CreateSessionOptions,
+  OrchestratorAgent,
+  OrchestratorStatus,
+  TerminalProject,
+  TerminalSessionSummary
+} from "./types";
 import { accessTokenHeaders, withAccessToken } from "./access-token";
 
 export class ApiError extends Error {
@@ -54,6 +61,25 @@ export async function createProject(name: string, cwd: string): Promise<Terminal
       method: "POST",
       headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
       body: JSON.stringify({ name, cwd })
+    })
+  );
+}
+
+export async function startOrchestrator(agent: OrchestratorAgent, restart = false): Promise<OrchestratorStatus> {
+  return parseResponse<OrchestratorStatus>(
+    await fetch(withAccessToken("/api/orchestrator/start"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
+      body: JSON.stringify({ agent, restart })
+    })
+  );
+}
+
+export async function stopOrchestrator(): Promise<OrchestratorStatus> {
+  return parseResponse<OrchestratorStatus>(
+    await fetch(withAccessToken("/api/orchestrator/stop"), {
+      method: "POST",
+      headers: accessTokenHeaders()
     })
   );
 }

@@ -3,6 +3,8 @@
   "scripts": {
     "build": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./build-dev-terminal.ps1",
     "update": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/update-dev-terminal.ps1",
+    "launch": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/launch-dev-terminal.ps1",
+    "register": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/register-dev-terminal.ps1",
     "bridge": "bun run --cwd ./tools/terminal-web dev",
     "terminal-web": "npm --prefix ./tools/terminal-web run dev",
     "terminal-web:bridge": "npm --prefix ./tools/terminal-web run bridge",

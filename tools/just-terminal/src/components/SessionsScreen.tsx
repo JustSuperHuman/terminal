@@ -3,6 +3,7 @@ import {
   Animated,
   BackHandler,
   Easing,
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,13 +12,13 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import type { AcpBridgeState } from "../acpTypes";
 import type { TerminalProfile, TerminalSessionSummary } from "../types";
-import { resolveQuickLaunches } from "../lib/launchers";
 import { loadSortRecent, saveSortRecent } from "../lib/storage";
-import { colors, font, radius } from "../theme";
+import { colors, font, radius, withAlpha } from "../theme";
 import { BottomSheet } from "./BottomSheet";
 import { SwipeableRow } from "./SwipeableRow";
-import { agentGlyph } from "./icons";
+import { ClaudeIcon, CodexIcon, launchGlyph } from "./icons";
 
 export interface CreateSpec {
   profileId?: string;
@@ -35,7 +36,9 @@ interface SessionsScreenProps {
   serverHost?: string;
   activeCwd?: string;
   recentCwds: string[];
+  acpState?: AcpBridgeState;
   onClose: () => void;
+  onOpenAgentWorkspace: () => void;
   onSelect: (id: string) => void;
   onCreate: (spec?: CreateSpec) => void;
   onKill: (id: string) => void;
@@ -47,6 +50,27 @@ interface SessionsScreenProps {
 
 function shellName(session: TerminalSessionSummary) {
   return session.shell.split(/[\\/]/).pop() ?? session.shell;
+}
+
+function agentName(session: TerminalSessionSummary): string | undefined {
+  if (session.agent === "claude") return "Claude";
+  if (session.agent === "codex") return "Codex";
+  if (session.agent === "hermes") return "Hermes";
+  return undefined;
+}
+
+/**
+ * The row subtitle for an agent session: who is running and what they are
+ * doing. The transport ("Terminal Assist" vs. ACP) is deliberately not named —
+ * it is not a thing the person scanning this list has to think about.
+ */
+function sessionKind(session: TerminalSessionSummary): string | undefined {
+  const name = agentName(session);
+  if (!name) return undefined;
+  if (session.status !== "running") return name;
+  if (session.agentActivity === "awaiting") return `${name} · Needs you`;
+  if (session.agentActivity === "working") return `${name} · Working`;
+  return name;
 }
 
 function timeLabel(value: string) {
@@ -80,7 +104,7 @@ function searchable(value?: string | number | string[]): string {
 }
 
 function sessionMatches(session: TerminalSessionSummary, query: string): boolean {
-  return [session.title, session.shell, session.args, session.cwd, session.source, session.status, session.pid].some(
+  return [session.title, session.shell, session.args, session.cwd, session.agent, session.source, session.status, session.pid].some(
     (value) => searchable(value).includes(query)
   );
 }
@@ -90,12 +114,6 @@ function profileMatches(profile: TerminalProfile, query: string): boolean {
     searchable(value).includes(query)
   );
 }
-
-// Agents are surfaced through Quick launch; the launcher lists shells/custom only.
-const profileGroups: Array<{ id: TerminalProfile["group"]; label: string }> = [
-  { id: "shell", label: "Shells" },
-  { id: "custom", label: "Custom" },
-];
 
 interface SessionGroup {
   key: string;
@@ -113,7 +131,9 @@ export function SessionsScreen({
   serverHost,
   activeCwd,
   recentCwds,
+  acpState,
   onClose,
+  onOpenAgentWorkspace,
   onSelect,
   onCreate,
   onKill,
@@ -124,6 +144,8 @@ export function SessionsScreen({
 }: SessionsScreenProps) {
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
+  // WinUI TextBox focus cue: the search box grows a 2px accent underline.
+  const [searchFocused, setSearchFocused] = useState(false);
   const [editingId, setEditingId] = useState<string | undefined>();
   const [editingTitle, setEditingTitle] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
@@ -172,13 +194,18 @@ export function SessionsScreen({
   }, [visible, onClose]);
 
   useEffect(() => {
-    if (!visible) {
-      setEditingId(undefined);
-      setEditingTitle("");
-      setCwdDraft("");
-      setCwdSheetOpen(false);
-      setQuery("");
+    if (visible) {
+      // This screen covers the composer, which was holding the keyboard open.
+      // Leaving it up would hide half the session list; tapping Search brings
+      // it back when the user actually wants to type.
+      Keyboard.dismiss();
+      return;
     }
+    setEditingId(undefined);
+    setEditingTitle("");
+    setCwdDraft("");
+    setCwdSheetOpen(false);
+    setQuery("");
   }, [visible]);
 
   function toggleSortRecent() {
@@ -190,6 +217,17 @@ export function SessionsScreen({
   }
 
   const normalizedQuery = query.trim().toLowerCase();
+  const showAgentLauncher = !normalizedQuery || "agent workspace claude codex acp".includes(normalizedQuery);
+  const activeAgentSessions = acpState?.sessions.filter((session) => session.state !== "closed").length ?? 0;
+  const pendingAgentRequests = acpState?.requests.length ?? 0;
+  const readyAgents = acpState?.agents.filter((agent) => agent.state === "ready").length ?? 0;
+  const agentWorkspaceSubtitle = pendingAgentRequests > 0
+    ? `${pendingAgentRequests} request${pendingAgentRequests === 1 ? "" : "s"} need input`
+    : activeAgentSessions > 0
+      ? `${activeAgentSessions} agent session${activeAgentSessions === 1 ? "" : "s"}`
+      : readyAgents > 0
+        ? `${readyAgents} agent${readyAgents === 1 ? "" : "s"} ready`
+        : "Claude and Codex · structured ACP sessions";
 
   const visibleSessions = useMemo(() => {
     const alive = sessions.filter((session) => !hiddenIds.includes(session.id));
@@ -233,29 +271,10 @@ export function SessionsScreen({
     onKill(id);
   }
 
-  const launchSections = useMemo(
-    () =>
-      profileGroups
-        .map((group) => ({
-          ...group,
-          profiles: profiles.filter(
-            (profile) =>
-              (profile.group ?? "shell") === group.id && (!normalizedQuery || profileMatches(profile, normalizedQuery))
-          ),
-        }))
-        .filter((group) => group.profiles.length > 0),
+  const availableProfiles = useMemo(
+    () => profiles.filter((profile) => !normalizedQuery || profileMatches(profile, normalizedQuery)),
     [profiles, normalizedQuery]
   );
-
-  const availableQuickLaunches = useMemo(() => {
-    const entries = resolveQuickLaunches(profiles);
-    if (!normalizedQuery) {
-      return entries;
-    }
-    return entries.filter((entry) =>
-      [entry.label, entry.shell, entry.args].some((value) => searchable(value).includes(normalizedQuery))
-    );
-  }, [profiles, normalizedQuery]);
 
   function commitRename(id: string) {
     if (editingTitle.trim()) {
@@ -330,10 +349,10 @@ export function SessionsScreen({
         </Pressable>
       </View>
 
-      {/* Pill search, like the desktop sidebar filter: matches title, shell,
-          args, cwd, source, status and pid. */}
+      {/* WinUI search box, like the desktop sidebar filter: matches title,
+          shell, args, cwd, source, status and pid. */}
       <View style={styles.searchWrap}>
-        <View style={styles.searchPill}>
+        <View style={[styles.searchBox, searchFocused && styles.searchBoxFocused]}>
           <Text style={styles.searchIcon}>⌕</Text>
           <TextInput
             value={query}
@@ -343,6 +362,8 @@ export function SessionsScreen({
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="search"
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
             style={styles.searchInput}
           />
           {query ? (
@@ -351,7 +372,7 @@ export function SessionsScreen({
             </Pressable>
           ) : null}
         </View>
-        {normalizedQuery ? (
+        {normalizedQuery && visibleSessions.length > 0 ? (
           <Text style={styles.searchCount}>
             {visibleSessions.length} match{visibleSessions.length === 1 ? "" : "es"}
           </Text>
@@ -364,8 +385,53 @@ export function SessionsScreen({
         keyboardShouldPersistTaps="handled"
         scrollEnabled={!rowSwiping}
       >
+        {showAgentLauncher ? (
+          <Pressable
+            onPress={onOpenAgentWorkspace}
+            accessibilityRole="button"
+            accessibilityLabel={`Open Agent workspace. ${agentWorkspaceSubtitle}`}
+            style={({ pressed }) => [
+              styles.agentWorkspaceRow,
+              pendingAgentRequests > 0 && styles.agentWorkspaceAttention,
+              pressed && styles.agentWorkspacePressed,
+            ]}
+          >
+            <View style={styles.agentWorkspaceIcons} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+              <View style={[styles.agentWorkspaceIcon, styles.agentWorkspaceIconBack]}><ClaudeIcon size={19} /></View>
+              <View style={[styles.agentWorkspaceIcon, styles.agentWorkspaceIconFront]}><CodexIcon size={19} /></View>
+            </View>
+            <View style={styles.agentWorkspaceCopy}>
+              <Text style={styles.agentWorkspaceTitle}>Agent workspace</Text>
+              <Text
+                style={[styles.agentWorkspaceSubtitle, pendingAgentRequests > 0 && styles.agentWorkspaceSubtitleAttention]}
+                numberOfLines={1}
+              >
+                {agentWorkspaceSubtitle}
+              </Text>
+            </View>
+            {pendingAgentRequests > 0 ? (
+              <View style={styles.agentRequestBadge}>
+                <Text style={styles.agentRequestBadgeText}>{pendingAgentRequests > 99 ? "99+" : pendingAgentRequests}</Text>
+              </View>
+            ) : null}
+            <Text style={styles.agentWorkspaceChevron}>›</Text>
+          </Pressable>
+        ) : null}
+
         {visibleSessions.length === 0 ? (
-          <Text style={styles.empty}>{normalizedQuery ? "No matching sessions" : "No sessions yet"}</Text>
+          // Empty / search-miss state: glyph + title + a recovery hint, centred
+          // like a WinUI InfoBar-less empty view.
+          <View style={styles.empty}>
+            <Text style={styles.emptyGlyph}>{normalizedQuery ? "⌕" : ">_"}</Text>
+            <Text style={styles.emptyTitle}>
+              {normalizedQuery ? `No matches for “${query.trim()}”` : "No sessions yet"}
+            </Text>
+            <Text style={styles.emptyHint}>
+              {normalizedQuery
+                ? "Search covers titles, shells, paths and PIDs."
+                : "Start one from a profile below, or tap +."}
+            </Text>
+          </View>
         ) : (
           sessionGroups.map((group) => (
             <View key={group.key} style={styles.projectGroup}>
@@ -387,6 +453,7 @@ export function SessionsScreen({
                 const unreadCount = unread[session.id] ?? 0;
                 const editing = editingId === session.id;
                 const running = session.status === "running";
+                const kind = sessionKind(session);
                 return (
                   <SwipeableRow
                     key={session.id}
@@ -395,6 +462,9 @@ export function SessionsScreen({
                     onSwipeStateChange={setRowSwiping}
                   >
                     <View style={[styles.sessionRow, selected && styles.sessionRowActive]}>
+                      {/* WinUI selection indicator: the vertically-centered
+                          accent pill on the row's left edge. */}
+                      {selected && !editing ? <View style={styles.selectionPill} /> : null}
                       {editing ? (
                         <View style={styles.editRow}>
                           <TextInput
@@ -405,22 +475,45 @@ export function SessionsScreen({
                             placeholderTextColor={colors.faint}
                             onSubmitEditing={() => commitRename(session.id)}
                           />
-                          <Pressable onPress={() => commitRename(session.id)} hitSlop={8} style={styles.iconBtn}>
+                          <Pressable
+                            onPress={() => commitRename(session.id)}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Save name"
+                            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+                          >
                             <Text style={styles.iconGlyphPrimary}>✓</Text>
                           </Pressable>
-                          <Pressable onPress={() => setEditingId(undefined)} hitSlop={8} style={styles.iconBtn}>
+                          <Pressable
+                            onPress={() => setEditingId(undefined)}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Cancel rename"
+                            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
+                          >
                             <Text style={styles.iconGlyph}>✕</Text>
                           </Pressable>
                         </View>
                       ) : (
                         <>
-                          <Pressable style={styles.sessionMain} onPress={() => onSelect(session.id)}>
+                          <Pressable
+                            style={styles.sessionMain}
+                            onPress={() => onSelect(session.id)}
+                            accessibilityRole="button"
+                            accessibilityLabel={`${session.title}, ${running ? "running" : "exited"}${
+                              unreadCount > 0 ? `, ${unreadCount} unread` : ""
+                            }`}
+                          >
                             {/* Avatar: shell initial in a circle, status dot on
                                 the corner — the X row anatomy. */}
                             <View style={[styles.avatar, selected && styles.avatarActive]}>
-                              <Text style={[styles.avatarText, selected && styles.avatarTextActive]}>
-                                {(session.title || shellName(session)).slice(0, 1).toUpperCase()}
-                              </Text>
+                              {session.agent ? (
+                                launchGlyph(session.agent, 22, selected ? colors.primary : colors.foreground)
+                              ) : (
+                                <Text style={[styles.avatarText, selected && styles.avatarTextActive]}>
+                                  {(session.title || shellName(session)).slice(0, 1).toUpperCase()}
+                                </Text>
+                              )}
                               <View
                                 style={[
                                   styles.statusDot,
@@ -431,7 +524,11 @@ export function SessionsScreen({
                             <View style={{ flex: 1 }}>
                               <View style={styles.titleLine}>
                                 <Text
-                                  style={[styles.sessionTitle, selected && styles.sessionTitleActive]}
+                                  style={[
+                                    styles.sessionTitle,
+                                    !running && styles.sessionTitleExited,
+                                    selected && styles.sessionTitleActive,
+                                  ]}
                                   numberOfLines={1}
                                 >
                                   {session.title}
@@ -439,10 +536,18 @@ export function SessionsScreen({
                                 <Text style={styles.sessionTime}>{timeLabel(session.updatedAt)}</Text>
                               </View>
                               <View style={styles.subLine}>
-                                <Text style={styles.sessionSub} numberOfLines={1}>
-                                  {session.source === "bridged" ? "bridge · " : ""}
-                                  {shellName(session)}
+                                <Text
+                                  style={[
+                                    styles.sessionSub,
+                                    session.agentActivity === "awaiting" && styles.sessionSubAttention,
+                                  ]}
+                                  numberOfLines={1}
+                                >
+                                  {kind ?? `${session.source === "bridged" ? "bridge · " : ""}${shellName(session)}`}
                                 </Text>
+                                {/* Exited is named, not just dot-coded — grey
+                                    on grey isn't legible at row-scan speed. */}
+                                {!running ? <Text style={styles.exitedTag}>exited</Text> : null}
                                 {unreadCount > 0 ? (
                                   <View style={styles.badge}>
                                     <Text style={styles.badgeText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
@@ -457,9 +562,11 @@ export function SessionsScreen({
                               setEditingTitle(session.title);
                             }}
                             hitSlop={8}
-                            style={styles.iconBtn}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Rename ${session.title}`}
+                            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed]}
                           >
-                            <Text style={styles.iconGlyph}>✎</Text>
+                            <Text style={styles.iconGlyphQuiet}>✎</Text>
                           </Pressable>
                         </>
                       )}
@@ -474,6 +581,8 @@ export function SessionsScreen({
         {/* Working-directory chooser opens in a bottom sheet */}
         <Pressable
           onPress={() => setCwdSheetOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel={`New sessions start in ${activeCwd ?? "host default"}. Change directory`}
           style={({ pressed }) => [styles.cwdLauncher, pressed && styles.cwdLauncherPressed]}
         >
           <Text style={styles.cwdLauncherLabel}>New session in</Text>
@@ -483,36 +592,18 @@ export function SessionsScreen({
           <Text style={styles.cwdLauncherChevron}>⌄</Text>
         </Pressable>
 
-        {availableQuickLaunches.length > 0 ? (
+        {availableProfiles.length > 0 ? (
           <View style={styles.launchSection}>
-            <Text style={styles.sectionTitle}>Quick launch</Text>
-            {availableQuickLaunches.map((entry) => (
-              <Pressable
-                key={entry.profileId}
-                style={({ pressed }) => [styles.launchRow, pressed && styles.launchRowPressed]}
-                onPress={() => onCreate({ shell: entry.shell, args: entry.args, title: entry.label })}
-              >
-                <View style={styles.launchIcon}>{agentGlyph(entry.profileId, 24)}</View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.launchLabel} numberOfLines={1}>
-                    {entry.label}
-                  </Text>
-                </View>
-                <Text style={styles.launchPlus}>+</Text>
-              </Pressable>
-            ))}
-          </View>
-        ) : null}
-
-        {launchSections.map((section) => (
-          <View key={section.id} style={styles.launchSection}>
-            <Text style={styles.sectionTitle}>{section.label}</Text>
-            {section.profiles.map((profile) => (
+            <Text style={styles.sectionTitle}>Terminal profiles</Text>
+            {availableProfiles.map((profile) => (
               <Pressable
                 key={profile.id}
                 style={({ pressed }) => [styles.launchRow, pressed && styles.launchRowPressed]}
                 onPress={() => onCreate({ profileId: profile.id })}
+                accessibilityRole="button"
+                accessibilityLabel={`New ${profile.label} session`}
               >
+                <View style={styles.launchIcon}>{launchGlyph(profile.agent ?? profile.id, 24)}</View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.launchLabel} numberOfLines={1}>
                     {profile.label}
@@ -527,10 +618,12 @@ export function SessionsScreen({
               </Pressable>
             ))}
           </View>
-        ))}
+        ) : null}
 
         <Pressable
           onPress={onDisconnect}
+          accessibilityRole="button"
+          accessibilityLabel="Disconnect from host"
           style={({ pressed }) => [styles.disconnect, pressed && styles.disconnectPressed]}
         >
           <Text style={styles.disconnectText}>Disconnect</Text>
@@ -569,6 +662,8 @@ export function SessionsScreen({
           <Pressable
             onPress={applyCwdDraft}
             disabled={!cwdDraft.trim()}
+            accessibilityRole="button"
+            accessibilityLabel="Use this directory"
             style={({ pressed }) => [styles.cwdUse, !cwdDraft.trim() && styles.faded, pressed && styles.cwdUsePressed]}
           >
             <Text style={styles.cwdUseText}>Use</Text>
@@ -576,17 +671,33 @@ export function SessionsScreen({
         </View>
 
         <View style={styles.chipWrap}>
-          <Pressable onPress={() => chooseCwd(undefined)} style={[styles.chip, !activeCwd && styles.chipActive]}>
+          <Pressable
+            onPress={() => chooseCwd(undefined)}
+            accessibilityRole="button"
+            accessibilityLabel="Use host default directory"
+            style={[styles.chip, !activeCwd && styles.chipActive]}
+          >
             <Text style={[styles.chipText, !activeCwd && styles.chipTextActive]}>Host default</Text>
           </Pressable>
           {recentCwds.map((cwd) => {
             const active = cwd === activeCwd;
             return (
               <View key={cwd} style={[styles.chip, active && styles.chipActive]}>
-                <Pressable onPress={() => chooseCwd(cwd)} hitSlop={6}>
+                <Pressable
+                  onPress={() => chooseCwd(cwd)}
+                  hitSlop={6}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Start new sessions in ${cwd}`}
+                >
                   <Text style={[styles.chipText, active && styles.chipTextActive]}>{shortPath(cwd)}</Text>
                 </Pressable>
-                <Pressable onPress={() => onForgetCwd(cwd)} hitSlop={8} style={styles.chipForget}>
+                <Pressable
+                  onPress={() => onForgetCwd(cwd)}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Forget ${cwd}`}
+                  style={styles.chipForget}
+                >
                   <Text style={styles.chipForgetText}>✕</Text>
                 </Pressable>
               </View>
@@ -614,34 +725,37 @@ const styles = StyleSheet.create({
     gap: 14,
     paddingHorizontal: 12,
     paddingBottom: 8,
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerTitles: {
     flex: 1,
   },
+  // Fluent Subtitle: 20 semibold.
   headerTitle: {
     color: colors.foreground,
     fontSize: 20,
-    fontFamily: font.extrabold,
-    letterSpacing: 0.2,
+    fontFamily: font.semibold,
   },
   headerMeta: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 11,
     fontFamily: font.mono,
     marginTop: 1,
   },
+  // WinUI subtle icon button: square 4px-radius hit target, faint fill on press.
   iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 40,
+    height: 40,
+    borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
   },
   iconCirclePressed: {
-    backgroundColor: colors.surfaceHi,
+    backgroundColor: withAlpha(colors.foreground, 0.06),
   },
   iconCircleActive: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.selection,
   },
   backGlyph: {
     color: colors.foreground,
@@ -653,19 +767,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   sortGlyphActive: {
-    color: colors.primary,
+    color: colors.accentCyan,
   },
   searchWrap: {
-    paddingHorizontal: 14,
-    paddingBottom: 10,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
   },
-  searchPill: {
+  // WinUI TextBox: ControlFill, 4px radius, hairline stroke; the focused
+  // state thickens the bottom edge into the accent underline.
+  searchBox: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 9,
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.pill,
-    paddingHorizontal: 15,
+    gap: 8,
+    backgroundColor: colors.input,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderBottomWidth: 2,
+    borderBottomColor: colors.borderStrong,
+    borderRadius: radius.sm,
+    paddingHorizontal: 12,
+  },
+  searchBoxFocused: {
+    borderBottomColor: colors.primary,
   },
   searchIcon: {
     color: colors.faint,
@@ -686,18 +809,100 @@ const styles = StyleSheet.create({
   },
   searchCount: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 12,
     fontFamily: font.semibold,
-    marginTop: 7,
+    marginTop: 8,
     marginLeft: 4,
   },
   body: {
     flex: 1,
   },
+  // 8 + the row's own 8 = 16, so row content aligns with the search box edge.
   bodyContent: {
-    paddingHorizontal: 10,
-    paddingTop: 2,
+    paddingHorizontal: 8,
+    paddingTop: 4,
     gap: 2,
+  },
+  agentWorkspaceRow: {
+    minHeight: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginHorizontal: 4,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  agentWorkspaceAttention: {
+    borderColor: withAlpha(colors.accentAmber, 0.56),
+    backgroundColor: withAlpha(colors.accentAmber, 0.07),
+  },
+  agentWorkspacePressed: {
+    backgroundColor: colors.selection,
+    borderColor: colors.borderStrong,
+  },
+  agentWorkspaceIcons: {
+    width: 50,
+    height: 42,
+  },
+  agentWorkspaceIcon: {
+    position: "absolute",
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.surfaceAlt,
+  },
+  agentWorkspaceIconBack: {
+    left: 0,
+    top: 0,
+  },
+  agentWorkspaceIconFront: {
+    right: 0,
+    bottom: 0,
+  },
+  agentWorkspaceCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  agentWorkspaceTitle: {
+    color: colors.foreground,
+    fontSize: 14,
+    fontFamily: font.semibold,
+  },
+  agentWorkspaceSubtitle: {
+    color: colors.mutedForeground,
+    fontSize: 11,
+    fontFamily: font.mono,
+  },
+  agentWorkspaceSubtitleAttention: {
+    color: colors.accentAmber,
+  },
+  agentRequestBadge: {
+    minWidth: 22,
+    height: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.accentAmber,
+  },
+  agentRequestBadgeText: {
+    color: colors.background,
+    fontSize: 10.5,
+    fontFamily: font.semibold,
+  },
+  agentWorkspaceChevron: {
+    color: colors.mutedForeground,
+    fontSize: 22,
+    marginTop: -2,
   },
   projectGroup: {
     marginBottom: 6,
@@ -708,57 +913,88 @@ const styles = StyleSheet.create({
     alignItems: "baseline",
     gap: 8,
     paddingHorizontal: 8,
-    paddingTop: 14,
-    paddingBottom: 6,
+    paddingTop: 16,
+    paddingBottom: 4,
     borderTopColor: colors.border,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  // Fluent Caption group header, sentence case — never all-caps.
   projectName: {
-    color: colors.foreground,
-    fontSize: 14.5,
-    fontFamily: font.bold,
+    color: colors.mutedForeground,
+    fontSize: 12,
+    fontFamily: font.semibold,
     flexShrink: 1,
   },
   projectPath: {
     flex: 1,
     color: colors.faint,
-    fontSize: 10.5,
+    fontSize: 11,
     fontFamily: font.mono,
   },
   projectCount: {
     color: colors.mutedForeground,
     fontSize: 11,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   empty: {
-    color: colors.mutedForeground,
-    fontSize: 13.5,
-    fontFamily: font.regular,
-    paddingHorizontal: 10,
-    paddingVertical: 18,
+    alignItems: "center",
+    paddingHorizontal: 24,
+    paddingVertical: 40,
+    gap: 4,
   },
+  emptyGlyph: {
+    color: colors.faint,
+    fontSize: 26,
+    fontFamily: font.mono,
+    marginBottom: 8,
+  },
+  emptyTitle: {
+    color: colors.secondaryForeground,
+    fontSize: 14,
+    fontFamily: font.semibold,
+    textAlign: "center",
+  },
+  emptyHint: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+    fontFamily: font.regular,
+    textAlign: "center",
+  },
+  // WinUI list item: 4px radius, no separators; selection is the quiet accent
+  // wash plus the left-edge indicator pill.
   sessionRow: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: radius.lg,
+    borderRadius: radius.sm,
     paddingHorizontal: 8,
     minHeight: 60,
     overflow: "hidden",
   },
   sessionRowActive: {
-    backgroundColor: colors.sidebarActive,
+    backgroundColor: colors.selection,
+  },
+  selectionPill: {
+    position: "absolute",
+    left: 0,
+    top: "50%",
+    marginTop: -8,
+    width: 3,
+    height: 16,
+    borderRadius: 2,
+    backgroundColor: colors.primary,
   },
   sessionMain: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingVertical: 9,
+    paddingVertical: 8,
   },
+  // Rounded-square avatar, like a Windows Terminal tab icon plate.
   avatar: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.surfaceAlt,
@@ -769,9 +1005,9 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
   },
   avatarText: {
-    color: colors.sidebarForeground,
+    color: colors.secondaryForeground,
     fontSize: 16,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   avatarTextActive: {
     color: colors.primary,
@@ -791,14 +1027,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
+  // Fluent BodyStrong — the row's one scannable anchor.
   sessionTitle: {
     flex: 1,
     color: colors.foreground,
-    fontSize: 14.5,
+    fontSize: 14,
     fontFamily: font.semibold,
   },
+  // Exited rows recede so live work pops out of the scan.
+  sessionTitleExited: {
+    color: colors.mutedForeground,
+  },
   sessionTitleActive: {
-    fontFamily: font.bold,
+    color: colors.foreground,
   },
   sessionTime: {
     color: colors.faint,
@@ -814,8 +1055,18 @@ const styles = StyleSheet.create({
   sessionSub: {
     flexShrink: 1,
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 11,
     fontFamily: font.mono,
+  },
+  // A blocked agent is the one thing in this list worth interrupting for.
+  sessionSubAttention: {
+    color: colors.accentAmber,
+  },
+  // Named status for dead sessions — the corner dot alone is too quiet.
+  exitedTag: {
+    color: colors.faint,
+    fontSize: 11,
+    fontFamily: font.semibold,
   },
   badge: {
     backgroundColor: colors.primary,
@@ -828,7 +1079,7 @@ const styles = StyleSheet.create({
   badgeText: {
     color: colors.primaryForeground,
     fontSize: 10.5,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   editRow: {
     flex: 1,
@@ -850,68 +1101,77 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
   },
   iconBtn: {
-    width: 34,
-    height: 34,
+    width: 40,
+    height: 40,
     borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
+  },
+  iconBtnPressed: {
+    backgroundColor: withAlpha(colors.foreground, 0.06),
   },
   iconGlyph: {
     color: colors.mutedForeground,
     fontSize: 15,
   },
+  // Row-level rename affordance stays whisper-quiet until pressed — the title
+  // and timestamp are what the eye should hit first.
+  iconGlyphQuiet: {
+    color: colors.faint,
+    fontSize: 15,
+  },
   iconGlyphPrimary: {
     color: colors.success,
     fontSize: 17,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   // working-directory launcher (compact single row)
   cwdLauncher: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 18,
+    marginTop: 20,
     marginHorizontal: 4,
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: radius.lg,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
   },
   cwdLauncherPressed: {
     backgroundColor: colors.surfaceHi,
   },
   cwdLauncherLabel: {
     color: colors.mutedForeground,
-    fontSize: 12.5,
+    fontSize: 12,
     fontFamily: font.semibold,
   },
   cwdLauncherValue: {
     flex: 1,
     textAlign: "right",
     color: colors.foreground,
-    fontSize: 12.5,
+    fontSize: 12,
     fontFamily: font.mono,
   },
   cwdLauncherChevron: {
     color: colors.mutedForeground,
     fontSize: 14,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
   // bottom-sheet content
   sheetHint: {
     color: colors.mutedForeground,
-    fontSize: 12.5,
+    fontSize: 12,
     fontFamily: font.regular,
     lineHeight: 18,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   cwdInputRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 14,
+    marginBottom: 16,
   },
   cwdInput: {
     flex: 1,
@@ -922,21 +1182,21 @@ const styles = StyleSheet.create({
     color: colors.foreground,
     fontFamily: font.mono,
     fontSize: 13,
-    paddingHorizontal: 11,
-    paddingVertical: 11,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
   },
   cwdUse: {
     backgroundColor: colors.primary,
     borderRadius: radius.sm,
     paddingHorizontal: 16,
-    paddingVertical: 11,
+    paddingVertical: 12,
   },
   cwdUsePressed: {
     backgroundColor: colors.primaryDim,
   },
   cwdUseText: {
     color: colors.primaryForeground,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
     fontSize: 13,
   },
   chipWrap: {
@@ -944,24 +1204,25 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 6,
   },
+  // Standard WinUI buttons: faint raised fill, hairline stroke, 4px radius.
   chip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: withAlpha(colors.foreground, 0.06),
     borderColor: colors.border,
     borderWidth: 1,
-    borderRadius: radius.pill,
+    borderRadius: radius.sm,
     paddingLeft: 12,
     paddingRight: 9,
     paddingVertical: 7,
   },
   chipActive: {
-    backgroundColor: colors.surfaceHi,
+    backgroundColor: colors.selection,
     borderColor: colors.primary,
   },
   chipText: {
-    color: colors.sidebarForeground,
+    color: colors.secondaryForeground,
     fontSize: 12,
     fontFamily: font.mono,
   },
@@ -977,28 +1238,27 @@ const styles = StyleSheet.create({
   },
   // launch sections
   launchSection: {
-    marginTop: 18,
+    marginTop: 20,
     gap: 2,
   },
+  // Fluent Caption section header — sentence case, no tracking.
   sectionTitle: {
     color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: font.bold,
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
+    fontSize: 12,
+    fontFamily: font.semibold,
     paddingHorizontal: 8,
     paddingBottom: 6,
   },
   launchRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 11,
+    gap: 12,
     borderRadius: radius.lg,
     paddingHorizontal: 12,
-    paddingVertical: 11,
+    paddingVertical: 12,
   },
   launchRowPressed: {
-    backgroundColor: colors.sidebarActive,
+    backgroundColor: colors.selection,
   },
   launchIcon: {
     width: 32,
@@ -1007,44 +1267,45 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   launchLabel: {
-    color: colors.sidebarForeground,
+    color: colors.secondaryForeground,
     fontSize: 14,
     fontFamily: font.semibold,
   },
   launchDesc: {
     color: colors.mutedForeground,
-    fontSize: 11.5,
+    fontSize: 11,
     fontFamily: font.mono,
-    marginTop: 1,
+    marginTop: 2,
   },
   launchPlus: {
-    color: colors.mutedForeground,
+    color: colors.accentMint,
     fontSize: 18,
     fontFamily: font.semibold,
   },
   disconnect: {
     alignItems: "center",
-    marginTop: 26,
+    marginTop: 28,
     marginHorizontal: 4,
-    borderRadius: radius.pill,
+    borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: colors.borderStrong,
+    borderColor: withAlpha(colors.accentCoral, 0.45),
     paddingVertical: 12,
   },
   disconnectPressed: {
-    backgroundColor: colors.surfaceHi,
+    backgroundColor: withAlpha(colors.accentCoral, 0.12),
   },
   disconnectText: {
-    color: colors.foreground,
+    color: colors.accentCoral,
     fontSize: 14,
-    fontFamily: font.bold,
+    fontFamily: font.semibold,
   },
+  // Accent-filled action button — Fluent surface radius, not a round FAB.
   fab: {
     position: "absolute",
     right: 18,
     width: 56,
     height: 56,
-    borderRadius: 28,
+    borderRadius: radius.lg,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.primary,

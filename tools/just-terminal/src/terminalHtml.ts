@@ -27,29 +27,32 @@
 
 import { GHOSTTY_WEB_JS_B64 } from "./vendor/ghosttyWebBundle";
 import { GHOSTTY_VT_WASM_B64 } from "./vendor/ghosttyWasm";
+import { CASCADIA_MONO_TTF_B64 } from "./vendor/cascadiaMonoFont";
 
+// Campbell — Windows Terminal's default color scheme, verbatim, so a mirrored
+// session looks identical to the desktop window it mirrors.
 const THEME = {
-  background: "#05070a",
-  foreground: "#d1d9df",
-  cursor: "#37bca5",
-  cursorAccent: "#05070a",
-  selectionBackground: "#263444",
-  black: "#0e1218",
-  red: "#e36c61",
-  green: "#77b870",
-  yellow: "#d9a850",
-  blue: "#5b9ddf",
-  magenta: "#b481cb",
-  cyan: "#36b8c5",
-  white: "#d1d9df",
-  brightBlack: "#606a74",
-  brightRed: "#f2897e",
-  brightGreen: "#91cd8b",
-  brightYellow: "#e8bd6d",
-  brightBlue: "#76b3f1",
-  brightMagenta: "#c898de",
-  brightCyan: "#61cdd9",
-  brightWhite: "#e6ecf1",
+  background: "#0c0c0c",
+  foreground: "#cccccc",
+  cursor: "#ffffff",
+  cursorAccent: "#0c0c0c",
+  selectionBackground: "#404040",
+  black: "#0c0c0c",
+  red: "#c50f1f",
+  green: "#13a10e",
+  yellow: "#c19c00",
+  blue: "#0037da",
+  magenta: "#881798",
+  cyan: "#3a96dd",
+  white: "#cccccc",
+  brightBlack: "#767676",
+  brightRed: "#e74856",
+  brightGreen: "#16c60c",
+  brightYellow: "#f9f1a5",
+  brightBlue: "#3b78ff",
+  brightMagenta: "#b4009e",
+  brightCyan: "#61d6d6",
+  brightWhite: "#f2f2f2",
 };
 
 export const TERMINAL_HTML = `<!doctype html>
@@ -58,6 +61,14 @@ export const TERMINAL_HTML = `<!doctype html>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <style>
+      /* Cascadia Mono (SIL OFL) embedded as a data URI — Windows Terminal's
+         default face; no mobile OS ships it. Bold is synthesized by canvas. */
+      @font-face {
+        font-family: "Cascadia Mono";
+        font-weight: 400;
+        font-style: normal;
+        src: url(data:font/ttf;base64,${CASCADIA_MONO_TTF_B64}) format("truetype");
+      }
       html, body { margin: 0; height: 100%; background: ${THEME.background}; overflow: hidden; }
       #root {
         position: absolute; top: 0; left: 0; width: 100%; height: 100%;
@@ -69,7 +80,7 @@ export const TERMINAL_HTML = `<!doctype html>
         background: ${THEME.background};
       }
       #root canvas { display: block; }
-      #fallback { color: #89949d; font-family: -apple-system, system-ui, sans-serif; font-size: 13px; padding: 16px; }
+      #fallback { color: #9d9d9d; font-family: "Cascadia Mono", -apple-system, system-ui, sans-serif; font-size: 13px; padding: 16px; }
     </style>
   </head>
   <body>
@@ -106,8 +117,11 @@ export const TERMINAL_HTML = `<!doctype html>
         var panY = 0;
         var ZOOM_MIN = 1;
         var ZOOM_MAX = 6;
+        // True while the user has deliberately panned/zoomed vertically; while
+        // set, clampPan respects their pan position instead of auto-anchoring.
+        var userPannedY = false;
 
-        function resetZoom() { zoom = 1; panX = 0; panY = 0; }
+        function resetZoom() { zoom = 1; panX = 0; panY = 0; userPannedY = false; }
 
         function clampPan() {
           var canvas = getCanvas();
@@ -120,9 +134,13 @@ export const TERMINAL_HTML = `<!doctype html>
           // viewport; otherwise clamp so an edge can't be dragged past the border.
           if (contentW <= a.w) { panX = (a.w - contentW) / 2; }
           else { panX = Math.max(a.w - contentW, Math.min(0, panX)); }
-          // Vertical: top-align when it fits (a terminal grows downward); clamp
-          // when zoomed in past the viewport.
-          if (contentH <= a.h) { panY = 0; }
+          // Vertical: top-align when it fits. When it overflows (readability
+          // floor with the keyboard up, or pinch zoom), anchor to the BOTTOM
+          // unless the user has panned: a terminal grows downward and the
+          // prompt/composer lives on the last rows, so top-anchoring hid
+          // exactly the part that matters behind the keyboard.
+          if (contentH <= a.h) { panY = 0; userPannedY = false; }
+          else if (!userPannedY) { panY = a.h - contentH; }
           else { panY = Math.max(a.h - contentH, Math.min(0, panY)); }
         }
 
@@ -225,6 +243,7 @@ export const TERMINAL_HTML = `<!doctype html>
               panX = (fx - ratioS * (fx - pinch.panX)) + (curMx - pinch.mx);
               panY = (fy - ratioS * (fy - pinch.panY)) + (curMy - pinch.my);
               zoom = newZoom;
+              userPannedY = true;
               applyCanvasTransform();
               e.preventDefault();
               return;
@@ -255,6 +274,7 @@ export const TERMINAL_HTML = `<!doctype html>
             if (single.mode === "pan") {
               panX += dx;
               panY += dy;
+              userPannedY = true;
               applyCanvasTransform(); // clamps to content bounds
             } else {
               // deltaY > 0 means "show newer": dragging the finger up pulls
@@ -612,7 +632,14 @@ export const TERMINAL_HTML = `<!doctype html>
           }
 
           var wasmUrl = "data:application/wasm;base64," + WASM_B64;
-          GW.Ghostty.load(wasmUrl).then(function (ghostty) {
+          // The embedded Cascadia Mono must be decoded before the renderer
+          // measures cell metrics, or the whole grid is sized for a fallback
+          // font and every glyph lands misaligned.
+          var fontsReady =
+            document.fonts && document.fonts.load
+              ? document.fonts.load('14px "Cascadia Mono"').catch(function () {})
+              : Promise.resolve();
+          fontsReady.then(function () { return GW.Ghostty.load(wasmUrl); }).then(function (ghostty) {
             term = new GW.Terminal({
               ghostty: ghostty,
               cols: 80,

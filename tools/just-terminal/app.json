@@ -1,18 +1,18 @@
 {
   "expo": {
-    "name": "JustTerminal",
+    "name": "Terminal Companion",
     "slug": "just-terminal",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#10141a",
+    "backgroundColor": "#202020",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.justsuperhuman.justterminal",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSMicrophoneUsageDescription": "JustTerminal uses the microphone for on-device voice dictation into the command line. Audio is transcribed locally and never leaves your device.",
+        "NSMicrophoneUsageDescription": "Terminal Companion uses the microphone for on-device voice dictation into the command line. Audio is transcribed locally and never leaves your device.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
         }
@@ -20,12 +20,11 @@
     },
     "android": {
       "package": "com.justsuperhuman.justterminal",
-      "usesCleartextTraffic": true,
       "permissions": [
         "android.permission.RECORD_AUDIO"
       ],
       "adaptiveIcon": {
-        "backgroundColor": "#10141a",
+        "backgroundColor": "#000000",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -41,18 +40,34 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#0b0d11",
+          "backgroundColor": "#202020",
           "image": "./assets/splash-icon.png",
           "imageWidth": 180,
           "resizeMode": "contain",
           "dark": {
-            "backgroundColor": "#0b0d11",
+            "backgroundColor": "#202020",
             "image": "./assets/splash-icon.png"
           }
         }
       ],
       "@kesha-antonov/react-native-background-downloader",
-      "expo-audio"
+      "./plugins/withMmkvMemsetFix.js",
+      "expo-audio",
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Terminal Companion lets you attach photos to remote terminal sessions (for example, pasting a screenshot into Claude or Codex)."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {

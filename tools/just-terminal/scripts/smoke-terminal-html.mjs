@@ -523,6 +523,13 @@ try {
     shorterHostKeepsGrid: managedKeyboard.cols === 100 && managedKeyboard.rows === 30,
     shorterHostKeepsReadableFloor: parseScale(managedKeyboard.canvasTransform) >= FLOOR - 0.01,
     shorterHostForwardsNoResize: shrinkResizeMsgs.length === 0,
+    // When the floored canvas is taller than the keyboard-shrunk viewport it
+    // must anchor to the BOTTOM (prompt/composer rows), not the top — the
+    // hidden rows should be the old ones at the top, never the input line.
+    shorterHostOverflowsVertically: managedKeyboard.canvas.height > managedKeyboard.root.height - 15,
+    shorterHostAnchorsBottomRows: Math.abs(managedKeyboard.canvas.bottom - (managedKeyboard.root.bottom - 8)) <= 4,
+    // Restoring the full height goes back to a fitting, top-aligned canvas.
+    restoredHeightTopAligns: afterOutput.canvas.top >= afterOutput.root.top - 1,
     outputCreatesScrollback: afterOutput.scrollback > 0,
     scrollByMovesIntoHistory: afterScrollUp.viewportY > atBottom.viewportY,
     scrollByCanReturn: afterScrollDown.viewportY < afterScrollUp.viewportY,

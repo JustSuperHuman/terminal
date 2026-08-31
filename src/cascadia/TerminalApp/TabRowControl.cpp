@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cwctype>
 #include <utility>
 #include <vector>
@@ -617,6 +618,47 @@ namespace winrt::TerminalApp::implementation
         if (CollectWindowsRequested)
         {
             CollectWindowsRequested();
+        }
+    }
+
+    void TabRowControl::OnNewTabProfilesPanelSizeChanged(const winrt::Windows::Foundation::IInspectable&,
+                                                         const winrt::Windows::UI::Xaml::SizeChangedEventArgs&)
+    {
+        FitNewTabProfileButtons();
+    }
+
+    // Shows only as many whole profile launcher buttons as fit in the space
+    // left over next to the new tab split button. The panel doesn't clip, so
+    // overflowing buttons have to be collapsed outright or they'd render on
+    // top of the rail edge.
+    void TabRowControl::FitNewTabProfileButtons()
+    {
+        const auto panel = NewTabProfilesPanel();
+        if (!panel)
+        {
+            return;
+        }
+
+        const auto available = panel.ActualWidth();
+        auto used = 0.0;
+        for (const auto& child : panel.Children())
+        {
+            const auto element = child.try_as<WUX::FrameworkElement>();
+            if (!element)
+            {
+                continue;
+            }
+
+            const auto width = element.Width();
+            const auto margin = element.Margin();
+            const auto slot = (std::isnan(width) ? 32.0 : width) + margin.Left + margin.Right;
+            // Half-pixel slack so rounding doesn't hide a button that fits.
+            const auto fits = used + slot <= available + 0.5;
+            element.Visibility(fits ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+            if (fits)
+            {
+                used += slot;
+            }
         }
     }
 

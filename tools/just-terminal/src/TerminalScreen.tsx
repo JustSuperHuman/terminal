@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   AppState,
+  Easing,
   Keyboard,
   Platform,
   Pressable,
@@ -16,20 +18,38 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BlurTargetView } from "expo-blur";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
+import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
+import * as ImagePicker from "expo-image-picker";
+import type { AcpBridgeState } from "./acpTypes";
+import { AgentAttachSheet } from "./components/AgentAttachSheet";
+import { AgentStatusBar } from "./components/AgentStatusBar";
+import { AgentWorkspaceScreen } from "./components/AgentWorkspaceScreen";
+import { AttachmentSheet } from "./components/AttachmentSheet";
 import { CommandBar } from "./components/CommandBar";
+import { Composer, type ComposerHandle } from "./components/Composer";
+import { NotificationToast, type ToastNotification } from "./components/NotificationToast";
 import { SessionsScreen, type CreateSpec } from "./components/SessionsScreen";
 import { SessionSwitcher, type SessionSwitcherHandle } from "./components/SessionSwitcher";
 import { SwipeBar } from "./components/SwipeBar";
 import { TerminalView, type TerminalViewHandle } from "./components/TerminalView";
 import { TerminalEmptyState } from "./components/TerminalEmptyState";
 import { useDictation } from "./useDictation";
-import { createSession as createSessionApi } from "./lib/api";
+import { useInputContext } from "./useInputContext";
+import { createSession as createSessionApi, fetchNotifications } from "./lib/api";
+import {
+  attachSessionAgent,
+  fetchSessionAgent,
+  type AgentLinkCandidate,
+  type SessionAgentState,
+} from "./lib/agentApi";
+import { uploadImageFromDataUri, uploadImageFromUri } from "./lib/attachments";
 import type { ServerEndpoint } from "./lib/endpoint";
 import { terminalSocket, type SocketStatus } from "./lib/socket";
-import { forgetCwd, loadRecentCwds, rememberCwd } from "./lib/storage";
+import { forgetCwd, loadComposerMode, loadRecentCwds, rememberCwd, saveComposerMode } from "./lib/storage";
 import type { ServerInfo, ServerMessage, TerminalProfile, TerminalSessionSummary } from "./types";
-import { colors, font } from "./theme";
+import { colors, font, glass, radius, withAlpha } from "./theme";
+import { Acrylic } from "./components/Acrylic";
 
 interface TerminalScreenProps {
   endpoint: ServerEndpoint;
@@ -100,6 +120,14 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const [socketStatus, setSocketStatus] = useState<SocketStatus>(terminalSocket.currentStatus);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [agentWorkspaceOpen, setAgentWorkspaceOpen] = useState(false);
+  const [agentWorkspaceSessionId, setAgentWorkspaceSessionId] = useState<string | undefined>();
+  const [agentSheetOpen, setAgentSheetOpen] = useState(false);
+  const [agentState, setAgentState] = useState<SessionAgentState>();
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentAttaching, setAgentAttaching] = useState(false);
+  const [agentError, setAgentError] = useState<string>();
+  const [acpState, setAcpState] = useState<AcpBridgeState>();
   const [recentCwds, setRecentCwds] = useState<string[]>([]);
   const [activeCwd, setActiveCwd] = useState<string | undefined>(undefined);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -110,7 +138,21 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // True while a new session is being created — the host can take a few seconds
   // to spawn/bridge a terminal, so we show a clear "starting" overlay.
   const [creating, setCreating] = useState(false);
+  // True while an image is uploading to the host (attach button feedback).
+  const [attaching, setAttaching] = useState(false);
+  const [attachmentSheetOpen, setAttachmentSheetOpen] = useState(false);
+  // Newest notification banner; tap jumps to the session that rang.
+  const [toast, setToast] = useState<ToastNotification | null>(null);
+  // Composer mode edits the message locally and sends it whole; direct mode
+  // hands every keystroke to the terminal. Persisted between launches.
+  const [composerMode, setComposerMode] = useState(true);
   const activeIdRef = useRef<string | undefined>(activeId);
+  // Watermark of the newest notification we've seen (live or via catch-up);
+  // GET /api/notifications?since= replays anything after it on resume.
+  const lastNotifySeenRef = useRef<number>(Date.now());
+  const catchUpInFlightRef = useRef(false);
+  const acpOrderRef = useRef<{ epoch: string; sequence: number } | undefined>(undefined);
+  const lastAcpAttentionIdRef = useRef<string | undefined>(undefined);
   // Notification tones for server "notify" broadcasts; ref-wrapped so the
   // socket effect doesn't need the players in its dependency list.
   const donePlayer = useAudioPlayer(doneChime);
@@ -145,11 +187,29 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // listeners (AppState) that live outside the deciding effect.
   const keepKeyboardOpenRef = useRef(false);
   const terminalRef = useRef<TerminalViewHandle | null>(null);
+  const composerRef = useRef<ComposerHandle | null>(null);
+  const inputContextRefreshRef = useRef<() => void>(() => undefined);
   // Session scrubber overlay (picker wheel); driven by the SwipeBar's gesture.
   const sessionSwitcherRef = useRef<SessionSwitcherHandle | null>(null);
   const blurTargetRef = useRef<View | null>(null);
   const settleFrameRef = useRef<number | undefined>(undefined);
   const settleTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+
+  const applyAcpState = useCallback((next: AcpBridgeState) => {
+    const previous = acpOrderRef.current;
+    if (previous?.epoch === next.epoch && next.sequence <= previous.sequence) return;
+    acpOrderRef.current = { epoch: next.epoch, sequence: next.sequence };
+    setAcpState(next);
+
+    const request = next.requests[0];
+    if (!request || lastAcpAttentionIdRef.current === request.id) return;
+    lastAcpAttentionIdRef.current = request.id;
+    Keyboard.dismiss();
+    setDrawerOpen(false);
+    setAttachmentSheetOpen(false);
+    setAgentWorkspaceOpen(true);
+    playNotifyRef.current("attention");
+  }, []);
 
   const syncTerminalToInput = useCallback(() => {
     terminalRef.current?.fitToViewport();
@@ -174,7 +234,10 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       settleFrameRef.current = undefined;
       syncTerminalToInput();
     });
-    settleTimersRef.current = [80, 180, Platform.OS === "ios" ? 320 : 220].map((delay) =>
+    // The final late pass catches slow keyboard animations and the iOS
+    // QuickType bar appearing a beat after the main keyboard frame — without
+    // it the terminal can keep a stale (taller) layout under the keyboard.
+    settleTimersRef.current = [80, 180, Platform.OS === "ios" ? 320 : 220, 600].map((delay) =>
       setTimeout(syncTerminalToInput, delay)
     );
   }, [clearTerminalSettle, syncTerminalToInput]);
@@ -190,6 +253,13 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    acpOrderRef.current = undefined;
+    lastAcpAttentionIdRef.current = undefined;
+    setAcpState(undefined);
+    setAgentWorkspaceOpen(false);
+  }, [endpoint.id]);
 
   useEffect(() => {
     setActiveId((current) => {
@@ -238,6 +308,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         // app is backgrounded, so the terminal can return fragmented (mostly
         // blank). Force a full repaint once the surface is back.
         requestAnimationFrame(() => terminalRef.current?.repaint());
+        // Replay task-finish notifications that landed while we were away.
+        catchUpNotificationsRef.current();
       }
     });
 
@@ -270,8 +342,64 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     });
   }, []);
 
+  // Replays notifications recorded while this client was disconnected or
+  // backgrounded (iOS drops the socket within seconds of leaving the
+  // foreground): one tone, one summary banner, badges for every session that
+  // rang. Ref-wrapped so socket/AppState listeners can call the latest version.
+  const catchUpNotificationsRef = useRef<() => void>(() => undefined);
   useEffect(() => {
-    const offStatus = terminalSocket.onStatus(setSocketStatus);
+    catchUpNotificationsRef.current = () => {
+      if (catchUpInFlightRef.current) {
+        return;
+      }
+      catchUpInFlightRef.current = true;
+      fetchNotifications(endpoint, lastNotifySeenRef.current)
+        .then((missed) => {
+          if (missed.length === 0) {
+            return;
+          }
+          const stamps = missed.map((item) => Date.parse(item.at)).filter(Number.isFinite);
+          lastNotifySeenRef.current = Math.max(lastNotifySeenRef.current, ...stamps);
+          setUnread((current) => {
+            const next = { ...current };
+            for (const item of missed) {
+              if (item.sessionId && item.sessionId !== activeIdRef.current) {
+                next[item.sessionId] = (next[item.sessionId] ?? 0) + 1;
+              }
+            }
+            return next;
+          });
+          const latest = missed[missed.length - 1];
+          playNotifyRef.current(latest.sound);
+          setToast(
+            missed.length > 1
+              ? {
+                  key: latest.id,
+                  title: `${missed.length} tasks finished while you were away`,
+                  sessionId: latest.sessionId,
+                }
+              : {
+                  key: latest.id,
+                  title: latest.sessionTitle ?? latest.title ?? "Terminal",
+                  body: latest.body,
+                  sessionId: latest.sessionId,
+                }
+          );
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          catchUpInFlightRef.current = false;
+        });
+    };
+  }, [endpoint]);
+
+  useEffect(() => {
+    const offStatus = terminalSocket.onStatus((status) => {
+      setSocketStatus(status);
+      if (status === "open") {
+        catchUpNotificationsRef.current();
+      }
+    });
     const offMessage = terminalSocket.onMessage((message: ServerMessage) => {
       switch (message.type) {
         case "hello":
@@ -279,16 +407,67 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           setProfiles(message.profiles);
           setServerInfo(message.server);
           setActiveId((current) => current ?? message.sessions[0]?.id);
+          if (message.acp) applyAcpState(message.acp);
           break;
         case "sessions":
           setSessions(message.sessions);
           setActiveId((current) => current ?? message.sessions[0]?.id);
           break;
-        case "notify":
-          // Desktop-side automation (e.g. Claude Code hooks POSTing to
-          // /api/notify) plays a tone + haptic on the phone.
-          playNotifyRef.current(message.sound);
+        case "profiles":
+          setProfiles(message.profiles);
           break;
+        case "acp_state":
+          applyAcpState(message.acp);
+          break;
+        case "acp_session": {
+          const order = acpOrderRef.current;
+          if (!order || order.epoch !== message.epoch || message.sequence <= order.sequence) break;
+          acpOrderRef.current = { epoch: message.epoch, sequence: message.sequence };
+          setAcpState((current) => {
+            if (!current || current.epoch !== message.epoch) return current;
+            const index = current.sessions.findIndex((session) => session.id === message.session.id);
+            const sessions = index < 0
+              ? [message.session, ...current.sessions]
+              : current.sessions.map((session, candidateIndex) => candidateIndex === index ? message.session : session);
+            return { ...current, sequence: message.sequence, sessions };
+          });
+          break;
+        }
+        case "acp_session_removed": {
+          const order = acpOrderRef.current;
+          if (!order || order.epoch !== message.epoch || message.sequence <= order.sequence) break;
+          acpOrderRef.current = { epoch: message.epoch, sequence: message.sequence };
+          setAcpState((current) => current?.epoch === message.epoch
+            ? {
+                ...current,
+                sequence: message.sequence,
+                sessions: current.sessions.filter((session) => session.id !== message.sessionId),
+                requests: current.requests.filter((request) => request.sessionId !== message.sessionId),
+              }
+            : current);
+          break;
+        }
+        case "notify": {
+          // Task-finish signals: server-detected bells/OSCs in any session's
+          // output plus desktop automation POSTing /api/notify. Tone + haptic,
+          // badge the session that rang, and surface a tappable banner.
+          playNotifyRef.current(message.sound);
+          const at = message.at ? Date.parse(message.at) : Number.NaN;
+          lastNotifySeenRef.current = Math.max(lastNotifySeenRef.current, Number.isFinite(at) ? at : Date.now());
+          const sessionId = message.sessionId;
+          if (sessionId && sessionId !== activeIdRef.current) {
+            setUnread((current) => ({ ...current, [sessionId]: (current[sessionId] ?? 0) + 1 }));
+          }
+          if (sessionId !== activeIdRef.current || message.body) {
+            setToast({
+              key: message.id ?? `notify-${Date.now()}`,
+              title: message.sessionTitle ?? message.title ?? "Terminal",
+              body: message.body,
+              sessionId,
+            });
+          }
+          break;
+        }
         case "session":
           upsertSession(message.session);
           break;
@@ -301,6 +480,11 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           // is NOT subscribed to — full output only streams for the active one.
           if (message.sessionId !== activeIdRef.current) {
             setUnread((current) => ({ ...current, [message.sessionId]: (current[message.sessionId] ?? 0) + 1 }));
+          } else {
+            // Output redraws are the earliest signal that an agent opened or
+            // advanced a question. Refresh after the burst instead of waiting
+            // for the normal polling interval.
+            inputContextRefreshRef.current();
           }
           break;
         default:
@@ -311,29 +495,83 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       offStatus();
       offMessage();
     };
-  }, [upsertSession]);
+  }, [applyAcpState, upsertSession]);
 
   const activeSession = useMemo(() => sessions.find((item) => item.id === activeId), [sessions, activeId]);
+  const activeSessionRef = useRef<TerminalSessionSummary | undefined>(undefined);
+  const agentSessionKind =
+    activeSession?.status === "running" && (activeSession.agent === "claude" || activeSession.agent === "codex")
+      ? activeSession.agent
+      : undefined;
 
-  // On-device voice dictation: recognized phrases are injected into the active
-  // session as input (no auto-Enter — the user reviews, then runs).
-  const injectDictatedText = useCallback((text: string) => {
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
+
+  useEffect(() => {
+    loadComposerMode().then(setComposerMode);
+  }, []);
+
+  const sessionLive = socketStatus === "open" && activeSession?.status === "running";
+  const composerActive =
+    composerMode && !drawerOpen && !agentWorkspaceOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
+
+  // What the active terminal needs to know about the far end: which agent is
+  // listening, whether it is mid-turn, and any dialog it is blocking on. This
+  // stays live in direct-key mode too. A question must never depend on the user
+  // having enabled the composer first (bro-cli and shells that launch an agent
+  // after startup are common examples).
+  const { context: inputContext, refresh: refreshInputContext } = useInputContext(endpoint, activeId, {
+    enabled: !drawerOpen && !agentWorkspaceOpen && Boolean(sessionLive),
+  });
+  inputContextRefreshRef.current = refreshInputContext;
+
+  const sendKeys = useCallback((data: string) => {
     const id = activeIdRef.current;
     if (id) {
-      terminalSocket.send({ type: "input", sessionId: id, data: `${text} ` });
+      terminalSocket.send({ type: "input", sessionId: id, data });
     }
+  }, []);
+
+  // On-device voice dictation. While composing, phrases land in the message so
+  // they can be edited before they run; in direct mode they go straight to the
+  // session's command line as before (CommandBar then arms the auto-Enter).
+  const injectDictatedText = useCallback(
+    (text: string) => {
+      if (composerMode) {
+        composerRef.current?.insertText(text);
+        return;
+      }
+      const id = activeIdRef.current;
+      if (id) {
+        terminalSocket.send({ type: "input", sessionId: id, data: `${text} ` });
+      }
+    },
+    [composerMode]
+  );
+
+  // Unmounting the composer blurs it, and the keep-focus effect below hands
+  // the keyboard back to the terminal, so the toggle only has to flip state.
+  const toggleComposerMode = useCallback(() => {
+    setComposerMode((current) => {
+      const next = !current;
+      void saveComposerMode(next);
+      return next;
+    });
   }, []);
 
   const dictation = useDictation({
     onText: injectDictatedText,
-    enabled: socketStatus === "open" && activeSession?.status === "running",
+    enabled: !agentWorkspaceOpen && !inputContext?.prompt && socketStatus === "open" && activeSession?.status === "running",
   });
 
   // Persistent keyboard: while a live session is connected, the terminal input
   // stays focused so the soft keyboard never collapses (the page refocuses on
   // any blur attempt). Opening the drawer releases it; closing re-engages it.
+  // The composer must not fight for focus, so this is off while it is up — the
+  // composer's own field is then what holds the keyboard.
   const keepKeyboardOpen =
-    !drawerOpen && !creating && socketStatus === "open" && activeSession?.status === "running";
+    !composerMode && !inputContext?.prompt && !drawerOpen && !agentWorkspaceOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
   useEffect(() => {
     keepKeyboardOpenRef.current = keepKeyboardOpen;
     terminalRef.current?.setKeepFocus(keepKeyboardOpen);
@@ -352,6 +590,91 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     });
     setDrawerOpen(false);
   }, []);
+
+  // Once a terminal has an agent view, that view is where the person expects
+  // to land — but closing it has to mean something. A dismissal is remembered
+  // per terminal until they ask for the agent view again, so "back to the
+  // terminal" stays sticky without ever hiding the way back.
+  const agentViewDismissedRef = useRef(new Set<string>());
+
+  const openAgentWorkspace = useCallback((acpSessionId?: string) => {
+    Keyboard.dismiss();
+    terminalRef.current?.setKeepFocus(false);
+    setDrawerOpen(false);
+    setAttachmentSheetOpen(false);
+    setAgentSheetOpen(false);
+    setAgentWorkspaceSessionId(acpSessionId);
+    setAgentWorkspaceOpen(true);
+    const terminalId = activeSessionRef.current?.id;
+    if (terminalId) agentViewDismissedRef.current.delete(terminalId);
+  }, []);
+
+  const closeAgentWorkspace = useCallback(() => {
+    const terminalId = activeSessionRef.current?.id;
+    if (terminalId) agentViewDismissedRef.current.add(terminalId);
+    setAgentWorkspaceOpen(false);
+  }, []);
+
+  // The agent pill's one job: get from "Claude is running here" to a rich view
+  // of it in a single tap when the terminal is already attached, and in one
+  // deliberate choice when it is not.
+  const openAgentView = useCallback(async () => {
+    const session = activeSessionRef.current;
+    if (!session) return;
+    if (session.acpSessionId) {
+      openAgentWorkspace(session.acpSessionId);
+      return;
+    }
+
+    Keyboard.dismiss();
+    terminalRef.current?.setKeepFocus(false);
+    setAgentError(undefined);
+    setAgentState(undefined);
+    setAgentSheetOpen(true);
+    setAgentLoading(true);
+    try {
+      const state = await fetchSessionAgent(endpoint, session.id, true);
+      if (activeSessionRef.current?.id !== session.id) return;
+      setAgentState(state);
+      // An attachment that survived a client restart needs no second question.
+      if (state.acpSessionId) openAgentWorkspace(state.acpSessionId);
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAgentLoading(false);
+    }
+  }, [endpoint, openAgentWorkspace]);
+
+  const attachAgentView = useCallback(
+    async (candidate?: AgentLinkCandidate) => {
+      const session = activeSessionRef.current;
+      if (!session) return;
+      setAgentAttaching(true);
+      setAgentError(undefined);
+      try {
+        const result = await attachSessionAgent(endpoint, session.id, {
+          ...(candidate ? { remoteSessionId: candidate.sessionId, cwd: candidate.cwd } : {}),
+        });
+        upsertSession(result.session);
+        openAgentWorkspace(result.acpSession.id);
+      } catch (error) {
+        setAgentError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setAgentAttaching(false);
+      }
+    },
+    [endpoint, openAgentWorkspace, upsertSession]
+  );
+
+  // Attached agent sessions open in their agent view by default: if you gave a
+  // terminal a rich view, that is the surface you meant to come back to. The
+  // raw terminal is one dismissal away and stays dismissed until asked for.
+  useEffect(() => {
+    if (!activeSession?.acpSessionId) return;
+    if (drawerOpen || agentSheetOpen || agentWorkspaceOpen) return;
+    if (agentViewDismissedRef.current.has(activeSession.id)) return;
+    openAgentWorkspace(activeSession.acpSessionId);
+  }, [activeSession?.id, activeSession?.acpSessionId, drawerOpen, agentSheetOpen, agentWorkspaceOpen, openAgentWorkspace]);
 
   const createSession = useCallback(
     async (spec?: CreateSpec) => {
@@ -377,6 +700,108 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const killSession = useCallback((id: string) => {
     terminalSocket.send({ type: "kill", sessionId: id });
   }, []);
+
+  // "Paste a picture into Claude/Codex": upload the image to the host, which
+  // saves it to a local temp file and bracket-pastes the path into the session
+  // — the form both CLIs turn into an attached image.
+  const attachImage = useCallback(
+    async (source: "library" | "clipboard") => {
+      const sessionId = activeIdRef.current;
+      if (!sessionId) {
+        setAttaching(false);
+        return;
+      }
+      try {
+        let attached = false;
+        if (source === "clipboard") {
+          const image = await Clipboard.getImageAsync({ format: "jpeg", jpegQuality: 0.9 });
+          if (!image?.data) {
+            setToast({
+              key: `attach-${Date.now()}`,
+              title: "No clipboard image",
+              body: "Copy an image first, then try again. On iOS, paste access may also have been denied.",
+            });
+            return;
+          }
+          await uploadImageFromDataUri(endpoint, sessionId, image.data);
+          attached = true;
+        } else {
+          const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!permission.granted) {
+            setToast({ key: `attach-${Date.now()}`, title: "Attach image", body: "Photo library access was denied." });
+            return;
+          }
+          const picked = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.9 });
+          const asset = picked.canceled ? undefined : picked.assets?.[0];
+          if (!asset) {
+            return;
+          }
+          await uploadImageFromUri(endpoint, sessionId, asset.uri, asset.mimeType ?? "image/jpeg", asset.fileName ?? undefined);
+          attached = true;
+        }
+        if (attached) {
+          setToast({
+            key: `attach-${Date.now()}`,
+            title: "Image pasted",
+            body: "The image is ready in the current terminal prompt.",
+          });
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+        }
+      } catch (error) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => undefined);
+        setToast({
+          key: `attach-${Date.now()}`,
+          title: "Attach image failed",
+          body: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setAttaching(false);
+      }
+    },
+    [endpoint]
+  );
+
+  const openAttachmentSheet = useCallback(() => {
+    setAttachmentSheetOpen(true);
+    requestAnimationFrame(() => Keyboard.dismiss());
+  }, []);
+
+  const selectAttachmentSource = useCallback(
+    (source: "library" | "clipboard") => {
+      setAttachmentSheetOpen(false);
+      setAttaching(true);
+      // Let the sheet hand off focus before iOS/Android presents a paste
+      // permission prompt or the native photo picker.
+      setTimeout(() => void attachImage(source), 200);
+    },
+    [attachImage]
+  );
+
+  // Fade the "starting session" scrim in instead of popping it — the spinner
+  // often only shows for a beat, and a hard cut reads as a glitch.
+  const creatingFade = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (creating) {
+      creatingFade.setValue(0);
+      Animated.timing(creatingFade, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [creating, creatingFade]);
+
+  const dismissToast = useCallback(() => setToast(null), []);
+  const openToastSession = useCallback(
+    (sessionId?: string) => {
+      setToast(null);
+      if (sessionId && sessions.some((session) => session.id === sessionId)) {
+        selectSession(sessionId);
+      }
+    },
+    [selectSession, sessions]
+  );
 
   const renameSession = useCallback((id: string, title: string) => {
     terminalSocket.send({ type: "rename", sessionId: id, title });
@@ -465,6 +890,45 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
               onScrubBegin={() => sessionSwitcherRef.current?.begin() ?? false}
               onScrubMove={(steps) => sessionSwitcherRef.current?.moveBy(steps)}
               onScrubEnd={(commit) => sessionSwitcherRef.current?.finish(commit)}
+              onStep={(delta) => {
+                const next = sessions[sessions.findIndex((item) => item.id === activeId) + delta];
+                if (next) {
+                  selectSession(next.id);
+                }
+              }}
+            />
+          ) : null}
+          {/* Local message composition: slash commands, @file mentions, prompt
+              history and one-tap answers to whatever dialog the agent is
+              showing. Sits between the session switcher and the key row so the
+              keys stay reachable while typing. */}
+          {/* A terminal question always gets the native option surface, even
+              when ordinary input is in direct-key mode. Composer owns the
+              stale-response guard and keyboard handoff for both paths. */}
+          {composerMode || inputContext?.prompt ? (
+            <Composer
+              ref={composerRef}
+              endpoint={endpoint}
+              sessionId={activeId}
+              context={inputContext}
+              disabled={!sessionLive}
+              active={composerActive}
+              blurTarget={blurTargetRef}
+              onSendKeys={sendKeys}
+              onRefreshContext={refreshInputContext}
+              onNotice={(title, body) => setToast({ key: `composer-${Date.now()}`, title, body })}
+              dictation={{
+                status: dictation.status,
+                active: dictation.active,
+                level: dictation.level,
+                speaking: dictation.speaking,
+                lastText: dictation.lastText,
+                downloadPercent: dictation.downloadPercent,
+                error: dictation.error,
+                modelLabel: dictation.modelLabel,
+                onStart: dictation.start,
+                onStop: dictation.stop,
+              }}
             />
           ) : null}
           <CommandBar
@@ -473,6 +937,11 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
             socketStatus={socketStatus}
             bottomInset={keyboardVisible ? 0 : insets.bottom}
             blurTarget={blurTargetRef}
+            onAttachImage={openAttachmentSheet}
+            attachingImage={attaching}
+            composerMode={composerMode}
+            onInsertToken={(token) => composerRef.current?.insertToken(token)}
+            onToggleComposer={toggleComposerMode}
             dictation={{
               status: dictation.status,
               active: dictation.active,
@@ -495,18 +964,48 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
           hitSlop={8}
           accessibilityRole="button"
           accessibilityLabel="Open sessions menu"
-          style={({ pressed }) => [styles.menuFab, { top: insets.top + 8 }, pressed && styles.menuFabPressed]}
+          style={[styles.menuFab, { top: insets.top + 8 }]}
         >
-          <View style={styles.menuLine} />
-          <View style={[styles.menuLine, styles.menuLineMid]} />
-          <View style={styles.menuLine} />
+          {({ pressed }) => (
+            <>
+              <Acrylic />
+              {pressed ? <View style={[StyleSheet.absoluteFill, styles.menuFabPressed]} /> : null}
+              <View style={styles.menuLines}>
+                <View style={styles.menuLine} />
+                <View style={[styles.menuLine, styles.menuLineMid]} />
+                <View style={styles.menuLine} />
+              </View>
+            </>
+          )}
         </Pressable>
 
+        {/* The live answer to "what is the agent doing?" — and the way into the
+            rich agent view. Only shown once an agent is actually detected in
+            this terminal, so a plain shell keeps its clean surface. */}
+        {agentSessionKind ? (
+          <AgentStatusBar
+            agent={agentSessionKind}
+            topInset={insets.top}
+            activity={activeSession?.agentActivity}
+            attached={Boolean(activeSession?.acpSessionId)}
+            connecting={agentAttaching}
+            onPress={openAgentView}
+          />
+        ) : null}
+
+        {/* Task-finish banner: newest notification, tap to jump to its session. */}
+        <NotificationToast
+          notification={toast}
+          topInset={insets.top}
+          onPress={openToastSession}
+          onDismiss={dismissToast}
+        />
+
         {creating ? (
-          <View style={styles.creatingOverlay}>
+          <Animated.View style={[styles.creatingOverlay, { opacity: creatingFade }]}>
             <ActivityIndicator color={colors.primary} size="large" />
             <Text style={styles.creatingText}>Starting session…</Text>
-          </View>
+          </Animated.View>
         ) : null}
       </View>
 
@@ -519,7 +1018,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         serverHost={endpoint.label ? `${endpoint.label} · ${endpoint.host}` : endpoint.host}
         activeCwd={activeCwd}
         recentCwds={recentCwds}
+        acpState={acpState}
         onClose={() => setDrawerOpen(false)}
+        onOpenAgentWorkspace={() => openAgentWorkspace()}
         onSelect={selectSession}
         onCreate={createSession}
         onKill={killSession}
@@ -527,6 +1028,28 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         onDisconnect={onDisconnect}
         onSetCwd={setCwd}
         onForgetCwd={forgetCwdEntry}
+      />
+      <AttachmentSheet
+        visible={attachmentSheetOpen}
+        onClose={() => setAttachmentSheetOpen(false)}
+        onSelect={selectAttachmentSource}
+      />
+      <AgentAttachSheet
+        visible={agentSheetOpen}
+        state={agentState}
+        loading={agentLoading}
+        busy={agentAttaching}
+        error={agentError}
+        onClose={() => setAgentSheetOpen(false)}
+        onPick={attachAgentView}
+      />
+      <AgentWorkspaceScreen
+        visible={agentWorkspaceOpen}
+        endpoint={endpoint}
+        initialSessionId={agentWorkspaceSessionId}
+        defaultCwd={activeCwd ?? activeSession?.cwd}
+        onClose={closeAgentWorkspace}
+        onStateChange={applyAcpState}
       />
     </View>
   );
@@ -554,30 +1077,35 @@ const styles = StyleSheet.create({
   },
   menuFab: {
     position: "absolute",
-    left: 10,
+    left: 12,
     zIndex: 6,
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: radius.lg,
     alignItems: "center",
     justifyContent: "center",
-    gap: 3.5,
-    backgroundColor: "rgba(10, 12, 16, 0.35)",
-    borderColor: "rgba(255, 255, 255, 0.10)",
+    // Clips the Acrylic backing to the rounded corners.
+    overflow: "hidden",
+    borderColor: glass.border,
     borderWidth: 1,
   },
   menuFabPressed: {
-    backgroundColor: "rgba(255, 255, 255, 0.13)",
+    // Wash layered above the acrylic so the press darkens the glass instead
+    // of replacing it.
+    backgroundColor: withAlpha(colors.foreground, 0.08),
+  },
+  menuLines: {
+    alignItems: "center",
+    gap: 3.5,
   },
   menuLine: {
-    width: 15,
-    height: 2,
+    width: 14,
+    height: 1.5,
     borderRadius: 1,
-    backgroundColor: colors.foreground,
+    backgroundColor: colors.secondaryForeground,
   },
   menuLineMid: {
-    width: 11,
-    backgroundColor: colors.primary,
+    width: 14,
   },
   commandBarDock: {
     position: "absolute",
@@ -593,7 +1121,7 @@ const styles = StyleSheet.create({
     zIndex: 5,
     alignItems: "center",
     justifyContent: "center",
-    gap: 14,
+    gap: 16,
     backgroundColor: colors.overlay,
   },
   creatingText: {
