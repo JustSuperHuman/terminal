@@ -44,84 +44,84 @@
             </Setter>
         </Style>
 
-            <DataTemplate x:Key="TabRailGroupHeaderTemplate"
+        <DataTemplate x:Key="TabRailGroupHeaderTemplate"
                       x:DataType="local:TabGroup">
-                <Grid Margin="0,8,0,2"
-                      HorizontalAlignment="Stretch"
-                      ColumnSpacing="2">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
+            <Grid Margin="0,8,0,2"
+                  HorizontalAlignment="Stretch"
+                  ColumnSpacing="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
 
-                    <!--  Whole header toggles the section; hover uses the subtle fill like the tab rows.  -->
-                    <Button Grid.Column="0"
-                            Padding="6,4,6,4"
-                            HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            AutomationProperties.Name="{x:Bind Name}"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Click="OnTabGroupHeaderClick"
-                            CornerRadius="4">
-                        <Grid ColumnSpacing="6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="12" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Grid.Column="0"
-                                      VerticalAlignment="Center"
-                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                      FontSize="9"
-                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                      Glyph="{x:Bind ChevronGlyph}" />
-                            <StackPanel Grid.Column="1"
-                                        VerticalAlignment="Center"
-                                        Spacing="1">
-                                <TextBlock FontSize="12"
-                                           FontWeight="SemiBold"
-                                           Text="{x:Bind Name}"
-                                           TextTrimming="CharacterEllipsis" />
-                                <TextBlock FontSize="10.5"
-                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                           Text="{x:Bind Path}"
-                                           TextTrimming="CharacterEllipsis"
-                                           ToolTipService.ToolTip="{x:Bind Path}"
-                                           Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Path)}" />
-                            </StackPanel>
-                            <!--  Count pill  -->
-                            <Border Grid.Column="2"
-                                    MinWidth="18"
-                                    Padding="5,0"
+                <!--  Whole header toggles the section; hover uses the subtle fill like the tab rows.  -->
+                <Button Grid.Column="0"
+                        Padding="6,4,6,4"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        AutomationProperties.Name="{x:Bind Name}"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="OnTabGroupHeaderClick"
+                        CornerRadius="4">
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="12" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Grid.Column="0"
+                                  VerticalAlignment="Center"
+                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                  FontSize="9"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                  Glyph="{x:Bind ChevronGlyph}" />
+                        <StackPanel Grid.Column="1"
                                     VerticalAlignment="Center"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                    CornerRadius="9">
-                                <TextBlock HorizontalAlignment="Center"
-                                           FontSize="10.5"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                           Text="{x:Bind CountText}" />
-                            </Border>
-                        </Grid>
-                    </Button>
+                                    Spacing="1">
+                            <TextBlock FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Text="{x:Bind Name}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock FontSize="10.5"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Text="{x:Bind Path}"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTipService.ToolTip="{x:Bind Path}"
+                                       Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Path)}" />
+                        </StackPanel>
+                        <!--  Count pill  -->
+                        <Border Grid.Column="2"
+                                MinWidth="18"
+                                Padding="5,0"
+                                VerticalAlignment="Center"
+                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                CornerRadius="9">
+                            <TextBlock HorizontalAlignment="Center"
+                                       FontSize="10.5"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="{x:Bind CountText}" />
+                        </Border>
+                    </Grid>
+                </Button>
 
-                    <Button x:Uid="TabGroupNewTabButton"
-                            Grid.Column="1"
-                            Width="26"
-                            Height="26"
-                            Padding="0"
-                            VerticalAlignment="Center"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Click="OnTabGroupNewTabClick"
-                            Content="&#xE710;"
-                            CornerRadius="4"
-                            FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                            FontSize="11"
-                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Visibility="{x:Bind CanOpenNewTab}" />
-                </Grid>
-            </DataTemplate>
+                <Button x:Uid="TabGroupNewTabButton"
+                        Grid.Column="1"
+                        Width="26"
+                        Height="26"
+                        Padding="0"
+                        VerticalAlignment="Center"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="OnTabGroupNewTabClick"
+                        Content="&#xE710;"
+                        CornerRadius="4"
+                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Visibility="{x:Bind CanOpenNewTab}" />
+            </Grid>
+        </DataTemplate>
 
         <DataTemplate x:Key="TabRailTabTemplate"
                       x:DataType="local:Tab">
@@ -334,10 +334,10 @@
 
         <ListView x:Name="VerticalTabList"
                   Grid.Row="2"
-                  AllowDrop="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   Padding="4,0,4,4"
                   HorizontalAlignment="Stretch"
                   VerticalAlignment="Stretch"
+                  AllowDrop="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   CanDragItems="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   CanReorderItems="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   DragItemsCompleted="OnVerticalTabDragItemsCompleted"
@@ -345,8 +345,7 @@
                   ItemContainerStyleSelector="{StaticResource TabRailItemStyleSelector}"
                   ItemTemplateSelector="{StaticResource TabRailItemTemplateSelector}"
                   SelectionChanged="OnVerticalTabSelectionChanged"
-                  SelectionMode="Single">
-        </ListView>
+                  SelectionMode="Single" />
 
         <Grid Grid.Row="3">
             <!--  Remove this border after WinUI 2.8  -->
