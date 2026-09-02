@@ -22,13 +22,18 @@ Author(s):
 #define MTSM_GLOBAL_ONLY_SETTINGS(X)                                                                                               \
     X(hstring, Language, "language")                                                                                               \
     X(bool, InputServiceWarning, "warning.inputService", true)                                                                     \
-    X(Model::FirstWindowPreference, FirstWindowPreference, "firstWindowPreference", FirstWindowPreference::DefaultProfile)         \
+    X(Model::FirstWindowPreference, FirstWindowPreference, "firstWindowPreference", FirstWindowPreference::PersistedLayoutAndContent) \
     X(bool, DebugFeaturesEnabled, "debugFeatures", debugFeaturesDefault)                                                           \
     X(Model::WindowingMode, WindowingBehavior, "windowingBehavior", Model::WindowingMode::UseNew)                                  \
     X(bool, AlwaysShowNotificationIcon, "alwaysShowNotificationIcon", false)                                                       \
     X(winrt::Windows::Foundation::Collections::IVector<winrt::hstring>, DisabledProfileSources, "disabledProfileSources", nullptr) \
     X(bool, AllowHeadless, "compatibility.allowHeadless", false)                                                                   \
-    X(bool, EnableColorSelection, "experimental.enableColorSelection", false)
+    X(bool, EnableColorSelection, "experimental.enableColorSelection", false)                                                     \
+    X(bool, BridgeEnabled, "bridge.enabled", true)                                                                                 \
+    X(bool, BridgeAutomaticPort, "bridge.automaticPort", true)                                                                     \
+    X(int32_t, BridgePort, "bridge.port", 10001)                                                                                   \
+    X(hstring, BridgeBindAddress, "bridge.bindAddress", L"0.0.0.0")                                                              \
+    X(bool, BridgeWebInterface, "bridge.webInterface", true)
 
 // Settings that are per-window (may vary by window name in the future)
 #define MTSM_WINDOW_SETTINGS(X)                                                                                                                                                                       \

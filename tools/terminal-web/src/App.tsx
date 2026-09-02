@@ -470,7 +470,7 @@ export function App() {
             />
           </aside>
 
-          <main className="flex min-w-0 flex-1 flex-col">
+          <main className="relative z-0 flex min-w-0 flex-1 flex-col">
             <header className="flex h-14 shrink-0 items-center justify-between border-b bg-background/95 px-3">
               <div className="flex min-w-0 items-center gap-2">
                 <Button variant="ghost" size="iconSm" className="lg:hidden" onClick={() => setSidebarOpen(true)}>

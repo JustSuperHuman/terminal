@@ -34,6 +34,8 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 
         void UpdateBridgeTitle(const winrt::hstring& title);
         void SetBridgeProject(const winrt::hstring& projectId);
+        void UpdateBridgeCwd(const winrt::hstring& cwd);
+        winrt::hstring ForegroundAgent();
 
         winrt::hstring Commandline() const;
         winrt::hstring StartingTitle() const;
@@ -44,6 +46,11 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         static winrt::hstring BridgeConnectionStatus();
         static winrt::hstring BridgeEndpoint();
         static winrt::hstring BridgeAccessToken();
+        static void ConfigureBridge(bool enabled,
+                                    bool automaticPort,
+                                    uint16_t port,
+                                    const winrt::hstring& bindAddress,
+                                    bool webInterfaceEnabled);
 
         static winrt::event_token NewConnection(const NewConnectionHandler& handler);
         static void NewConnection(const winrt::event_token& token);
@@ -80,6 +87,7 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         bool _initialVisibility{ true };
         Windows::Foundation::Collections::ValueSet _environment{ nullptr };
         hstring _clientName{}; // The name of the process hosted by this ConPTY connection (as of launch).
+        hstring _bridgeCwd{}; // Last working directory reported to the bridge.
 
         bool _receivedFirstByte{ false };
         std::chrono::high_resolution_clock::time_point _startTime{};

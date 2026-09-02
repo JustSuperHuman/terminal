@@ -1,0 +1,27 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+#include "ViewModelHelpers.idl.h"
+
+namespace Microsoft.Terminal.Settings.Editor
+{
+    runtimeclass BridgeSettingsViewModel : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        BridgeSettingsViewModel(Microsoft.Terminal.Settings.Model.CascadiaSettings settings);
+
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(Boolean, BridgeEnabled);
+        Boolean BridgeAutomaticPort;
+        Boolean ManualPortEnabled { get; };
+        String BridgePortText;
+        String BridgePortError { get; };
+        String BridgeBindAddress;
+        String BridgeBindAddressError { get; };
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(Boolean, BridgeWebInterface);
+    }
+
+    [default_interface] runtimeclass BridgeSettings : Windows.UI.Xaml.Controls.Page
+    {
+        BridgeSettings();
+        BridgeSettingsViewModel ViewModel { get; };
+    }
+}

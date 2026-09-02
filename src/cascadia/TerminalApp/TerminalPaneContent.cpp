@@ -84,6 +84,49 @@ namespace winrt::TerminalApp::implementation
         return _control.TabColor();
     }
 
+    // Builds the command line that brings a coding agent back after a
+    // restart. The agent runs inside the profile's shell where we know how to
+    // ask for that, so quitting the agent drops back to a prompt instead of
+    // closing the tab.
+    static constexpr std::wstring_view s_resumeCommands[]{ L"claude --continue", L"codex resume --last" };
+
+    // Removes a resume suffix added by _resumeCommandlineFor, so a restored
+    // tab's command line goes back to the plain profile shell when the agent
+    // is no longer running (and isn't wrapped twice when it still is).
+    static std::wstring _stripResumeCommandline(std::wstring_view commandline)
+    {
+        std::wstring result{ commandline };
+        for (const auto& resume : s_resumeCommands)
+        {
+            for (const auto& prefix : { std::wstring{ L" -NoExit -Command \"" } + std::wstring{ resume } + L"\"", std::wstring{ L" /k " } + std::wstring{ resume } })
+            {
+                if (const auto pos = result.find(prefix); pos != std::wstring::npos)
+                {
+                    result.erase(pos, prefix.size());
+                }
+            }
+        }
+        return result;
+    }
+
+    static winrt::hstring _resumeCommandlineFor(std::wstring_view profileCommandline, std::wstring_view agent)
+    {
+        const std::wstring resume{ agent == L"claude" ? s_resumeCommands[0] : s_resumeCommands[1] };
+        const auto shellCommandline{ _stripResumeCommandline(profileCommandline) };
+
+        std::wstring lower{ shellCommandline };
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+        if (lower.find(L"pwsh") != std::wstring::npos || lower.find(L"powershell") != std::wstring::npos)
+        {
+            return winrt::hstring{ shellCommandline + L" -NoExit -Command \"" + resume + L"\"" };
+        }
+        if (lower.find(L"cmd.exe") != std::wstring::npos || lower == L"cmd")
+        {
+            return winrt::hstring{ shellCommandline + L" /k " + resume };
+        }
+        return winrt::hstring{ resume };
+    }
+
     INewContentArgs TerminalPaneContent::GetNewTerminalArgs(const BuildStartupKind kind) const
     {
         NewTerminalArgs args{};
@@ -136,6 +179,25 @@ namespace winrt::TerminalApp::implementation
         case BuildStartupKind::Persist:
         {
             const auto connection = _control.Connection();
+
+            // A pane running Claude Code / Codex is persisted as its resume
+            // command so the conversation comes back with the layout. Its
+            // buffer isn't restored: the agent's TUI repaints the screen.
+            winrt::hstring agent;
+            if (const auto conpty = connection ? connection.try_as<ConptyConnection>() : nullptr)
+            {
+                agent = conpty.ForegroundAgent();
+            }
+            if (!agent.empty())
+            {
+                args.Commandline(_resumeCommandlineFor(controlSettings.Commandline(), agent));
+                args.AppendCommandLine(false);
+                break;
+            }
+            // A tab restored with a resume command whose agent has since
+            // exited goes back to being a plain shell.
+            args.Commandline(winrt::hstring{ _stripResumeCommandline(controlSettings.Commandline()) });
+
             const auto id = connection ? connection.SessionId() : winrt::guid{};
             if (id != winrt::guid{})
             {

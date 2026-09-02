@@ -137,6 +137,7 @@ async function layout(cdp) {
     const viewport = document.querySelector(".xterm-viewport");
     const host = document.querySelector(".xterm")?.parentElement;
     const rows = document.querySelector(".xterm-rows");
+    const orchestratorRail = document.querySelector('[data-orchestrator-panel="collapsed"]');
     const rect = (el) => {
       if (!el) return null;
       const r = el.getBoundingClientRect();
@@ -153,6 +154,10 @@ async function layout(cdp) {
       scrollTop: viewport ? Math.round(viewport.scrollTop) : null,
       scrollHeight: viewport ? Math.round(viewport.scrollHeight) : null,
       clientHeight: viewport ? Math.round(viewport.clientHeight) : null,
+      orchestratorRail: orchestratorRail ? {
+        ...rect(orchestratorRail),
+        backgroundColor: getComputedStyle(orchestratorRail).backgroundColor,
+      } : null,
     };
   })()`);
 }
@@ -278,6 +283,11 @@ try {
     visibleTextMovesOnScrollUp: afterWheelUp.text !== afterOutput.text,
     visibleTextReturnsOnScrollDown: afterWheelDown.text !== afterWheelUp.text,
     desktopReturnHasNoOverlap: desktopReturnLayout.terminalFormOverlap === 0,
+    collapsedOrchestratorIsOpaque: Boolean(
+      desktopLayout.orchestratorRail?.width === 44 &&
+      desktopLayout.orchestratorRail?.height === 820 &&
+      /^rgb\(/.test(desktopLayout.orchestratorRail?.backgroundColor ?? "")
+    ),
   };
 
   console.log(JSON.stringify({

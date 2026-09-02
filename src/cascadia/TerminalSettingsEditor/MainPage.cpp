@@ -7,6 +7,7 @@
 #include "Launch.h"
 #include "Interaction.h"
 #include "Compatibility.h"
+#include "BridgeSettings.h"
 #include "Rendering.h"
 #include "RenderingViewModel.h"
 #include "Extensions.h"
@@ -555,6 +556,11 @@ namespace winrt::Microsoft::Terminal::Settings::Editor::implementation
             {
                 contentFrame().Navigate(xaml_typename<Editor::Compatibility>(), winrt::make<NavigateToPageArgs>(winrt::make<CompatibilityViewModel>(_settingsClone), *this, elementToFocus));
                 _breadcrumbs.Append(winrt::make<Breadcrumb>(vm, RS_(L"Nav_Compatibility/Content"), BreadcrumbSubPage::None));
+            }
+            else if (*clickedItemTag == bridgeSettingsTag)
+            {
+                contentFrame().Navigate(xaml_typename<Editor::BridgeSettings>(), winrt::make<NavigateToPageArgs>(winrt::make<BridgeSettingsViewModel>(_settingsClone), *this, elementToFocus));
+                _breadcrumbs.Append(winrt::make<Breadcrumb>(vm, L"Terminal bridge", BreadcrumbSubPage::None));
             }
             else if (*clickedItemTag == actionsTag)
             {

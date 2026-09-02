@@ -3,6 +3,7 @@
 
 #include "pch.h"
 #include "WindowEmperor.h"
+#include <appmodel.h>
 
 #include <CoreWindow.h>
 #include <ScopedResourceLoader.h>
@@ -525,6 +526,24 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         fmt::format_to(std::back_inserter(windowClassName), FMT_COMPILE(L" {:08x}"), hash);
         fmt::format_to(std::back_inserter(unpackagedAumid), FMT_COMPILE(L".{:08x}"), hash);
 #endif
+    }
+    else
+    {
+        // Packages with different identities (e.g. WindowsTerminalDev next to
+        // the side-by-side WindowsTerminalDevNext registration of a newer
+        // build) are separate applications and must not hand their command
+        // line to each other, so the package family name is part of the key.
+        wchar_t familyName[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1]{};
+        UINT32 familyNameLength = ARRAYSIZE(familyName);
+        if (GetCurrentPackageFamilyName(&familyNameLength, &familyName[0]) == ERROR_SUCCESS && familyNameLength > 1)
+        {
+            const auto hash = til::hash(std::wstring_view{ &familyName[0], familyNameLength - 1 });
+#ifdef _WIN64
+            fmt::format_to(std::back_inserter(windowClassName), FMT_COMPILE(L" {:016x}"), hash);
+#else
+            fmt::format_to(std::back_inserter(windowClassName), FMT_COMPILE(L" {:08x}"), hash);
+#endif
+        }
     }
 
     {

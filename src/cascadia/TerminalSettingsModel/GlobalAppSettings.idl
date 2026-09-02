@@ -69,6 +69,11 @@ namespace Microsoft.Terminal.Settings.Model
         INHERITABLE_SETTING(Boolean, AllowHeadless);
         INHERITABLE_SETTING(Boolean, EnableColorSelection);
         INHERITABLE_SETTING(ConfirmOnClose, ConfirmOnClose);
+        INHERITABLE_SETTING(Boolean, BridgeEnabled);
+        INHERITABLE_SETTING(Boolean, BridgeAutomaticPort);
+        INHERITABLE_SETTING(Int32, BridgePort);
+        INHERITABLE_SETTING(String, BridgeBindAddress);
+        INHERITABLE_SETTING(Boolean, BridgeWebInterface);
 
         // ---- Color schemes ----
         Windows.Foundation.Collections.IMapView<String, ColorScheme> ColorSchemes();

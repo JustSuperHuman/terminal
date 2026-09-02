@@ -7,11 +7,13 @@
 #include <ThrottledFunc.h>
 
 #include "TabRowControl.g.cpp"
+#include "TabGroup.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cwctype>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -36,7 +38,9 @@ namespace winrt::TerminalApp::implementation
     TabRowControl::TabRowControl()
     {
         _filteredTabs = winrt::single_threaded_observable_vector<TerminalApp::Tab>();
+        _railItems = winrt::single_threaded_observable_vector<winrt::Windows::Foundation::IInspectable>();
         InitializeComponent();
+        VerticalTabList().ItemsSource(_railItems);
     }
 
     winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::Tab> TabRowControl::FilteredTabs() const noexcept
@@ -72,6 +76,21 @@ namespace winrt::TerminalApp::implementation
     void TabRowControl::SelectTab(const winrt::TerminalApp::Tab& tab)
     {
         _selectedTab = tab;
+
+        // Focusing a tab that lives in a collapsed section reopens it, the
+        // way an IDE reveals the active file in a folded tree.
+        if (_selectedTab)
+        {
+            const auto hidden = std::find_if(_collapsedTabs.begin(), _collapsedTabs.end(), [&](const auto& item) {
+                return item.first == _selectedTab;
+            });
+            if (hidden != _collapsedTabs.end())
+            {
+                _collapsedGroups.erase(hidden->second);
+                _updateFilteredTabs(false);
+                return;
+            }
+        }
 
         ++_updatingVerticalSelection;
         auto restoreSelection = wil::scope_exit([&]() {
@@ -205,9 +224,12 @@ namespace winrt::TerminalApp::implementation
                                  _activityDebounces.end());
     }
 
-    void TabRowControl::_updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms)
+    void TabRowControl::_updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms, const bool grouped)
     {
-        const auto canReorder{ !SortByRecentActivity() && terms.empty() };
+        // Drag-reorder maps a filtered index straight onto the window's tab
+        // order, so it's only safe while the rail shows tabs in window order
+        // (grouped sources don't support ListView reordering either).
+        const auto canReorder{ !SortByRecentActivity() && terms.empty() && !grouped };
         if (CanReorderVerticalTabs() != canReorder)
         {
             CanReorderVerticalTabs(canReorder);
@@ -383,6 +405,17 @@ namespace winrt::TerminalApp::implementation
         return allowBufferSearch && _shouldSearchBuffer(terms) && _containsAllTerms(_tabSearchText(tab, true), terms);
     }
 
+    // Method Description:
+    // - A pane changed directory; regroup the "All" view so the tab moves to
+    //   the section it now belongs to.
+    void TabRowControl::NotifyTabDirectoryUpdated()
+    {
+        if (_projectFilter.empty() && !SortByRecentActivity() && VerticalTabSearchBox().Text().empty())
+        {
+            _updateFilteredTabs(false);
+        }
+    }
+
     void TabRowControl::SetProjectFilter(const winrt::hstring& projectId)
     {
         if (_projectFilter != projectId)
@@ -392,12 +425,22 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Method Description:
+    // - Records the project strip's order. The "All" view groups tabs by
+    //   project in this order (tabs without a project come last).
+    void TabRowControl::SetProjectOrder(std::vector<winrt::hstring> projectIds)
+    {
+        if (_projectOrder != projectIds)
+        {
+            _projectOrder = std::move(projectIds);
+            _updateFilteredTabs();
+        }
+    }
+
     void TabRowControl::_updateFilteredTabs(const bool includeBufferSearch)
     {
         const auto filter{ _foldForSearch(VerticalTabSearchBox().Text()) };
         const auto terms{ _splitSearchTerms(filter) };
-
-        _updateCanReorderVerticalTabs(terms);
 
         std::vector<TerminalApp::Tab> visibleTabs;
         auto appendIfVisible = [&](const auto& tab) {
@@ -423,13 +466,57 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Clearing/appending the bound observable vector makes the ListView
+        // "All" view: sections per project directory (T3 Code style), in the
+        // project strip's order, window order within a section. Recent-activity
+        // sort and search results stay flat and keep their own ordering.
+        const auto grouped{ _projectFilter.empty() && !SortByRecentActivity() && terms.empty() };
+        _updateCanReorderVerticalTabs(terms, grouped);
+
+        // Clearing/appending the bound observable vectors makes the ListView
         // raise SelectionChanged for our own mutations; suppress those so
         // they can't re-enter tab focusing (and, transitively, this method).
         ++_updatingVerticalSelection;
         auto restoreSelection = wil::scope_exit([&]() {
             --_updatingVerticalSelection;
         });
+
+        _collapsedTabs.clear();
+        _railItems.Clear();
+        if (grouped)
+        {
+            auto buckets{ _bucketTabsByPath(visibleTabs) };
+            visibleTabs.clear();
+            for (auto& bucket : buckets)
+            {
+                const auto collapsed{ _collapsedGroups.contains(bucket.Key) };
+                for (const auto& tab : bucket.Tabs)
+                {
+                    if (collapsed)
+                    {
+                        _collapsedTabs.emplace_back(tab, bucket.Key);
+                    }
+                    else
+                    {
+                        visibleTabs.push_back(tab);
+                    }
+                }
+            }
+            _publishGroups(std::move(buckets));
+        }
+        else
+        {
+            for (const auto& tab : visibleTabs)
+            {
+                if (const auto tabImpl{ winrt::get_self<implementation::Tab>(tab) })
+                {
+                    if (tabImpl->RailSubtitle() != tab.ProjectName())
+                    {
+                        tabImpl->RailSubtitle(tab.ProjectName());
+                    }
+                }
+                _railItems.Append(tab);
+            }
+        }
 
         _filteredTabs.Clear();
         for (const auto& tab : visibleTabs)
@@ -438,6 +525,303 @@ namespace winrt::TerminalApp::implementation
         }
 
         SelectTab(_selectedTab);
+    }
+
+    // Method Description:
+    // - Sorts tabs into project sections by path. A tab's section is its
+    //   bridge project when it has one, otherwise its live working directory;
+    //   a section whose directory sits inside another visible section's
+    //   directory folds into that ancestor (a tab in F:\repo\src belongs to
+    //   the F:\repo project, not to a second "src" project).
+    std::vector<TabRowControl::TabGroupBucket> TabRowControl::_bucketTabsByPath(const std::vector<winrt::TerminalApp::Tab>& tabs) const
+    {
+        std::vector<TabGroupBucket> buckets;
+        const auto unranked{ _projectOrder.size() };
+
+        for (const auto& tab : tabs)
+        {
+            TabGroupBucket candidate;
+            const auto projectId{ tab.ProjectId() };
+            const auto projectPath{ tab.ProjectPath() };
+            const auto cwd{ tab.WorkingDirectory() };
+
+            if (!projectId.empty())
+            {
+                candidate.Key = projectId.c_str();
+                candidate.PathKey = _pathKey(projectPath);
+                candidate.Path = _displayPath(projectPath);
+                candidate.Name = tab.ProjectName().c_str();
+                if (candidate.Name.empty())
+                {
+                    candidate.Name = _pathLeaf(projectPath);
+                }
+                const auto found{ std::find(_projectOrder.begin(), _projectOrder.end(), projectId) };
+                candidate.Rank = found == _projectOrder.end() ? unranked : static_cast<size_t>(found - _projectOrder.begin());
+                candidate.CanOpenNewTab = !projectPath.empty();
+            }
+            else if (!cwd.empty())
+            {
+                candidate.PathKey = _pathKey(cwd);
+                candidate.Key = L"dir:" + candidate.PathKey;
+                candidate.Path = _displayPath(cwd);
+                candidate.Name = _pathLeaf(cwd);
+                candidate.Rank = unranked;
+                candidate.CanOpenNewTab = true;
+            }
+            else
+            {
+                candidate.Key = L"";
+                candidate.Name = RS_(L"TabRailUngroupedSectionName").c_str();
+                candidate.Rank = unranked + 1;
+            }
+
+            auto bucket = std::find_if(buckets.begin(), buckets.end(), [&](const auto& existing) {
+                return existing.Key == candidate.Key;
+            });
+            if (bucket == buckets.end())
+            {
+                buckets.push_back(std::move(candidate));
+                bucket = buckets.end() - 1;
+            }
+            bucket->Tabs.push_back(tab);
+        }
+
+        // Fold nested directories into their ancestor section. Shortest paths
+        // first so an ancestor is always kept before its descendants arrive.
+        std::stable_sort(buckets.begin(), buckets.end(), [](const auto& left, const auto& right) {
+            return left.PathKey.size() < right.PathKey.size();
+        });
+        std::vector<TabGroupBucket> folded;
+        for (auto& bucket : buckets)
+        {
+            TabGroupBucket* ancestor{ nullptr };
+            if (!bucket.PathKey.empty())
+            {
+                for (auto& kept : folded)
+                {
+                    if (!kept.PathKey.empty() && _pathIsUnder(bucket.PathKey, kept.PathKey) &&
+                        (!ancestor || kept.PathKey.size() > ancestor->PathKey.size()))
+                    {
+                        ancestor = &kept;
+                    }
+                }
+            }
+            if (ancestor)
+            {
+                ancestor->Tabs.insert(ancestor->Tabs.end(), bucket.Tabs.begin(), bucket.Tabs.end());
+                ancestor->Rank = std::min(ancestor->Rank, bucket.Rank);
+            }
+            else
+            {
+                folded.push_back(std::move(bucket));
+            }
+        }
+
+        // Strip order first, then alphabetical; window order within a section.
+        std::stable_sort(folded.begin(), folded.end(), [](const auto& left, const auto& right) {
+            if (left.Rank != right.Rank)
+            {
+                return left.Rank < right.Rank;
+            }
+            return _wcsicmp(left.Name.c_str(), right.Name.c_str()) < 0;
+        });
+        for (auto& bucket : folded)
+        {
+            std::stable_sort(bucket.Tabs.begin(), bucket.Tabs.end(), [](const auto& left, const auto& right) {
+                return left.TabViewIndex() < right.TabViewIndex();
+            });
+        }
+        return folded;
+    }
+
+    // Method Description:
+    // - Appends each section to the rail list as a TabGroup header followed
+    //   by its tabs, and stamps each tab's rail subtitle with its path
+    //   relative to the section directory.
+    void TabRowControl::_publishGroups(std::vector<TabGroupBucket> buckets)
+    {
+        for (auto& bucket : buckets)
+        {
+            const auto collapsed{ _collapsedGroups.contains(bucket.Key) };
+            auto group{ winrt::make_self<implementation::TabGroup>() };
+            group->Key(winrt::hstring{ bucket.Key });
+            group->Name(winrt::hstring{ bucket.Name });
+            group->Path(winrt::hstring{ bucket.Path });
+            group->Count(gsl::narrow_cast<uint32_t>(bucket.Tabs.size()));
+            group->IsCollapsed(collapsed);
+            group->CanOpenNewTab(bucket.CanOpenNewTab);
+            _railItems.Append(*group);
+
+            for (const auto& tab : bucket.Tabs)
+            {
+                if (const auto tabImpl{ winrt::get_self<implementation::Tab>(tab) })
+                {
+                    std::wstring subtitle;
+                    const auto cwdKey{ _pathKey(tab.WorkingDirectory()) };
+                    if (!bucket.PathKey.empty() && cwdKey.size() > bucket.PathKey.size() && _pathIsUnder(cwdKey, bucket.PathKey))
+                    {
+                        // Relative to the section, in the pane's own casing.
+                        const std::wstring cwd{ tab.WorkingDirectory().c_str() };
+                        auto offset{ std::min(cwd.size(), bucket.PathKey.size()) };
+                        while (offset < cwd.size() && (cwd[offset] == L'\\' || cwd[offset] == L'/'))
+                        {
+                            ++offset;
+                        }
+                        subtitle = cwd.substr(offset);
+                    }
+                    if (tabImpl->RailSubtitle() != subtitle)
+                    {
+                        tabImpl->RailSubtitle(winrt::hstring{ subtitle });
+                    }
+                }
+                if (!collapsed)
+                {
+                    _railItems.Append(tab);
+                }
+            }
+        }
+    }
+
+    // Normalized, lower-cased path without a trailing separator, for grouping.
+    std::wstring TabRowControl::_pathKey(std::wstring_view path)
+    {
+        if (path.empty())
+        {
+            return {};
+        }
+        std::wstring key;
+        try
+        {
+            auto normalized = std::filesystem::path{ path }.lexically_normal();
+            normalized.make_preferred();
+            key = normalized.wstring();
+        }
+        catch (...)
+        {
+            key.assign(path);
+        }
+        while (key.size() > 3 && (key.back() == L'\\' || key.back() == L'/'))
+        {
+            key.pop_back();
+        }
+        std::transform(key.begin(), key.end(), key.begin(), [](const wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return key;
+    }
+
+    bool TabRowControl::_pathIsUnder(std::wstring_view childKey, std::wstring_view parentKey)
+    {
+        if (parentKey.empty() || childKey.size() <= parentKey.size() || childKey.substr(0, parentKey.size()) != parentKey)
+        {
+            return false;
+        }
+        const auto separator{ childKey[parentKey.size()] };
+        // A drive root key ("c:\") already ends in its separator.
+        return separator == L'\\' || separator == L'/' || parentKey.back() == L'\\' || parentKey.back() == L'/';
+    }
+
+    std::wstring TabRowControl::_pathLeaf(std::wstring_view path)
+    {
+        try
+        {
+            auto normalized = std::filesystem::path{ path }.lexically_normal();
+            auto leaf = normalized.filename().wstring();
+            if (leaf.empty())
+            {
+                leaf = normalized.parent_path().filename().wstring();
+            }
+            if (leaf.empty())
+            {
+                leaf = normalized.root_name().wstring();
+            }
+            return leaf.empty() ? std::wstring{ path } : leaf;
+        }
+        catch (...)
+        {
+            return std::wstring{ path };
+        }
+    }
+
+    // The user's profile folder shown as "~", like the web sidebar.
+    std::wstring TabRowControl::_displayPath(std::wstring_view path)
+    {
+        if (path.empty())
+        {
+            return {};
+        }
+        std::wstring display{ path };
+        while (display.size() > 3 && (display.back() == L'\\' || display.back() == L'/'))
+        {
+            display.pop_back();
+        }
+        static const std::wstring homeKey = [] {
+            wchar_t buffer[MAX_PATH]{};
+            const auto length{ GetEnvironmentVariableW(L"USERPROFILE", buffer, MAX_PATH) };
+            return (length > 0 && length < MAX_PATH) ? _pathKey(std::wstring_view{ buffer, length }) : std::wstring{};
+        }();
+        if (!homeKey.empty())
+        {
+            const auto key{ _pathKey(display) };
+            if (key == homeKey)
+            {
+                return L"~";
+            }
+            if (_pathIsUnder(key, homeKey))
+            {
+                return L"~" + display.substr(homeKey.size());
+            }
+        }
+        return display;
+    }
+
+    void TabRowControl::OnTabGroupHeaderClick(const winrt::Windows::Foundation::IInspectable& sender,
+                                              const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        const auto element{ sender.try_as<WUX::FrameworkElement>() };
+        const auto group{ element ? element.DataContext().try_as<TerminalApp::TabGroup>() : nullptr };
+        if (!group)
+        {
+            return;
+        }
+        const std::wstring key{ group.Key().c_str() };
+        if (!_collapsedGroups.erase(key))
+        {
+            _collapsedGroups.insert(key);
+        }
+        _updateFilteredTabs(false);
+    }
+
+    void TabRowControl::OnTabGroupNewTabClick(const winrt::Windows::Foundation::IInspectable& sender,
+                                              const winrt::Windows::UI::Xaml::RoutedEventArgs&)
+    {
+        const auto element{ sender.try_as<WUX::FrameworkElement>() };
+        const auto group{ element ? element.DataContext().try_as<TerminalApp::TabGroup>() : nullptr };
+        if (!group || !group.CanOpenNewTab() || !NewTabInDirectoryRequested || !_tabs)
+        {
+            return;
+        }
+
+        // Hand over the real directory, not the "~"-shortened display.
+        winrt::hstring directory;
+        const std::wstring key{ group.Key().c_str() };
+        for (const auto& tab : _tabs)
+        {
+            if (!tab.ProjectId().empty() && tab.ProjectId() == group.Key() && !tab.ProjectPath().empty())
+            {
+                directory = tab.ProjectPath();
+                break;
+            }
+            if (!tab.WorkingDirectory().empty() && key == L"dir:" + _pathKey(tab.WorkingDirectory()))
+            {
+                directory = tab.WorkingDirectory();
+                break;
+            }
+        }
+        if (!directory.empty())
+        {
+            NewTabInDirectoryRequested(directory);
+        }
     }
 
     // Method Description:
@@ -489,6 +873,14 @@ namespace winrt::TerminalApp::implementation
 
         if (_updatingVerticalSelection)
         {
+            return;
+        }
+
+        // A click on a section header's padding lands here as a header
+        // selection; put the selection back on the focused tab.
+        if (VerticalTabList().SelectedItem().try_as<TerminalApp::TabGroup>())
+        {
+            SelectTab(_selectedTab);
             return;
         }
 
@@ -603,8 +995,10 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // The ListView reordered _railItems, which in the flat (reorderable)
+        // view holds only tabs in window order.
         uint32_t targetIndex{};
-        if (_filteredTabs.IndexOf(draggedTab, targetIndex))
+        if (_railItems.IndexOf(draggedTab, targetIndex))
         {
             VerticalTabMoveRequested(draggedTab, targetIndex);
         }

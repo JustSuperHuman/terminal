@@ -230,6 +230,15 @@ namespace winrt::TerminalApp::implementation
                 // Tag the tab with the active project so the rail can filter
                 // per project and closing the project can close its tabs.
                 newTabImpl->ProjectId(_activeProjectId);
+                for (const auto& project : _bridgeProjects)
+                {
+                    if (project.Id == _activeProjectId)
+                    {
+                        newTabImpl->ProjectName(project.Name);
+                        newTabImpl->ProjectPath(project.Cwd);
+                        break;
+                    }
+                }
 
                 // Also stamp the project onto the mirrored terminal-web
                 // session so remote clients group it correctly.

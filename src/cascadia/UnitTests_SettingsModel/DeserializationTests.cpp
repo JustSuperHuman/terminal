@@ -1268,6 +1268,7 @@ namespace SettingsModelUnitTests
         static constexpr std::string_view inputSettings{ R"({
             "initialCols" : 1000000,
             "initialRows" : -1000000,
+            "bridge.port" : 1000000,
             "profiles": [{ "name": "profile0" }]
         })" };
 
@@ -1275,6 +1276,7 @@ namespace SettingsModelUnitTests
 
         VERIFY_ARE_EQUAL(999, settings->WindowSettingsDefaults().InitialCols());
         VERIFY_ARE_EQUAL(1, settings->WindowSettingsDefaults().InitialRows());
+        VERIFY_ARE_EQUAL(65535, settings->GlobalSettings().BridgePort());
     }
 
     void DeserializationTests::TestTrailingCommas()

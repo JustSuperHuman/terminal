@@ -34,7 +34,7 @@
         <ScrollViewer x:Name="ProjectTabScroller"
                       Grid.Row="0"
                       Grid.Column="0"
-                      Grid.ColumnSpan="2"
+                      Grid.ColumnSpan="3"
                       Background="{x:Bind TitlebarBrush, Mode=OneWay}"
                       HorizontalScrollBarVisibility="Hidden"
                       HorizontalScrollMode="Auto"
@@ -52,7 +52,9 @@
             projects are open. Accented while the panel is open.
         -->
         <Border Grid.Row="0"
-                Grid.Column="2"
+                Grid.Column="0"
+                Grid.ColumnSpan="3"
+                HorizontalAlignment="Right"
                 Background="{x:Bind TitlebarBrush, Mode=OneWay}">
             <Button x:Name="OrchestratorToggleButton"
                     Margin="4,4,6,4"

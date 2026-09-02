@@ -1,0 +1,26 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace TerminalApp
+{
+    // Header item of one project section in the vertical rail's "All" view:
+    // the tabs whose working directory lives under a single project path
+    // follow it in the same flat list.
+    [default_interface] runtimeclass TabGroup : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        TabGroup();
+
+        // Stable key (project id, or a normalized directory).
+        String Key { get; set; };
+        String Name { get; set; };
+        // Full project directory (home folder shortened to "~").
+        String Path { get; set; };
+        // Number of tabs in the section, even while collapsed.
+        UInt32 Count { get; set; };
+        String CountText { get; };
+        Boolean IsCollapsed { get; set; };
+        String ChevronGlyph { get; };
+        // False for the "no directory" section, which has nothing to open.
+        Boolean CanOpenNewTab { get; set; };
+    }
+}

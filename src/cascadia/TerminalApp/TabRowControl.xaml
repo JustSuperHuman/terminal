@@ -18,6 +18,218 @@
         here, not Transparent. This is load bearing, for showTabsInTitlebar=false.
     -->
 
+    <ContentPresenter.Resources>
+        <Style x:Key="TabRailTabContainerStyle"
+               TargetType="ListViewItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="MinHeight" Value="44" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
+        <!--  Section headers are not selectable rows: no hover/selection chrome, no tab stop.  -->
+        <Style x:Key="TabRailGroupHeaderContainerStyle"
+               TargetType="ListViewItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListViewItem">
+                        <ContentPresenter HorizontalContentAlignment="Stretch"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+            <DataTemplate x:Key="TabRailGroupHeaderTemplate"
+                      x:DataType="local:TabGroup">
+                <Grid Margin="0,8,0,2"
+                      HorizontalAlignment="Stretch"
+                      ColumnSpacing="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <!--  Whole header toggles the section; hover uses the subtle fill like the tab rows.  -->
+                    <Button Grid.Column="0"
+                            Padding="6,4,6,4"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            AutomationProperties.Name="{x:Bind Name}"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Click="OnTabGroupHeaderClick"
+                            CornerRadius="4">
+                        <Grid ColumnSpacing="6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Grid.Column="0"
+                                      VerticalAlignment="Center"
+                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                      FontSize="9"
+                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                      Glyph="{x:Bind ChevronGlyph}" />
+                            <StackPanel Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Spacing="1">
+                                <TextBlock FontSize="12"
+                                           FontWeight="SemiBold"
+                                           Text="{x:Bind Name}"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock FontSize="10.5"
+                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                           Text="{x:Bind Path}"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTipService.ToolTip="{x:Bind Path}"
+                                           Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Path)}" />
+                            </StackPanel>
+                            <!--  Count pill  -->
+                            <Border Grid.Column="2"
+                                    MinWidth="18"
+                                    Padding="5,0"
+                                    VerticalAlignment="Center"
+                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                    CornerRadius="9">
+                                <TextBlock HorizontalAlignment="Center"
+                                           FontSize="10.5"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           Text="{x:Bind CountText}" />
+                            </Border>
+                        </Grid>
+                    </Button>
+
+                    <Button x:Uid="TabGroupNewTabButton"
+                            Grid.Column="1"
+                            Width="26"
+                            Height="26"
+                            Padding="0"
+                            VerticalAlignment="Center"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Click="OnTabGroupNewTabClick"
+                            Content="&#xE710;"
+                            CornerRadius="4"
+                            FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                            FontSize="11"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Visibility="{x:Bind CanOpenNewTab}" />
+                </Grid>
+            </DataTemplate>
+
+        <DataTemplate x:Key="TabRailTabTemplate"
+                      x:DataType="local:Tab">
+            <Grid MinHeight="44"
+                  Padding="8,4"
+                  HorizontalAlignment="Stretch"
+                  AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                  ColumnSpacing="8"
+                  ContextFlyout="{x:Bind TabViewItem.ContextFlyout, Mode=OneWay}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="16" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="24" />
+                </Grid.ColumnDefinitions>
+
+                <mux:ProgressRing Grid.Column="0"
+                                  Width="15"
+                                  Height="15"
+                                  MinWidth="0"
+                                  MinHeight="0"
+                                  IsActive="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
+                                  IsIndeterminate="{x:Bind TabStatus.IsProgressRingIndeterminate, Mode=OneWay}"
+                                  Visibility="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
+                                  Value="{x:Bind TabStatus.ProgressValue, Mode=OneWay}" />
+                <IconSourceElement Grid.Column="0"
+                                   Width="16"
+                                   Height="16"
+                                   IconSource="{x:Bind mtu:IconPathConverter.IconSourceWUX(Icon), Mode=OneWay}"
+                                   Visibility="{x:Bind mtu:Converters.InvertedBooleanToVisibility(TabStatus.IsProgressRingActive), Mode=OneWay}" />
+
+                <StackPanel Grid.Column="1"
+                            VerticalAlignment="Center">
+                    <TextBlock PointerCanceled="OnVerticalTabTitlePointerCanceled"
+                               PointerCaptureLost="OnVerticalTabTitlePointerCaptureLost"
+                               PointerEntered="OnVerticalTabTitlePointerEntered"
+                               PointerExited="OnVerticalTabTitlePointerExited"
+                               Text="{x:Bind Title, Mode=OneWay}"
+                               TextTrimming="CharacterEllipsis" />
+                    <!--  Project (working directory) and git branch of the pane's current working directory.  -->
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="6">
+                        <TextBlock FontSize="11"
+                                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                                   Text="{x:Bind RailSubtitle, Mode=OneWay}"
+                                   TextTrimming="CharacterEllipsis"
+                                   Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailSubtitle), Mode=OneWay}" />
+                        <TextBlock FontSize="11"
+                                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                                   Text="{x:Bind GitBranch, Mode=OneWay}"
+                                   TextTrimming="CharacterEllipsis"
+                                   Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(GitBranch), Mode=OneWay}" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal">
+                    <FontIcon Margin="0,0,8,0"
+                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              FontSize="12"
+                              Glyph="&#xEA8F;"
+                              Visibility="{x:Bind TabStatus.BellIndicator, Mode=OneWay}" />
+                    <FontIcon Margin="0,0,8,0"
+                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              FontSize="12"
+                              Glyph="&#xE8A3;"
+                              Visibility="{x:Bind TabStatus.IsPaneZoomed, Mode=OneWay}" />
+                    <FontIcon Margin="0,0,8,0"
+                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              FontSize="12"
+                              Glyph="&#xE72E;"
+                              Visibility="{x:Bind TabStatus.IsReadOnlyActive, Mode=OneWay}" />
+                    <FontIcon Margin="0,0,8,0"
+                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              FontSize="12"
+                              Glyph="&#xEC05;"
+                              Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
+                    <Ellipse Width="8"
+                             Height="8"
+                             Margin="0,0,8,0"
+                             VerticalAlignment="Center"
+                             Fill="{x:Bind mtu:Converters.ColorToBrush(TabStatus.TabColorIndicator), Mode=OneWay}" />
+                </StackPanel>
+
+                <Button x:Uid="VerticalTabCloseButton"
+                        Grid.Column="3"
+                        Width="24"
+                        Height="24"
+                        Padding="0"
+                        VerticalAlignment="Center"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Click="OnVerticalTabCloseClick"
+                        Content="&#xE711;"
+                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                        FontSize="10" />
+            </Grid>
+        </DataTemplate>
+
+        <local:TabRailItemTemplateSelector x:Key="TabRailItemTemplateSelector"
+                                           GroupHeaderTemplate="{StaticResource TabRailGroupHeaderTemplate}"
+                                           TabTemplate="{StaticResource TabRailTabTemplate}" />
+        <local:TabRailItemStyleSelector x:Key="TabRailItemStyleSelector"
+                                        GroupHeaderStyle="{StaticResource TabRailGroupHeaderContainerStyle}"
+                                        TabStyle="{StaticResource TabRailTabContainerStyle}" />
+    </ContentPresenter.Resources>
+
     <Grid x:Name="VerticalTabRoot">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -130,107 +342,10 @@
                   CanReorderItems="{x:Bind CanReorderVerticalTabs, Mode=OneWay}"
                   DragItemsCompleted="OnVerticalTabDragItemsCompleted"
                   DragItemsStarting="OnVerticalTabDragItemsStarting"
-                  ItemsSource="{x:Bind FilteredTabs, Mode=OneWay}"
+                  ItemContainerStyleSelector="{StaticResource TabRailItemStyleSelector}"
+                  ItemTemplateSelector="{StaticResource TabRailItemTemplateSelector}"
                   SelectionChanged="OnVerticalTabSelectionChanged"
                   SelectionMode="Single">
-            <ListView.ItemContainerStyle>
-                <Style TargetType="ListViewItem">
-                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                    <Setter Property="MinHeight" Value="44" />
-                    <Setter Property="Padding" Value="0" />
-                </Style>
-            </ListView.ItemContainerStyle>
-            <ListView.ItemTemplate>
-                <DataTemplate x:DataType="local:Tab">
-                    <Grid MinHeight="44"
-                          Padding="8,4"
-                          HorizontalAlignment="Stretch"
-                          AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
-                          ColumnSpacing="8"
-                          ContextFlyout="{x:Bind TabViewItem.ContextFlyout, Mode=OneWay}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="16" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="24" />
-                        </Grid.ColumnDefinitions>
-
-                        <mux:ProgressRing Grid.Column="0"
-                                          Width="15"
-                                          Height="15"
-                                          MinWidth="0"
-                                          MinHeight="0"
-                                          IsActive="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
-                                          IsIndeterminate="{x:Bind TabStatus.IsProgressRingIndeterminate, Mode=OneWay}"
-                                          Visibility="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
-                                          Value="{x:Bind TabStatus.ProgressValue, Mode=OneWay}" />
-                        <IconSourceElement Grid.Column="0"
-                                           Width="16"
-                                           Height="16"
-                                           IconSource="{x:Bind mtu:IconPathConverter.IconSourceWUX(Icon), Mode=OneWay}"
-                                           Visibility="{x:Bind mtu:Converters.InvertedBooleanToVisibility(TabStatus.IsProgressRingActive), Mode=OneWay}" />
-
-                        <StackPanel Grid.Column="1"
-                                    VerticalAlignment="Center">
-                            <TextBlock PointerCanceled="OnVerticalTabTitlePointerCanceled"
-                                       PointerCaptureLost="OnVerticalTabTitlePointerCaptureLost"
-                                       PointerEntered="OnVerticalTabTitlePointerEntered"
-                                       PointerExited="OnVerticalTabTitlePointerExited"
-                                       Text="{x:Bind Title, Mode=OneWay}"
-                                       TextTrimming="CharacterEllipsis" />
-                            <!--  Git branch of the pane's current working directory, when it's in a repo.  -->
-                            <TextBlock FontSize="11"
-                                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                                       Text="{x:Bind GitBranch, Mode=OneWay}"
-                                       TextTrimming="CharacterEllipsis"
-                                       Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(GitBranch), Mode=OneWay}" />
-                        </StackPanel>
-
-                        <StackPanel Grid.Column="2"
-                                    VerticalAlignment="Center"
-                                    Orientation="Horizontal">
-                            <FontIcon Margin="0,0,8,0"
-                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                      FontSize="12"
-                                      Glyph="&#xEA8F;"
-                                      Visibility="{x:Bind TabStatus.BellIndicator, Mode=OneWay}" />
-                            <FontIcon Margin="0,0,8,0"
-                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                      FontSize="12"
-                                      Glyph="&#xE8A3;"
-                                      Visibility="{x:Bind TabStatus.IsPaneZoomed, Mode=OneWay}" />
-                            <FontIcon Margin="0,0,8,0"
-                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                      FontSize="12"
-                                      Glyph="&#xE72E;"
-                                      Visibility="{x:Bind TabStatus.IsReadOnlyActive, Mode=OneWay}" />
-                            <FontIcon Margin="0,0,8,0"
-                                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                      FontSize="12"
-                                      Glyph="&#xEC05;"
-                                      Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
-                            <Ellipse Width="8"
-                                     Height="8"
-                                     Margin="0,0,8,0"
-                                     VerticalAlignment="Center"
-                                     Fill="{x:Bind mtu:Converters.ColorToBrush(TabStatus.TabColorIndicator), Mode=OneWay}" />
-                        </StackPanel>
-
-                        <Button x:Uid="VerticalTabCloseButton"
-                                Grid.Column="3"
-                                Width="24"
-                                Height="24"
-                                Padding="0"
-                                VerticalAlignment="Center"
-                                Background="Transparent"
-                                BorderThickness="0"
-                                Click="OnVerticalTabCloseClick"
-                                Content="&#xE711;"
-                                FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                FontSize="10" />
-                    </Grid>
-                </DataTemplate>
-            </ListView.ItemTemplate>
         </ListView>
 
         <Grid Grid.Row="3">

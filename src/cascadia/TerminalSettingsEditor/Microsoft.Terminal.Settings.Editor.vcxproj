@@ -80,6 +80,9 @@
     <ClInclude Include="Compatibility.h">
       <DependentUpon>Compatibility.xaml</DependentUpon>
     </ClInclude>
+    <ClInclude Include="BridgeSettings.h">
+      <DependentUpon>BridgeSettings.xaml</DependentUpon>
+    </ClInclude>
     <ClInclude Include="KeyChordListener.h">
       <DependentUpon>KeyChordListener.xaml</DependentUpon>
     </ClInclude>
@@ -217,6 +220,9 @@
     <Page Include="Compatibility.xaml">
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="BridgeSettings.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="KeyChordListener.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -300,6 +306,9 @@
     </ClCompile>
     <ClCompile Include="Compatibility.cpp">
       <DependentUpon>Compatibility.xaml</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="BridgeSettings.cpp">
+      <DependentUpon>BridgeSettings.xaml</DependentUpon>
     </ClCompile>
     <ClCompile Include="KeyChordListener.cpp">
       <DependentUpon>KeyChordListener.xaml</DependentUpon>
@@ -454,6 +463,10 @@
     </Midl>
     <Midl Include="Compatibility.idl">
       <DependentUpon>Compatibility.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Midl>
+    <Midl Include="BridgeSettings.idl">
+      <DependentUpon>BridgeSettings.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Midl>
     <Midl Include="Rendering.idl">

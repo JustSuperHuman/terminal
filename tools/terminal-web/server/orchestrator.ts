@@ -154,11 +154,6 @@ export class Orchestrator extends EventEmitter {
   // sibling file is TypeScript (run through tsx); from a compiled dist it is
   // plain JS and runs on node directly. Under bun either runs as-is.
   private resolveMcpLaunch(): McpLaunch {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const tsScript = path.join(here, "orchestrator-mcp.ts");
-    const jsScript = path.join(here, "orchestrator-mcp.js");
-    const script = existsSync(tsScript) ? tsScript : jsScript;
-
     const env: Record<string, string> = {
       TERMINAL_WEB_SERVER: `http://127.0.0.1:${this.deps.getPort()}`
     };
@@ -166,6 +161,20 @@ export class Orchestrator extends EventEmitter {
     if (token) {
       env.TERMINAL_WEB_ACCESS_TOKEN = token;
     }
+
+    // The ready-to-install build ships its own Bun runtime and compiled JS, so
+    // the orchestrator stays functional without a machine-wide Node/Bun setup
+    // or source files beside the installed Terminal package.
+    if (process.env.TERMINAL_WEB_STANDALONE === "1") {
+      const assetRoot = process.env.TERMINAL_WEB_ASSET_ROOT ?? process.cwd();
+      const packagedScript = path.join(assetRoot, "dist", "server", "orchestrator-mcp.js");
+      return { command: process.execPath, args: [packagedScript], env };
+    }
+
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const tsScript = path.join(here, "orchestrator-mcp.ts");
+    const jsScript = path.join(here, "orchestrator-mcp.js");
+    const script = existsSync(tsScript) ? tsScript : jsScript;
 
     const runningOnBun = path.basename(process.execPath).toLowerCase().startsWith("bun");
     if (script.endsWith(".js") || runningOnBun) {

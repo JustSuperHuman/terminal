@@ -172,6 +172,10 @@
                                      x:Uid="Nav_Compatibility"
                                      Tag="Compatibility_Nav" />
 
+            <muxc:NavigationViewItem x:Name="BridgeSettingsNavItem"
+                                     Content="Terminal bridge"
+                                     Tag="BridgeSettings_Nav" />
+
             <muxc:NavigationViewItem x:Name="ActionsNavItem"
                                      x:Uid="Nav_Actions"
                                      Tag="Actions_Nav">

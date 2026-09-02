@@ -81,6 +81,10 @@
     </Midl>
     <Midl Include="PaletteItemTemplateSelector.idl" />
     <Midl Include="Tab.idl" />
+    <Midl Include="TabGroup.idl" />
+    <Midl Include="TabRailSelectors.idl" />
+    <Midl Include="TabRailSelectors.idl" />
+    <Midl Include="TabRailSelectors.idl" />
     <Midl Include="TerminalWindow.idl" />
     <Midl Include="TaskbarState.idl" />
     <Midl Include="IPaneContent.idl" />

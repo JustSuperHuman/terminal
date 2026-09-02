@@ -1,37 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-// TerminalBridge
-// --------------
-// A process-wide client that mirrors every ConPTY session into the
-// "terminal-web" bridge server (tools/terminal-web) so the web and mobile
-// clients can view and control native Windows Terminal sessions.
-//
-// It speaks the exact JSON-over-WebSocket protocol that the standalone
-// `bridge` Node client uses (see tools/terminal-web/server/types.ts):
-//   client -> server : register / output / resize / exit
-//   server -> client : registered / input / resize / kill / error
-//
-// Transport is an in-process WinHTTP WebSocket (the same primitive
-// AzureConnection already uses), so no sidecar process is required.
-//
-// Threading:
-//   * A receive thread owns the connect/reconnect lifecycle and dispatches
-//     inbound input/resize/kill to the originating connection.
-//   * A send thread drains a bounded outbound queue. Output is enqueued (never
-//     sent inline) so a slow or absent server can never stall local rendering.
+// Thin C++/WinRT adapter for the built-in Rust terminal bridge. Rust owns the
+// HTTP/WebSocket host, session registry, VT rendering, replay, authentication,
+// reconnect behavior, and web/mobile protocol. This class only retains weak
+// WinRT connections so Rust can deliver input, resize, and close commands.
 
 #pragma once
 
-#include <winhttp.h>
-
-#include <atomic>
-#include <condition_variable>
-#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
-#include <thread>
 
 namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 {
@@ -43,20 +22,21 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             Disabled = 0,
             Connecting = 1,
             Connected = 2,
-            // The spawn owner has watched its server child die quickly several
-            // times in a row; reconnects continue, but the UI should point at
-            // the server log instead of a bare "offline".
             ServerFailing = 3,
         };
 
         static TerminalBridge& Instance();
+        static void Configure(bool enabled,
+                              bool automaticPort,
+                              uint16_t port,
+                              std::wstring_view bindAddress,
+                              bool webInterfaceEnabled);
 
         bool Enabled() const noexcept { return _enabled; }
         Status ConnectionStatus() const noexcept;
         std::wstring Endpoint() const;
         std::wstring AccessToken() const;
 
-        // Called by ConptyConnection as sessions come and go.
         void RegisterSession(const winrt::guid& id,
                              const winrt::Windows::Foundation::IInspectable& connection,
                              std::wstring_view title,
@@ -68,6 +48,7 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         void ForwardOutput(const winrt::guid& id, std::wstring_view data);
         void ForwardTitle(const winrt::guid& id, std::wstring_view title);
         void SetProject(const winrt::guid& id, std::wstring_view projectId);
+        void ForwardCwd(const winrt::guid& id, std::wstring_view cwd);
         void NotifyResize(const winrt::guid& id, uint32_t rows, uint32_t cols);
         void NotifyExit(const winrt::guid& id, uint32_t exitCode);
         void Unregister(const winrt::guid& id);
@@ -78,90 +59,27 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
     private:
         TerminalBridge();
 
-        struct SessionEntry
-        {
-            winrt::weak_ref<winrt::Windows::Foundation::IInspectable> connection;
-            std::string registerMessage; // cached JSON used to re-register after a reconnect
-            std::wstring lastTitle; // dedupes title updates
-            // A bounded tail lets a fresh terminal-web process reconstruct the
-            // visible screen and any prompt that was already awaiting input.
-            std::deque<std::wstring> replayChunks;
-            size_t replayChars{ 0 };
-            // Keep the latest bro-cli presence marker even after it scrolls
-            // out of the replay tail, so Claude/Codex identity survives a
-            // desktop bridge restart. The server still validates the marker.
-            std::wstring agentScanBuffer;
-            std::wstring agentPresenceSequence;
-        };
+        static void _dispatchRustCommand(void* context,
+                                         const char16_t* sessionId,
+                                         size_t sessionIdLength,
+                                         uint32_t kind,
+                                         const char16_t* data,
+                                         size_t dataLength,
+                                         uint32_t rows,
+                                         uint32_t cols) noexcept;
+        void _dispatchRustCommand(std::u16string_view sessionId,
+                                  uint32_t kind,
+                                  std::u16string_view data,
+                                  uint32_t rows,
+                                  uint32_t cols) noexcept;
 
-        void _ensureStarted();
-        void _enqueue(std::string message);
-        std::string _buildReplayRegister(const SessionEntry& entry) const noexcept;
-
-        void _ensureServerRunning() noexcept;
         std::wstring _serverRoot() const noexcept;
-
-        void _sendLoop() noexcept;
-        void _receiveLoop() noexcept;
-        bool _connectAny() noexcept;
-        bool _connect(INTERNET_PORT port) noexcept;
-        INTERNET_PORT _readRecordedServerPort() const noexcept;
-        void _receiveUntilError() noexcept;
-        void _closeSocket() noexcept;
-        void _dispatchServerMessage(const std::string& utf8) noexcept;
-
-        std::string _buildRegister(std::wstring_view id,
-                                   std::wstring_view title,
-                                   std::wstring_view shell,
-                                   std::wstring_view cwd,
-                                   uint32_t pid,
-                                   uint32_t cols,
-                                   uint32_t rows,
-                                   std::wstring_view projectId) const;
+        std::wstring _serverDataRoot() const noexcept;
+        static std::wstring _copyRustString(size_t (*copy)(char16_t*, size_t) noexcept);
 
         bool _enabled{ false };
-        std::wstring _host{ L"127.0.0.1" };
-        INTERNET_PORT _port{ 10001 };
-        // The port we most recently connected on. Usually equal to _port, but
-        // the server records its actual port in .terminal-web-server.json when
-        // the default is taken and it has to walk up, and we follow it there.
-        std::atomic<uint32_t> _activePort{ 0 };
-        std::wstring _path{ L"/bridge" };
-
-        std::once_flag _startFlag;
-        std::thread _sendThread;
-        std::thread _recvThread;
-
         std::mutex _sessionsMutex;
-        std::map<std::wstring, SessionEntry> _sessions;
-        // Project assignments may arrive before the session registers; they're
-        // merged into the register payload when known ahead of time.
+        std::map<std::wstring, winrt::weak_ref<winrt::Windows::Foundation::IInspectable>> _sessions;
         std::map<std::wstring, std::wstring> _sessionProjects;
-
-        std::mutex _outboundMutex;
-        std::condition_variable _outboundCv;
-        std::deque<std::string> _outbound;
-        size_t _outboundBytes{ 0 };
-
-        std::mutex _socketMutex;
-        wil::unique_winhttp_hinternet _session;
-        wil::unique_winhttp_hinternet _connection;
-        wil::unique_winhttp_hinternet _webSocket;
-        std::atomic<bool> _connected{ false };
-        std::atomic<uint32_t> _status{ 0 };
-
-        // Keep-alive for the local terminal-web server process. While any
-        // session is registered and the server is unreachable, we (re)spawn it
-        // from the repo's tools/terminal-web package. The child's stdout and
-        // stderr land in <root>\.terminal-web-server.log so failures are
-        // diagnosable, and each spawn runs `bun install` first so a missing or
-        // stale node_modules heals itself instead of crash-looping silently.
-        std::mutex _serverMutex;
-        wil::unique_handle _serverProcess;
-        wil::unique_handle _spawnOwnerMutex;
-        bool _spawnOwner{ false };
-        ULONGLONG _lastSpawnTick{ 0 };
-        uint32_t _quickExitCount{ 0 };
-        std::atomic<bool> _serverFailing{ false };
     };
 }

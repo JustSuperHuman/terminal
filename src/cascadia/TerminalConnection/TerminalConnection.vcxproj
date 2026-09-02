@@ -27,6 +27,7 @@
     </ClInclude>
     <ClInclude Include="CTerminalHandoff.h" />
     <ClInclude Include="TerminalBridge.h" />
+    <ClInclude Include="TerminalBridgeRust.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="ConptyConnection.h">
       <DependentUpon>ConptyConnection.idl</DependentUpon>
@@ -95,6 +96,19 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(OpenConsoleDir)src\cppwinrt.build.post.props" />
+  <PropertyGroup>
+    <RustBridgeRoot>$(MSBuildThisFileDirectory)rust-bridge</RustBridgeRoot>
+    <RustBridgeTarget Condition="'$(Platform)' == 'x64'">x86_64-pc-windows-msvc</RustBridgeTarget>
+    <RustBridgeTarget Condition="'$(Platform)' == 'x86'">i686-pc-windows-msvc</RustBridgeTarget>
+    <RustBridgeTarget Condition="'$(Platform)' == 'arm64'">aarch64-pc-windows-msvc</RustBridgeTarget>
+    <RustBridgeProfile Condition="'$(Configuration)' == 'Debug'">debug</RustBridgeProfile>
+    <RustBridgeProfile Condition="'$(RustBridgeProfile)' == ''">release</RustBridgeProfile>
+    <RustBridgeReleaseArg Condition="'$(RustBridgeProfile)' == 'release'">--release</RustBridgeReleaseArg>
+    <RustBridgeLibrary>$(RustBridgeRoot)\target\$(RustBridgeTarget)\$(RustBridgeProfile)\terminal_bridge_rs.lib</RustBridgeLibrary>
+  </PropertyGroup>
+  <Target Name="BuildRustTerminalBridge" BeforeTargets="Link">
+    <Exec Command="cargo build --manifest-path &quot;$(RustBridgeRoot)\Cargo.toml&quot; --target $(RustBridgeTarget) $(RustBridgeReleaseArg)" />
+  </Target>
   <ItemDefinitionGroup>
     <ClCompile>
       <!-- By defining this here, we ensure that we don't try to dllimport conpty -->
@@ -102,7 +116,7 @@
       <AdditionalIncludeDirectories>$(IntDir)..\OpenConsoleProxy;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(OpenConsoleCommonOutDir)\conptylib.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(RustBridgeLibrary);$(OpenConsoleCommonOutDir)\conptylib.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(SolutionDir)build\rules\CollectWildcardResources.targets" />

@@ -75,6 +75,36 @@ namespace
 
     // Minimal synchronous HTTP client for the local terminal-web server that
     // backs the project tabs. Only ever call this from a background thread.
+    // The bridge host may not sit on the default port (automatic port
+    // selection, or another process owning it), so resolve "host:port" from
+    // the live bridge endpoint every time.
+    std::pair<std::wstring, INTERNET_PORT> _projectServerEndpoint()
+    {
+        std::wstring host{ L"127.0.0.1" };
+        INTERNET_PORT port{ 10001 };
+        try
+        {
+            const std::wstring endpoint{ winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection::BridgeEndpoint() };
+            const auto colon{ endpoint.rfind(L':') };
+            if (colon != std::wstring::npos && colon + 1 < endpoint.size())
+            {
+                const auto parsed{ std::stoul(endpoint.substr(colon + 1)) };
+                if (parsed > 0 && parsed <= 65535)
+                {
+                    port = static_cast<INTERNET_PORT>(parsed);
+                    const auto candidate{ endpoint.substr(0, colon) };
+                    // Bind addresses aren't connectable; always use loopback for those.
+                    if (!candidate.empty() && candidate != L"0.0.0.0" && candidate != L"::" && candidate != L"[::]")
+                    {
+                        host = candidate;
+                    }
+                }
+            }
+        }
+        CATCH_LOG();
+        return { host, port };
+    }
+
     std::optional<std::string> _projectServerRequest(const wchar_t* verb, const std::wstring& path, const std::string& body = {})
     {
         const unique_winhttp_handle session{ WinHttpOpen(L"WindowsTerminal-Projects/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
@@ -83,7 +113,8 @@ namespace
             return std::nullopt;
         }
 
-        const unique_winhttp_handle connection{ WinHttpConnect(session.get(), L"127.0.0.1", 10001, 0) };
+        const auto [host, port] = _projectServerEndpoint();
+        const unique_winhttp_handle connection{ WinHttpConnect(session.get(), host.c_str(), port, 0) };
         if (!connection)
         {
             return std::nullopt;
@@ -364,6 +395,14 @@ namespace winrt::TerminalApp::implementation
         }
         _settings = settings;
 
+        const auto globals = _settings.GlobalSettings();
+        TerminalConnection::ConptyConnection::ConfigureBridge(
+            globals.BridgeEnabled(),
+            globals.BridgeAutomaticPort(),
+            static_cast<uint16_t>(std::clamp(globals.BridgePort(), 1, 65535)),
+            globals.BridgeBindAddress(),
+            globals.BridgeWebInterface());
+
         // Make sure to call SetCommands before _RefreshUIForSettingsReload.
         // SetCommands will make sure the KeyChordText of Commands is updated, which needs
         // to happen before the Settings UI is reloaded and tries to re-read those values.
@@ -541,6 +580,16 @@ namespace winrt::TerminalApp::implementation
             if (auto page{ weakThis.get() })
             {
                 page->CollectOtherWindowsRequested.raise(*page, nullptr);
+            }
+        };
+        // The [+] on a project header in the rail opens a terminal in that
+        // project's directory.
+        tabRowImpl->NewTabInDirectoryRequested = [weakThis{ get_weak() }](const winrt::hstring& directory) {
+            if (auto page{ weakThis.get() })
+            {
+                NewTerminalArgs args;
+                args.StartingDirectory(directory);
+                page->_OpenNewTerminalViaDropdown(args);
             }
         };
 
@@ -2371,6 +2420,30 @@ namespace winrt::TerminalApp::implementation
         // and mirror the assignment back to web/mobile clients.
         if (tabImpl && !cwd.empty())
         {
+            // The rail groups the "All" view by path, so it needs the live
+            // directory even before the bridge has a project for it.
+            if (tabImpl->WorkingDirectory() != cwd)
+            {
+                tabImpl->WorkingDirectory(winrt::hstring{ cwd });
+                if (_tabRow)
+                {
+                    winrt::get_self<implementation::TabRowControl>(_tabRow)->NotifyTabDirectoryUpdated();
+                }
+            }
+
+            // The bridge derives the project list from every session's live
+            // directory, so tell it where this pane is now. Deduped inside.
+            if (const auto control{ tabImpl->GetActiveTerminalControl() })
+            {
+                if (const auto conn{ control.Connection() })
+                {
+                    if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
+                    {
+                        conpty.UpdateBridgeCwd(winrt::hstring{ cwd });
+                    }
+                }
+            }
+
             const auto cwdKey{ _projectDirectoryKey(cwd) };
             const auto project = std::find_if(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& candidate) {
                 return _projectDirectoryKey(candidate.Cwd) == cwdKey;
@@ -2380,6 +2453,8 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto previousProjectId{ tab.ProjectId() };
                 tabImpl->ProjectId(project->Id);
+                tabImpl->ProjectName(project->Name);
+                tabImpl->ProjectPath(project->Cwd);
 
                 if (const auto control{ tabImpl->GetActiveTerminalControl() })
                 {
@@ -2495,6 +2570,7 @@ namespace winrt::TerminalApp::implementation
             {
                 page->_RefreshTabGitBranch(tab);
             }
+            page->_ApplyProjectNames();
 
             // If the active project disappeared (deleted remotely), fall back
             // to "All"; _SelectProject rebuilds the strip either way.
@@ -2594,6 +2670,49 @@ namespace winrt::TerminalApp::implementation
 
             if (closable)
             {
+                // Right-click: rename (persisted by the bridge per directory)
+                // or close the project.
+                MenuFlyout contextFlyout;
+                MenuFlyoutItem renameItem;
+                renameItem.Text(L"Rename project...");
+                FontIcon renameIcon;
+                renameIcon.Glyph(L"\xE8AC"); // Rename
+                renameItem.Icon(renameIcon);
+                const auto weakButton{ winrt::make_weak(tabButton) };
+                renameItem.Click([weakThis, weakButton, id, label](auto&&, auto&&) {
+                    const auto page{ weakThis.get() };
+                    const auto button{ weakButton.get() };
+                    if (page && button)
+                    {
+                        page->_ShowRenameProjectFlyout(button, id, label);
+                    }
+                });
+                contextFlyout.Items().Append(renameItem);
+
+                MenuFlyoutItem closeItem;
+                closeItem.Text(L"Close project");
+                FontIcon closeItemIcon;
+                closeItemIcon.Glyph(L"\xE711"); // Cancel
+                closeItem.Icon(closeItemIcon);
+                closeItem.Click([weakThis, id, label](auto&&, auto&&) {
+                    if (const auto page{ weakThis.get() })
+                    {
+                        page->_CloseProjectRequested(id, label);
+                    }
+                });
+                contextFlyout.Items().Append(closeItem);
+                tabButton.ContextFlyout(contextFlyout);
+
+                // Double-click renames too.
+                tabButton.DoubleTapped([weakThis, weakButton, id, label](auto&&, auto&&) {
+                    const auto page{ weakThis.get() };
+                    const auto button{ weakButton.get() };
+                    if (page && button)
+                    {
+                        page->_ShowRenameProjectFlyout(button, id, label);
+                    }
+                });
+
                 // Project tabs can be dragged to reorder; the panel's Drop
                 // handler (wired in Create()) computes the target position.
                 tabButton.CanDrag(true);
@@ -2640,7 +2759,8 @@ namespace winrt::TerminalApp::implementation
         ToolTipService::SetToolTip(webButton, winrt::box_value(L"Open web view"));
         Automation::AutomationProperties::SetName(webButton, L"Open web view");
         webButton.Click([](auto&&, auto&&) {
-            std::ignore = Launcher::LaunchUriAsync(Windows::Foundation::Uri{ L"http://127.0.0.1:10001/" });
+            const auto [host, port] = _projectServerEndpoint();
+            std::ignore = Launcher::LaunchUriAsync(Windows::Foundation::Uri{ L"http://" + host + L":" + std::to_wstring(port) + L"/" });
         });
         panel.Children().Append(webButton);
     }
@@ -2687,6 +2807,141 @@ namespace winrt::TerminalApp::implementation
                 _OpenNewTerminalViaDropdown(args);
             }
         }
+    }
+
+    // Method Description:
+    // - Refreshes every tab's project display name from the current project
+    //   list and hands the strip order to the rail so the "All" view groups
+    //   tabs by project.
+    void TerminalPage::_ApplyProjectNames()
+    {
+        for (const auto& tab : _tabs)
+        {
+            const auto tabImpl{ _GetTabImpl(tab) };
+            if (!tabImpl || tab.ProjectId().empty())
+            {
+                continue;
+            }
+            for (const auto& project : _bridgeProjects)
+            {
+                if (project.Id == tab.ProjectId())
+                {
+                    if (tabImpl->ProjectName() != project.Name)
+                    {
+                        tabImpl->ProjectName(project.Name);
+                    }
+                    if (tabImpl->ProjectPath() != project.Cwd)
+                    {
+                        tabImpl->ProjectPath(project.Cwd);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (_tabRow)
+        {
+            std::vector<winrt::hstring> order;
+            order.reserve(_bridgeProjects.size());
+            for (const auto& project : _bridgeProjects)
+            {
+                order.push_back(project.Id);
+            }
+            winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectOrder(std::move(order));
+        }
+    }
+
+    // Method Description:
+    // - Opens a small flyout with a text box anchored to a project tab.
+    //   Enter (or losing focus with a changed name) renames the project.
+    void TerminalPage::_ShowRenameProjectFlyout(const FrameworkElement& anchor, const winrt::hstring& projectId, const winrt::hstring& currentName)
+    {
+        Flyout flyout;
+        TextBox nameBox;
+        nameBox.Text(currentName);
+        nameBox.MinWidth(220);
+        nameBox.PlaceholderText(L"Project name");
+        Automation::AutomationProperties::SetName(nameBox, L"Project name");
+
+        const auto weakThis{ get_weak() };
+        // Weak: the flyout owns the box, which owns these handlers.
+        const auto weakFlyout{ winrt::make_weak(flyout) };
+        auto commit = [weakThis, projectId, currentName, weakFlyout](const TextBox& box) {
+            const auto newName{ box.Text() };
+            if (const auto flyout{ weakFlyout.get() })
+            {
+                flyout.Hide();
+            }
+            if (const auto page{ weakThis.get() })
+            {
+                if (!newName.empty() && newName != currentName)
+                {
+                    page->_RenameProject(projectId, newName);
+                }
+            }
+        };
+
+        nameBox.KeyDown([commit, weakFlyout](const IInspectable& sender, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            if (e.Key() == VirtualKey::Enter)
+            {
+                e.Handled(true);
+                commit(sender.as<TextBox>());
+            }
+            else if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+                if (const auto flyout{ weakFlyout.get() })
+                {
+                    flyout.Hide();
+                }
+            }
+        });
+
+        flyout.Content(nameBox);
+        flyout.Opened([weakBox = winrt::make_weak(nameBox)](auto&&, auto&&) {
+            const auto nameBox{ weakBox.get() };
+            if (!nameBox)
+            {
+                return;
+            }
+            nameBox.Focus(FocusState::Programmatic);
+            nameBox.SelectAll();
+        });
+        flyout.ShowAt(anchor);
+    }
+
+    // Method Description:
+    // - Renames a project on the bridge (PATCH /api/projects/:id) and applies
+    //   the new name locally without waiting for the next poll.
+    safe_void_coroutine TerminalPage::_RenameProject(winrt::hstring projectId, winrt::hstring newName)
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        WDJ::JsonObject body;
+        body.SetNamedValue(L"name", WDJ::JsonValue::CreateStringValue(newName));
+        const auto payload{ winrt::to_string(body.Stringify()) };
+
+        co_await winrt::resume_background();
+        const auto response{ _projectServerRequest(L"PATCH", L"/api/projects/" + std::wstring{ projectId }, payload) };
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page || !response)
+        {
+            co_return;
+        }
+
+        for (auto& project : page->_bridgeProjects)
+        {
+            if (project.Id == projectId)
+            {
+                project.Name = newName;
+                break;
+            }
+        }
+        page->_ApplyProjectNames();
+        page->_RebuildProjectTabs();
     }
 
     // Method Description:

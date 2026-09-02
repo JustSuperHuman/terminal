@@ -26,6 +26,15 @@ namespace TerminalApp
 
         // Which terminal-web project this tab was created under ("" = none).
         String ProjectId;
+        // Display name of that project, shown under the title in the rail.
+        String ProjectName { get; };
+        // Directory of that project ("" = none).
+        String ProjectPath { get; };
+        // Live working directory of the active pane ("" when unknown).
+        String WorkingDirectory { get; };
+        // Second line under the title in the rail: the project name in flat
+        // views, or the path relative to the group's directory when grouped.
+        String RailSubtitle { get; };
 
         void Focus(Windows.UI.Xaml.FocusState focusState);
         void Close();

@@ -5,6 +5,9 @@
 #include "ConptyConnection.h"
 
 #include <conpty-static.h>
+#include <tlhelp32.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <winmeta.h>
 
 #include "CTerminalHandoff.h"
@@ -915,6 +918,124 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         }
     }
 
+    void ConptyConnection::UpdateBridgeCwd(const winrt::hstring& cwd)
+    {
+        if (cwd.empty() || cwd == _bridgeCwd)
+        {
+            return;
+        }
+        _bridgeCwd = cwd;
+        if (TerminalBridge::Instance().Enabled())
+        {
+            TerminalBridge::Instance().ForwardCwd(_sessionId, cwd);
+        }
+    }
+
+    // Returns "claude" / "codex" when one of those agents is running in this
+    // connection's process tree, "" otherwise. Walks a process snapshot from
+    // the ConPTY client down to its descendants; only for launcher runtimes
+    // (node/bun/deno) does it read the command line, since those hide the
+    // agent behind a generic image name.
+    winrt::hstring ConptyConnection::ForegroundAgent()
+    try
+    {
+        const auto rootPid = _piClient.dwProcessId;
+        if (rootPid == 0)
+        {
+            return {};
+        }
+
+        wil::unique_handle snapshot{ CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if (!snapshot)
+        {
+            return {};
+        }
+
+        struct ProcessInfo
+        {
+            DWORD Pid{};
+            DWORD ParentPid{};
+            std::wstring Image;
+        };
+        std::vector<ProcessInfo> processes;
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot.get(), &entry))
+        {
+            do
+            {
+                std::wstring image{ entry.szExeFile };
+                std::transform(image.begin(), image.end(), image.begin(), ::towlower);
+                processes.push_back({ entry.th32ProcessID, entry.th32ParentProcessID, std::move(image) });
+            } while (Process32NextW(snapshot.get(), &entry));
+        }
+
+        static constexpr auto classify = [](std::wstring_view text) -> const wchar_t* {
+            if (text.find(L"claude") != std::wstring_view::npos)
+            {
+                return L"claude";
+            }
+            if (text.find(L"codex") != std::wstring_view::npos)
+            {
+                return L"codex";
+            }
+            return nullptr;
+        };
+
+        std::unordered_set<DWORD> visited{ rootPid };
+        std::vector<DWORD> frontier{ rootPid };
+        while (!frontier.empty())
+        {
+            const auto pid = frontier.back();
+            frontier.pop_back();
+
+            for (const auto& process : processes)
+            {
+                if (process.Pid != pid)
+                {
+                    continue;
+                }
+
+                if (const auto agent = classify(process.Image))
+                {
+                    return winrt::hstring{ agent };
+                }
+
+                if (process.Image == L"node.exe" || process.Image == L"bun.exe" || process.Image == L"deno.exe")
+                {
+                    wil::unique_handle handle{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
+                    if (handle)
+                    {
+                        try
+                        {
+                            std::wstring commandline{ _commandlineFromProcess(handle.get()) };
+                            std::transform(commandline.begin(), commandline.end(), commandline.begin(), ::towlower);
+                            if (const auto agent = classify(commandline))
+                            {
+                                return winrt::hstring{ agent };
+                            }
+                        }
+                        CATCH_LOG();
+                    }
+                }
+            }
+
+            for (const auto& process : processes)
+            {
+                if (process.ParentPid == pid && process.Pid != pid && visited.insert(process.Pid).second)
+                {
+                    frontier.push_back(process.Pid);
+                }
+            }
+        }
+        return {};
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        return {};
+    }
+
     winrt::hstring ConptyConnection::BridgeConnectionStatus()
     {
         switch (TerminalBridge::Instance().ConnectionStatus())
@@ -938,6 +1059,15 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
     winrt::hstring ConptyConnection::BridgeAccessToken()
     {
         return winrt::hstring{ TerminalBridge::Instance().AccessToken() };
+    }
+
+    void ConptyConnection::ConfigureBridge(const bool enabled,
+                                           const bool automaticPort,
+                                           const uint16_t port,
+                                           const winrt::hstring& bindAddress,
+                                           const bool webInterfaceEnabled)
+    {
+        TerminalBridge::Configure(enabled, automaticPort, port, bindAddress, webInterfaceEnabled);
     }
 
     void ConptyConnection::StartInboundListener()

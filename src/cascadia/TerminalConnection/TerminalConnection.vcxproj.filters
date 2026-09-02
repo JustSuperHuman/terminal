@@ -30,6 +30,7 @@
     <ClInclude Include="CTerminalHandoff.h" />
     <ClInclude Include="BaseTerminalConnection.h" />
     <ClInclude Include="TerminalBridge.h" />
+    <ClInclude Include="TerminalBridgeRust.h" />
     <ClInclude Include="WebSessionConnection.h" />
   </ItemGroup>
   <ItemGroup>

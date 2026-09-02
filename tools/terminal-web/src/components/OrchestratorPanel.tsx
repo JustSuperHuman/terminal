@@ -200,7 +200,10 @@ export function OrchestratorPanel({
   // (with an activity pulse); on mobile the header button is the way in.
   if (!open) {
     return (
-      <aside className="hidden w-11 shrink-0 flex-col items-center gap-3 border-l bg-sidebar py-3 lg:flex">
+      <aside
+        data-orchestrator-panel="collapsed"
+        className="hidden w-11 shrink-0 flex-col items-center gap-3 border-l border-border/90 bg-[#14161b] py-3 shadow-[-10px_0_24px_rgba(0,0,0,0.32)] lg:flex"
+      >
         <Tooltip>
           <TooltipTrigger asChild>
             <Button variant="ghost" size="iconSm" className="relative" onClick={() => onOpenChange(true)}>
@@ -386,7 +389,11 @@ export function OrchestratorPanel({
   }
 
   return (
-    <aside className="relative hidden shrink-0 flex-col border-l bg-sidebar lg:flex" style={{ width }}>
+    <aside
+      data-orchestrator-panel="expanded"
+      className="relative hidden shrink-0 flex-col border-l bg-sidebar lg:flex"
+      style={{ width }}
+    >
       <div
         className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize transition-colors hover:bg-primary/30 active:bg-primary/40"
         onPointerDown={beginResize}

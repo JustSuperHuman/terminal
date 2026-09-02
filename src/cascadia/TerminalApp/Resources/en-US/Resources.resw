@@ -463,6 +463,16 @@
   <data name="RecentSortToggle.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Sort tabs by recent activity</value>
   </data>
+  <data name="TabRailUngroupedSectionName" xml:space="preserve">
+    <value>Other</value>
+    <comment>Header of the vertical tab rail section holding tabs with no known working directory.</comment>
+  </data>
+  <data name="TabGroupNewTabButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>New tab in this project</value>
+  </data>
+  <data name="TabGroupNewTabButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>New tab in this project</value>
+  </data>
   <data name="VerticalTabCloseButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
     <value>Close tab</value>
   </data>

@@ -432,6 +432,9 @@ namespace winrt::TerminalApp::implementation
         void _ShowNewProjectTip();
         safe_void_coroutine _CreateProjectFromTip();
         safe_void_coroutine _CloseProjectRequested(winrt::hstring projectId, winrt::hstring projectName);
+        void _ShowRenameProjectFlyout(const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const winrt::hstring& projectId, const winrt::hstring& currentName);
+        safe_void_coroutine _RenameProject(winrt::hstring projectId, winrt::hstring newName);
+        void _ApplyProjectNames();
 
     public:
         void _NewProjectActionClick(const IInspectable& sender, const IInspectable& eventArgs);

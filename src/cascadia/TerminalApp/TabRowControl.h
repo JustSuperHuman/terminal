@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "winrt/Windows.UI.Xaml.Input.h"
 
 #include "Tab.h"
+#include "TabGroup.h"
 #include "TabRowControl.g.h"
 
 template<typename... Args>
@@ -38,6 +40,8 @@ namespace winrt::TerminalApp::implementation
         void OnVerticalTabDragItemsStarting(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::DragItemsStartingEventArgs& e);
         void OnVerticalTabDragItemsCompleted(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::DragItemsCompletedEventArgs& e);
         void OnCollectWindowsClick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
+        void OnTabGroupHeaderClick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
+        void OnTabGroupNewTabClick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
         void OnNewTabProfilesPanelSizeChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e);
         void OnRecentSortToggleChecked(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
         void OnRecentSortToggleUnchecked(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::RoutedEventArgs& e);
@@ -46,12 +50,15 @@ namespace winrt::TerminalApp::implementation
         void NotifyTabTitleUpdated(const winrt::TerminalApp::Tab& tab);
         winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::Tab> FilteredTabs() const noexcept;
         void SelectTab(const winrt::TerminalApp::Tab& tab);
+        void NotifyTabDirectoryUpdated();
         void SetProjectFilter(const winrt::hstring& projectId);
+        void SetProjectOrder(std::vector<winrt::hstring> projectIds);
         void FitNewTabProfileButtons();
 
         til::typed_event<winrt::Windows::Foundation::IInspectable, winrt::TerminalApp::Tab> VerticalTabSelected;
         std::function<void(const winrt::TerminalApp::Tab&, uint32_t)> VerticalTabMoveRequested;
         std::function<void()> CollectWindowsRequested;
+        std::function<void(const winrt::hstring&)> NewTabInDirectoryRequested;
 
         til::property_changed_event PropertyChanged;
         WINRT_OBSERVABLE_PROPERTY(bool, ShowElevationShield, PropertyChanged.raise, false);
@@ -84,6 +91,33 @@ namespace winrt::TerminalApp::implementation
         SafeDispatcherTimer _bufferSearchTimer;
         // Non-empty: only show tabs created under this terminal-web project.
         winrt::hstring _projectFilter;
+        // Project strip order; the "All" view groups tabs by it.
+        std::vector<winrt::hstring> _projectOrder;
+        // Project sections of the "All" view (bound through GroupedTabsSource).
+        // What the rail's ListView actually shows: TabGroup headers
+        // interleaved with Tab rows (or just tabs in flat views).
+        winrt::Windows::Foundation::Collections::IObservableVector<winrt::Windows::Foundation::IInspectable> _railItems{ nullptr };
+        // Group keys the user collapsed; their tabs stay out of the list.
+        std::set<std::wstring> _collapsedGroups;
+        // Tab -> collapsed group key, so selecting a hidden tab reopens its group.
+        std::vector<std::pair<winrt::TerminalApp::Tab, std::wstring>> _collapsedTabs;
+
+        struct TabGroupBucket
+        {
+            std::wstring Key;
+            std::wstring Name;
+            std::wstring Path;
+            std::wstring PathKey;
+            size_t Rank{ 0 };
+            bool CanOpenNewTab{ false };
+            std::vector<winrt::TerminalApp::Tab> Tabs;
+        };
+        std::vector<TabGroupBucket> _bucketTabsByPath(const std::vector<winrt::TerminalApp::Tab>& tabs) const;
+        void _publishGroups(std::vector<TabGroupBucket> buckets);
+        static std::wstring _pathKey(std::wstring_view path);
+        static std::wstring _pathLeaf(std::wstring_view path);
+        static std::wstring _displayPath(std::wstring_view path);
+        static bool _pathIsUnder(std::wstring_view childKey, std::wstring_view parentKey);
 
         void _updateFilteredTabs(const bool includeBufferSearch = true);
         void _bufferSearchTimerTick(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& e);
@@ -91,7 +125,7 @@ namespace winrt::TerminalApp::implementation
         void _markTabRecentlyUpdated(const winrt::TerminalApp::Tab& tab);
         void _closeVerticalTabTitleToolTip();
         void _pruneActivityState();
-        void _updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms);
+        void _updateCanReorderVerticalTabs(const std::vector<std::wstring>& terms, const bool grouped);
         bool _tabIsTracked(const winrt::TerminalApp::Tab& tab) const;
         bool _matchesFilter(const winrt::TerminalApp::Tab& tab, const std::vector<std::wstring>& terms, const bool allowBufferSearch) const;
         std::wstring _tabSearchText(const winrt::TerminalApp::Tab& tab, const bool includeBuffer) const;

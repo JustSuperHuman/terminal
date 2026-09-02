@@ -281,6 +281,10 @@ function getHost(): string {
   return getArgValue("--host") ?? process.env.TERMINAL_WEB_HOST ?? "0.0.0.0";
 }
 
+function getAssetRoot(): string {
+  return path.resolve(getArgValue("--asset-root") ?? process.env.TERMINAL_WEB_ASSET_ROOT ?? process.cwd());
+}
+
 function isAllInterfacesHost(host: string): boolean {
   return host === "0.0.0.0" || host === "::";
 }
@@ -467,6 +471,20 @@ function quotePowerShell(value: string): string {
 
 function bridgeCommand(title: string, command: string): string {
   const serverUrl = `http://127.0.0.1:${serverInfo.port}`;
+  if (process.env.TERMINAL_WEB_STANDALONE === "1") {
+    const bridgeScript = path.join(getAssetRoot(), "dist", "bridge", "bridge", "index.js");
+    return [
+      quotePowerShell(process.execPath),
+      quotePowerShell(bridgeScript),
+      "--server",
+      serverUrl,
+      "--title",
+      quotePowerShell(title),
+      "--",
+      command
+    ].join(" ");
+  }
+
   const packageRoot = path.resolve(process.cwd());
   return [
     "npm",
@@ -1958,6 +1976,33 @@ app.patch("/api/projects/order", (req, res) => {
   res.json(projects);
 });
 
+// Rename a project (saved or automatic). Renaming an automatic project
+// promotes it to a saved one under the new name, which is how the name
+// persists across restarts.
+app.patch("/api/projects/:id", (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) {
+    res.status(400).json({ message: "A project name is required." });
+    return;
+  }
+  const existing = projectStore.get(req.params.id);
+  if (!existing) {
+    res.status(404).json({ message: "Unknown project." });
+    return;
+  }
+  try {
+    const project = projectStore.create(name, existing.cwd);
+    reconcileProjects();
+    broadcast({ type: "projects", projects: projectStore.list() });
+    res.json(project);
+  } catch (error) {
+    res.status(400).json({
+      message: "Project could not be renamed.",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.delete("/api/projects/:id", (req, res) => {
   for (const session of allSessions()) {
     if (session.projectId !== req.params.id) {
@@ -2266,7 +2311,7 @@ bridgeWss.on("connection", (ws) => {
 });
 
 async function attachClientApp(): Promise<void> {
-  const root = process.cwd();
+  const root = getAssetRoot();
   const staticMode = process.argv.includes("--static") || process.env.NODE_ENV === "production";
 
   if (staticMode) {
@@ -2290,6 +2335,11 @@ async function attachClientApp(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--standalone")) {
+    process.env.TERMINAL_WEB_STANDALONE = "1";
+    process.env.TERMINAL_WEB_ASSET_ROOT = getAssetRoot();
+  }
+
   // Intentionally no default managed session: the session list should be a
   // faithful mirror of real terminal tabs, not seeded with a phantom shell.
   hostProcesses = await discoverHostTerminals();

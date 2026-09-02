@@ -131,6 +131,12 @@ namespace SettingsModelUnitTests
 
                 "trimPaste": true,
 
+                "bridge.enabled": false,
+                "bridge.automaticPort": false,
+                "bridge.port": 42042,
+                "bridge.bindAddress": "127.0.0.1",
+                "bridge.webInterface": false,
+
                 "warning.confirmOnClose": "automatic",
                 "warning.inputService" : true,
                 "warning.largePaste" : true,

@@ -103,6 +103,12 @@
     <ClInclude Include="Tab.h">
       <DependentUpon>Tab.idl</DependentUpon>
     </ClInclude>
+    <ClInclude Include="TabGroup.h">
+      <DependentUpon>TabGroup.idl</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="TabRailSelectors.h">
+      <DependentUpon>TabRailSelectors.idl</DependentUpon>
+    </ClInclude>
     <ClInclude Include="TaskbarState.h">
       <DependentUpon>TaskbarState.idl</DependentUpon>
     </ClInclude>
@@ -204,6 +210,12 @@
     </ClCompile>
     <ClCompile Include="Tab.cpp">
       <DependentUpon>Tab.idl</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="TabGroup.cpp">
+      <DependentUpon>TabGroup.idl</DependentUpon>
+    </ClCompile>
+    <ClCompile Include="TabRailSelectors.cpp">
+      <DependentUpon>TabRailSelectors.idl</DependentUpon>
     </ClCompile>
     <ClCompile Include="../fzf/fzf.cpp" />
     <ClCompile Include="TaskbarState.cpp">
@@ -323,6 +335,8 @@
       <SubType>Code</SubType>
     </Midl>
     <Midl Include="Tab.idl" />
+    <Midl Include="TabGroup.idl" />
+    <Midl Include="TabRailSelectors.idl" />
     <Midl Include="TaskbarState.idl" />
     <Midl Include="TerminalPage.idl">
       <DependentUpon>TerminalPage.xaml</DependentUpon>

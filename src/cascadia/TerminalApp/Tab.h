@@ -131,6 +131,10 @@ namespace winrt::TerminalApp::implementation
         WINRT_PROPERTY(uint32_t, TabViewNumTabs, 0);
         // Which terminal-web project this tab was created under ("" = none).
         WINRT_PROPERTY(winrt::hstring, ProjectId);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ProjectName, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ProjectPath, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, WorkingDirectory, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, RailSubtitle, PropertyChanged.raise);
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);

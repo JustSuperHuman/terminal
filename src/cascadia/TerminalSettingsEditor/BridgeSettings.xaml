@@ -1,0 +1,70 @@
+<!-- Copyright (c) Microsoft Corporation. Licensed under the MIT License. -->
+<Page x:Class="Microsoft.Terminal.Settings.Editor.BridgeSettings"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:Microsoft.Terminal.Settings.Editor"
+      xmlns:mtu="using:Microsoft.Terminal.UI"
+      xmlns:muxc="using:Microsoft.UI.Xaml.Controls">
+
+    <Page.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="CommonResources.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Page.Resources>
+
+    <StackPanel Spacing="2"
+                Style="{StaticResource SettingsStackStyle}">
+        <muxc:InfoBar Margin="0,0,0,12"
+                      IsClosable="False"
+                      IsOpen="True"
+                      Message="Listener changes take effect the next time Terminal starts. Existing tabs and mobile clients keep using the current listener until then."
+                      Severity="Informational"
+                      Title="Built-in terminal bridge" />
+
+        <local:SettingsCard Header="Enable terminal bridge"
+                            Description="Share terminal sessions with mobile clients and integrations.">
+            <ToggleSwitch IsOn="{x:Bind ViewModel.BridgeEnabled, Mode=TwoWay}"
+                          Style="{StaticResource ToggleSwitchInExpanderStyle}" />
+        </local:SettingsCard>
+
+        <local:SettingsCard Header="Automatic port"
+                            Description="Use the first available port from the configured port through the next 20 ports.">
+            <ToggleSwitch IsOn="{x:Bind ViewModel.BridgeAutomaticPort, Mode=TwoWay}"
+                          Style="{StaticResource ToggleSwitchInExpanderStyle}" />
+        </local:SettingsCard>
+
+        <local:SettingsCard Header="Port"
+                            Description="In manual mode, Terminal uses exactly this port. The default and automatic scan start is 10001."
+                            ContentAlignment="Vertical">
+            <StackPanel>
+                <TextBox IsEnabled="{x:Bind ViewModel.ManualPortEnabled, Mode=OneWay}"
+                         InputScope="Number"
+                         Style="{StaticResource TextBoxSettingStyle}"
+                         Text="{x:Bind ViewModel.BridgePortText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           Text="{x:Bind ViewModel.BridgePortError, Mode=OneWay}"
+                           Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(ViewModel.BridgePortError), Mode=OneWay}" />
+            </StackPanel>
+        </local:SettingsCard>
+
+        <local:SettingsCard Header="Bind address"
+                            Description="Use 0.0.0.0 for all IPv4 network interfaces or 127.0.0.1 for this device only. IPv6 addresses are also supported."
+                            ContentAlignment="Vertical">
+            <StackPanel>
+                <TextBox Style="{StaticResource TextBoxSettingStyle}"
+                         Text="{x:Bind ViewModel.BridgeBindAddress, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           Text="{x:Bind ViewModel.BridgeBindAddressError, Mode=OneWay}"
+                           Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(ViewModel.BridgeBindAddressError), Mode=OneWay}" />
+            </StackPanel>
+        </local:SettingsCard>
+
+        <local:SettingsCard Header="Enable web interface"
+                            Description="Serve the embedded browser app. Turning this off keeps the authenticated API and WebSocket bridge available for mobile clients.">
+            <ToggleSwitch IsOn="{x:Bind ViewModel.BridgeWebInterface, Mode=TwoWay}"
+                          Style="{StaticResource ToggleSwitchInExpanderStyle}" />
+        </local:SettingsCard>
+    </StackPanel>
+</Page>

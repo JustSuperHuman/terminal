@@ -197,6 +197,10 @@ void GlobalAppSettings::LayerJson(const Json::Value& json, const OriginTag origi
     {
         this->InitialRows(std::clamp(this->InitialRows(), 1, 999));
     }
+    if (this->HasBridgePort())
+    {
+        this->BridgePort(std::clamp(this->BridgePort(), 1, 65535));
+    }
     LayerActionsFrom(json, origin, true);
 
     // No need to update _fixupsAppliedDuringLoad here.
