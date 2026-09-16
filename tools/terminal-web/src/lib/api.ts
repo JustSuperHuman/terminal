@@ -1,7 +1,8 @@
 import type {
   BootstrapPayload,
   CreateSessionOptions,
-  OrchestratorAgent,
+  OrchestratorCatalog,
+  OrchestratorConfig,
   OrchestratorStatus,
   TerminalProject,
   TerminalSessionSummary
@@ -65,22 +66,65 @@ export async function createProject(name: string, cwd: string): Promise<Terminal
   );
 }
 
-export async function startOrchestrator(agent: OrchestratorAgent, restart = false): Promise<OrchestratorStatus> {
+export async function getOrchestrator(): Promise<OrchestratorStatus> {
   return parseResponse<OrchestratorStatus>(
-    await fetch(withAccessToken("/api/orchestrator/start"), {
+    await fetch(withAccessToken("/api/orchestrator"), { headers: accessTokenHeaders() })
+  );
+}
+
+export async function sendOrchestratorMessage(text: string): Promise<OrchestratorStatus> {
+  return parseResponse<OrchestratorStatus>(
+    await fetch(withAccessToken("/api/orchestrator/messages"), {
       method: "POST",
       headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
-      body: JSON.stringify({ agent, restart })
+      body: JSON.stringify({ text })
     })
   );
 }
 
-export async function stopOrchestrator(): Promise<OrchestratorStatus> {
+export async function cancelOrchestrator(): Promise<OrchestratorStatus> {
   return parseResponse<OrchestratorStatus>(
-    await fetch(withAccessToken("/api/orchestrator/stop"), {
-      method: "POST",
+    await fetch(withAccessToken("/api/orchestrator/cancel"), { method: "POST", headers: accessTokenHeaders() })
+  );
+}
+
+export async function clearOrchestrator(): Promise<OrchestratorStatus> {
+  return parseResponse<OrchestratorStatus>(
+    await fetch(withAccessToken("/api/orchestrator/messages"), { method: "DELETE", headers: accessTokenHeaders() })
+  );
+}
+
+export interface OrchestratorConfigPatch {
+  provider?: OrchestratorConfig["provider"];
+  baseUrl?: string;
+  model?: string;
+  keyEnv?: string;
+  /** A string sets a manual key; an empty string or null goes back to the environment variable. */
+  apiKey?: string | null;
+  reasoning?: OrchestratorConfig["reasoning"];
+}
+
+export async function updateOrchestratorConfig(patch: OrchestratorConfigPatch): Promise<OrchestratorConfig> {
+  return parseResponse<OrchestratorConfig>(
+    await fetch(withAccessToken("/api/orchestrator/config"), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...accessTokenHeaders() },
+      body: JSON.stringify(patch)
+    })
+  );
+}
+
+export async function getOrchestratorModels(refresh = false): Promise<OrchestratorCatalog> {
+  return parseResponse<OrchestratorCatalog>(
+    await fetch(withAccessToken(`/api/orchestrator/models${refresh ? "?refresh=1" : ""}`), {
       headers: accessTokenHeaders()
     })
+  );
+}
+
+export async function testOrchestratorConnection(): Promise<{ ok: boolean; message: string }> {
+  return parseResponse<{ ok: boolean; message: string }>(
+    await fetch(withAccessToken("/api/orchestrator/test"), { method: "POST", headers: accessTokenHeaders() })
   );
 }
 

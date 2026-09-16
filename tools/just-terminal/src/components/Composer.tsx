@@ -39,7 +39,7 @@ import {
 } from "../lib/storage";
 import type { DictationControl } from "./CommandBar";
 import { AgentPromptCard } from "./AgentPromptCard";
-import { ClaudeIcon, CodexIcon, FileIcon, FolderIcon, MicIcon, SendIcon, TerminalGlyph } from "./icons";
+import { ClaudeIcon, CodexIcon, FileIcon, FolderIcon, MicIcon, TerminalGlyph } from "./icons";
 import { colors, font, glass, radius, withAlpha } from "../theme";
 
 // A local editing surface for terminal AI agents. Typing straight into a TUI
@@ -79,8 +79,6 @@ interface ComposerProps {
   active: boolean;
   /** The BlurTargetView behind the bar; required for real blur on Android. */
   blurTarget?: RefObject<View | null>;
-  /** Raw byte passthrough, for one-tap replies and the fallback send path. */
-  onSendKeys: (data: string) => void;
   onRefreshContext: () => void;
   onNotice: (title: string, body?: string) => void;
   dictation?: DictationControl;
@@ -186,7 +184,7 @@ function relativeTime(at: number): string {
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { endpoint, sessionId, context, disabled, active, blurTarget, onSendKeys, onRefreshContext, onNotice, dictation },
+  { endpoint, sessionId, context, disabled, active, blurTarget, onRefreshContext, onNotice, dictation },
   ref
 ) {
   const [text, setText] = useState("");
@@ -199,6 +197,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [filesLoading, setFilesLoading] = useState(false);
   const [history, setHistory] = useState<PromptHistoryEntry[]>([]);
   const [sending, setSending] = useState(false);
+  const draftLoadedRef = useRef(false);
+  const sendingRef = useRef(false);
+  const currentSessionRef = useRef(sessionId);
+  currentSessionRef.current = sessionId;
   const inputRef = useRef<TextInput | null>(null);
   // Read inside callbacks that must not re-bind on every keystroke.
   const textRef = useRef(text);
@@ -231,6 +233,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [panelAnim, panelVisible]);
 
   const applyEdit = useCallback((next: string, caret: number) => {
+    textRef.current = next;
     setText(next);
     setSelection({ start: caret, end: caret });
     setForcedSelection({ start: caret, end: caret });
@@ -321,12 +324,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     let alive = true;
     loadDraft(endpoint.id, sessionId).then((draft) => {
-      if (alive && draft && !textRef.current) {
-        applyEdit(draft, draft.length);
-      }
+      if (!alive) return;
+      draftLoadedRef.current = true;
+      if (draft && !textRef.current) applyEdit(draft, draft.length);
     });
     return () => {
       alive = false;
+      if (draftLoadedRef.current || textRef.current) {
+        void saveDraft(endpoint.id, sessionId, textRef.current);
+      }
     };
   }, [applyEdit, endpoint.id, sessionId]);
 
@@ -335,7 +341,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!sessionId) {
       return;
     }
-    const timer = setTimeout(() => void saveDraft(endpoint.id, sessionId, text), DRAFT_SAVE_DEBOUNCE_MS);
+    const timer = setTimeout(() => {
+      if (draftLoadedRef.current || text) void saveDraft(endpoint.id, sessionId, text);
+    }, DRAFT_SAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [endpoint.id, sessionId, text]);
 
@@ -402,48 +410,38 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setSelection(event.nativeEvent.selection);
   }, []);
 
-  // Last resort when the REST call fails (host restarting, flaky wifi): push
-  // the same bytes down the terminal socket so the message is not lost.
-  const sendOverSocket = useCallback(
-    (body: string) => {
-      const payload = context?.pasteSafe ? `\x1b[200~${body}\x1b[201~` : body.replace(/\n/g, "\r");
-      onSendKeys(payload);
-      setTimeout(() => onSendKeys("\r"), 80);
-    },
-    [context?.pasteSafe, onSendKeys]
-  );
-
   const submit = useCallback(
     async (options: { submit: boolean; overrideText?: string }) => {
       const body = options.overrideText ?? textRef.current;
-      if (!sessionId || disabled || sending) {
+      if (!sessionId || disabled || sendingRef.current) {
         return;
       }
-      if (!body.trim() && !options.submit) {
+      if (!body.trim()) {
         return;
       }
 
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => undefined);
+      sendingRef.current = true;
       setSending(true);
       try {
         await composeInput(endpoint, sessionId, { text: body, submit: options.submit });
         if (body.trim()) {
           rememberPrompt(endpoint.id, body, context?.cwd).then(setHistory);
         }
-        applyEdit("", 0);
-        setHistoryOpen(false);
-        void saveDraft(endpoint.id, sessionId, "");
-        onRefreshContext();
-      } catch (error) {
-        sendOverSocket(body);
-        applyEdit("", 0);
-        void saveDraft(endpoint.id, sessionId, "");
-        onNotice("Sent over the terminal socket", error instanceof Error ? error.message : undefined);
+        if (currentSessionRef.current === sessionId && textRef.current === body) {
+          applyEdit("", 0);
+          void saveDraft(endpoint.id, sessionId, "");
+          setHistoryOpen(false);
+          onRefreshContext();
+        }
+      } catch {
+        onNotice("Send not confirmed — draft kept", "Check the terminal before retrying; the host may have received it.");
       } finally {
+        sendingRef.current = false;
         setSending(false);
       }
     },
-    [applyEdit, context?.cwd, disabled, endpoint, onNotice, onRefreshContext, sendOverSocket, sending, sessionId]
+    [applyEdit, context?.cwd, disabled, endpoint, onNotice, onRefreshContext, sessionId]
   );
 
   const chooseCommand = useCallback(
@@ -513,8 +511,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     [onNotice, onRefreshContext]
   );
 
-  const canSend = !disabled && !sending;
   const hasText = text.trim().length > 0;
+  const canSend = !disabled && !sending && hasText;
 
   function renderPanel() {
     if (panelMode === "none") {
@@ -804,7 +802,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onBlur={() => setFocused(false)}
           autoCapitalize="none"
           autoCorrect
-          editable={!disabled}
+          editable={!disabled && !sending}
           scrollEnabled
           style={[styles.input, text.length === 0 && styles.inputEmpty, focused && styles.inputFocused]}
           accessibilityLabel="Message to send to the terminal session"
@@ -814,18 +812,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
         <Pressable
           onPress={() => void submit({ submit: true })}
-          onLongPress={() => {
-            if (hasText) {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
-              void submit({ submit: false });
-            }
-          }}
           disabled={!canSend}
           hitSlop={8}
           accessibilityRole="button"
-          accessibilityLabel={
-            hasText ? "Send message and press Enter. Long-press to insert without Enter" : "Press Enter in the session"
-          }
+          accessibilityLabel="Send draft and press Enter"
           accessibilityState={{ disabled: !canSend }}
           style={({ pressed }) => [
             styles.send,
@@ -836,10 +826,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         >
           {sending ? (
             <ActivityIndicator size="small" color={colors.primaryForeground} />
-          ) : hasText ? (
-            <SendIcon size={18} color={colors.primaryForeground} />
           ) : (
-            <Text style={styles.sendEnter}>⏎</Text>
+            <Text style={{ color: hasText ? colors.primaryForeground : colors.secondaryForeground, fontFamily: font.semibold }}>Send</Text>
           )}
         </Pressable>
           </View>
@@ -1071,7 +1059,8 @@ const styles = StyleSheet.create({
     borderColor: withAlpha(colors.accentCoral, 0.4),
   },
   send: {
-    width: 44,
+    minWidth: 56,
+    paddingHorizontal: 10,
     height: 44,
     alignItems: "center",
     justifyContent: "center",
@@ -1082,8 +1071,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
-  // With nothing typed the button still does something useful — press Enter in
-  // the session — so it stays available, just quiet.
+  // An empty draft keeps the Send button quiet and disabled.
   sendBare: {
     backgroundColor: glass.raised,
     borderColor: glass.raisedBorder,
@@ -1091,11 +1079,6 @@ const styles = StyleSheet.create({
   sendPressed: {
     backgroundColor: colors.primaryDim,
     borderColor: colors.primaryDim,
-  },
-  sendEnter: {
-    color: colors.secondaryForeground,
-    fontFamily: font.mono,
-    fontSize: 16,
   },
   pressed: {
     backgroundColor: glass.pressed,

@@ -231,7 +231,16 @@ void Terminal::SetWorkingDirectory(std::wstring_view uri)
         logged = true;
     }
 
+    // Shells report their cwd on every prompt, so nearly every one of these is
+    // the same directory again. Only an actual move is worth waking the UI for.
+    const auto moved = !_workingDirectoryFromShell || _workingDirectory != uri;
     _workingDirectory = uri;
+    _workingDirectoryFromShell = true;
+
+    if (moved && _pfnWorkingDirectoryChanged)
+    {
+        _pfnWorkingDirectoryChanged();
+    }
 }
 
 void Terminal::PlayMidiNote(const int noteNumber, const int velocity, const std::chrono::microseconds duration)

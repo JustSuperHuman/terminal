@@ -35,6 +35,8 @@ namespace Microsoft.Terminal.Control
         UInt64 TaskbarProgress { get; };
 
         String WorkingDirectory { get; };
+        // False while WorkingDirectory is only the profile's starting directory.
+        Boolean WorkingDirectoryFromShell { get; };
 
         Windows.Foundation.IReference<Windows.UI.Color> TabColor { get; };
 

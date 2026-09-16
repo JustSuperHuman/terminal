@@ -1,3 +1,4 @@
+use crate::agents;
 use crate::model::TerminalSessionSummary;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -5,22 +6,6 @@ use sha2::{Digest, Sha256};
 fn stable_id(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     format!("prompt-{:x}", digest)[..31].to_string()
-}
-
-fn detect_agent(session: &TerminalSessionSummary, text: &str) -> (&'static str, &'static str) {
-    if session.agent.as_deref() == Some("claude")
-        || text.contains("Claude Code")
-        || text.contains("claude>")
-    {
-        ("claude", "Claude")
-    } else if session.agent.as_deref() == Some("codex")
-        || text.contains("OpenAI Codex")
-        || text.contains("codex>")
-    {
-        ("codex", "Codex")
-    } else {
-        ("terminal", "Terminal")
-    }
 }
 
 fn selected_prefix(line: &str) -> bool {
@@ -66,7 +51,7 @@ fn parse_options(text: &str) -> Vec<Value> {
     options
 }
 
-fn detect_prompt(text: &str) -> Option<Value> {
+pub(crate) fn detect_prompt(text: &str) -> Option<Value> {
     let tail = text
         .lines()
         .rev()
@@ -136,18 +121,23 @@ pub fn input_context(
     bracketed_paste: bool,
     application_cursor: bool,
 ) -> Value {
-    let (agent, label) = detect_agent(session, text);
-    let prompt = if agent == "terminal" {
-        None
-    } else {
-        detect_prompt(text)
+    let osc_agent = (session.agent_source.as_deref() == Some("osc"))
+        .then(|| session.agent.as_deref().and_then(agents::Agent::parse))
+        .flatten();
+    let observation = agents::observe(session, osc_agent, text);
+    let (agent, label) = match observation.agent {
+        Some(agent) => (agent.id(), agent.label()),
+        None => ("terminal", "Terminal"),
     };
+    let prompt = observation.agent.and_then(|_| detect_prompt(text));
     json!({
         "agent": agent,
         "agentLabel": label,
         "cwd": session.cwd,
-        "busy": session.agent_activity.as_deref() == Some("working"),
-        "bracketedPaste": bracketed_paste,
+        "busy": observation.busy,
+        // A confident agent detection implies paste support even when this
+        // mirror never saw the mode switch (a host restart starts it empty).
+        "bracketedPaste": bracketed_paste || observation.agent.is_some(),
         "applicationCursor": application_cursor,
         "prompt": prompt
     })

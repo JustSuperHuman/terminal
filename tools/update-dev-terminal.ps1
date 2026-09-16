@@ -26,6 +26,8 @@ $wtShimDir = Join-Path $env:LOCALAPPDATA 'Programs\WindowsTerminalDevShim'
 $wtShimExe = Join-Path $wtShimDir 'wt.exe'
 $wtShimObj = Join-Path $wtShimDir 'wt-dev-shim.obj'
 $wtShimSource = Join-Path $repoRoot 'tools\wt-dev-shim\wt-dev-shim.cpp'
+$packageDataBackupRoot = $null
+$packageDataRoot = $null
 
 function Remove-PathEntry {
     param(
@@ -56,6 +58,54 @@ function Prepend-PathEntry {
     (@($EntryToPrepend) + @($entries)) -join ';'
 }
 
+function Backup-PackageData {
+    param([Parameter(Mandatory)]$Package)
+
+    # PreserveApplicationData is only legal for development-mode packages.
+    # A Ready/MSIX installation must be removed without that flag before this
+    # checkout can be registered as a loose package, so retain Terminal's
+    # user-owned state ourselves across that transition.
+    if ($Package.IsDevelopmentMode) {
+        return
+    }
+
+    $script:packageDataRoot = Join-Path $env:LOCALAPPDATA "Packages\$($Package.PackageFamilyName)"
+    if (-not (Test-Path -LiteralPath $script:packageDataRoot)) {
+        return
+    }
+
+    $script:packageDataBackupRoot = Join-Path ([System.IO.Path]::GetTempPath()) "WindowsTerminalDev-update-$PID"
+    New-Item -ItemType Directory -Path $script:packageDataBackupRoot -Force | Out-Null
+
+    foreach ($directory in @('LocalState', 'RoamingState')) {
+        $source = Join-Path $script:packageDataRoot $directory
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination $script:packageDataBackupRoot -Recurse -Force
+        }
+    }
+
+    Write-Host "Backed up WindowsTerminalDev user state to $script:packageDataBackupRoot"
+}
+
+function Restore-PackageData {
+    if (-not $script:packageDataBackupRoot -or -not (Test-Path -LiteralPath $script:packageDataBackupRoot)) {
+        return
+    }
+
+    New-Item -ItemType Directory -Path $script:packageDataRoot -Force | Out-Null
+    Get-ChildItem -LiteralPath $script:packageDataBackupRoot -Directory | ForEach-Object {
+        $destination = Join-Path $script:packageDataRoot $_.Name
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        Get-ChildItem -LiteralPath $_.FullName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+        }
+    }
+
+    Remove-Item -LiteralPath $script:packageDataBackupRoot -Recurse -Force
+    $script:packageDataBackupRoot = $null
+    Write-Host 'Restored WindowsTerminalDev user state.'
+}
+
 if ($Pull) {
     git pull --ff-only
 }
@@ -78,11 +128,13 @@ if ($existingPackages) {
     $removePackageCommand = Get-Command Remove-AppxPackage
 
     foreach ($existingPackage in $existingPackages) {
+        Backup-PackageData -Package $existingPackage
+
         $removePackageArgs = @{
             Package = $existingPackage.PackageFullName
         }
 
-        if ($removePackageCommand.Parameters.ContainsKey('PreserveApplicationData')) {
+        if ($existingPackage.IsDevelopmentMode -and $removePackageCommand.Parameters.ContainsKey('PreserveApplicationData')) {
             $removePackageArgs.PreserveApplicationData = $true
         }
 
@@ -119,6 +171,7 @@ if (-not (Test-Path $manifest)) {
 # Copies the dev image assets the WAP layout omits, stamps a unique package
 # version, and registers the loose package. Shared with 'bun run launch'.
 & (Join-Path $PSScriptRoot 'register-dev-terminal.ps1') -Configuration $configuration -Platform $platform
+Restore-PackageData
 
 if ($MakeDefault) {
     Write-Host 'Setting WindowsTerminalDev as the default terminal application...'

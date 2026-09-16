@@ -105,6 +105,8 @@ interface CommandBarProps {
   onInsertToken?: (token: ComposerToken) => void;
   /** Switch between composing messages and typing straight into the terminal. */
   onToggleComposer?: () => void;
+  keyboardHidden?: boolean;
+  onToggleKeyboard?: () => void;
 }
 
 // One-line status shown above the keys while dictation is engaged.
@@ -139,6 +141,8 @@ export function CommandBar({
   composerMode = false,
   onInsertToken,
   onToggleComposer,
+  keyboardHidden = false,
+  onToggleKeyboard,
 }: CommandBarProps) {
   // Seconds left on the post-dictation auto-submit countdown; null when disarmed.
   const [armSeconds, setArmSeconds] = useState<number | null>(null);
@@ -198,10 +202,8 @@ export function CommandBar({
   // Disarm on unmount and whenever the target session can no longer take input.
   useEffect(() => clearArm, [clearArm]);
   useEffect(() => {
-    if (disabled) {
-      clearArm();
-    }
-  }, [disabled, clearArm]);
+    clearArm();
+  }, [disabled, targetId, composerMode, clearArm]);
 
   // While holding, remember that speech actually occurred (VAD flip or a landed
   // phrase) so an empty hold doesn't arm a stray Enter.
@@ -240,6 +242,7 @@ export function CommandBar({
     if (disabled || !targetId) {
       return;
     }
+    clearArm();
     // A control key is a deliberate, discrete action — give it a tactile tap.
     // The interrupt (^C) gets a heavier hit so it feels consequential.
     if (key.strong) {
@@ -366,7 +369,7 @@ export function CommandBar({
         accessibilityState={{ selected: !composerMode }}
         style={({ pressed }) => [styles.pinnedButton, !composerMode && styles.pinnedButtonActive, pressed && styles.pressed]}
       >
-        <KeyboardIcon size={18} color={composerMode ? colors.secondaryForeground : colors.primary} />
+        <Text style={[styles.keyText, { color: composerMode ? colors.secondaryForeground : colors.primary }]}>{composerMode ? "Draft" : "Direct"}</Text>
       </Pressable>
     );
   }
@@ -489,7 +492,12 @@ export function CommandBar({
             overScrollMode="never"
             contentContainerStyle={styles.scrollContent}
           >
+            <View style={[styles.group, styles.groupSpacedRight]}>
+              {renderKey({ label: "Enter", value: "\r", a11y: "Press Enter in terminal without sending the draft" }, colors.primary)}
+              {renderKey({ label: "Alt+↑", value: "\x1b[1;3A", a11y: "Alt plus Up arrow, Codex question shortcut" }, colors.accentCyan)}
+            </View>
             {composerMode && onInsertToken ? renderTokenKeys() : null}
+            {onToggleComposer ? renderComposerToggle() : null}
             {keyGroups.map((group, index) => (
               <View key={group.id} style={[styles.group, index > 0 && styles.groupSpaced]}>
                 {group.keys.map((key) => renderKey(key, group.tint))}
@@ -515,7 +523,14 @@ export function CommandBar({
         {/* The most-used controls stay pinned outside the scroll area. */}
         {onAttachImage ? renderAttach() : null}
         {showMic && dictation ? renderMic(dictation) : null}
-        {onToggleComposer ? renderComposerToggle() : null}
+        {onToggleKeyboard ? (
+          <Pressable onPress={onToggleKeyboard} accessibilityRole="button"
+            accessibilityLabel={keyboardHidden ? "Show keyboard" : "Hide keyboard"}
+            style={({ pressed }) => [styles.pinnedButton, pressed && styles.pressed]}>
+            <KeyboardIcon size={18} color={colors.secondaryForeground} />
+            <Text style={{ color: colors.secondaryForeground, fontSize: 10 }}>{keyboardHidden ? "Show" : "Hide"}</Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -528,7 +543,7 @@ const styles = StyleSheet.create({
     backgroundColor: "transparent",
     borderTopWidth: 1,
     borderColor: glass.border,
-    // Sized for the keyboard-up steady state (the keyboard is always open now).
+    // Keep controls reachable with the keyboard open or hidden.
     paddingTop: 8,
     paddingHorizontal: 10,
     gap: 6,

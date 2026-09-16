@@ -13,6 +13,199 @@
       Background="Transparent"
       mc:Ignorable="d">
 
+    <Page.Resources>
+        <!--
+            The project strip and the two side panes are chrome around the
+            rail, so they are built out of the rail's own token set
+            (TabRailStyles.xaml): the same control template, corner radius,
+            hover and pressed fills, glyph sizes and type scale. Nothing here
+            invents a second look.
+
+            The active project is marked the way the rail marks a checked
+            toggle - a neutral "on" fill plus the step from chrome foreground
+            to primary, with SemiBold on top - and never with an accent fill.
+            In this window the accent means exactly one thing, "this is the
+            tab you are looking at", and that belongs to the rail's selection
+            bar. The orchestrator toggle wears the same mark while its pane is
+            open, so one rule covers the whole strip.
+        -->
+        <x:Double x:Key="ProjectStripItemSize">28</x:Double>
+        <x:Double x:Key="ProjectStripActionSize">20</x:Double>
+        <Thickness x:Key="ProjectStripPadding">12,0,12,0</Thickness>
+
+        <!--  A project chip: the rail's chrome button, widened to carry a label.  -->
+        <Style x:Key="ProjectStripChipStyle"
+               TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+            <Setter Property="FontSize" Value="{StaticResource TabRailTitleFontSize}" />
+            <Setter Property="Foreground" Value="{ThemeResource TabRailChromeForegroundBrush}" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="{StaticResource ProjectStripItemSize}" />
+            <Setter Property="Padding" Value="{StaticResource ProjectStripPadding}" />
+            <Setter Property="Template" Value="{StaticResource TabRailIconButtonTemplate}" />
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="ProjectStripChipActiveStyle"
+               BasedOn="{StaticResource ProjectStripChipStyle}"
+               TargetType="Button">
+            <Setter Property="Background" Value="{ThemeResource TabRailToggleCheckedBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+        </Style>
+
+        <!--
+            "All" is a scope over the sections, not one more project: a
+            quieter resting foreground and a tighter box, and it stands on
+            its own side of a hairline. It still wears the same "on" fill
+            when it is the active filter, so the strip keeps a single rule
+            for what selection looks like.
+        -->
+        <Style x:Key="ProjectStripScopeChipStyle"
+               BasedOn="{StaticResource ProjectStripChipStyle}"
+               TargetType="Button">
+            <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+            <Setter Property="Padding" Value="10,0,10,0" />
+        </Style>
+
+        <Style x:Key="ProjectStripScopeChipActiveStyle"
+               BasedOn="{StaticResource ProjectStripScopeChipStyle}"
+               TargetType="Button">
+            <Setter Property="Background" Value="{ThemeResource TabRailToggleCheckedBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+        </Style>
+
+        <!--
+            A chip's tab count, mirroring the number on the rail heading it
+            names - the same figure in both places is what makes the strip
+            and the rail read as one list. No Foreground setter, on purpose:
+            it inherits the chip's, so it follows an active chip's step to
+            primary and survives the high-contrast flip. Normal weight, so it
+            does not follow the label into SemiBold; the name is the content,
+            the count is meta.
+        -->
+        <Style x:Key="ProjectStripCountStyle"
+               TargetType="TextBlock">
+            <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Opacity" Value="{ThemeResource TabRailMetaOpacity}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <!--  "+" and the globe: the rail's icon button, sized for the strip.  -->
+        <Style x:Key="ProjectStripIconButtonStyle"
+               BasedOn="{StaticResource TabRailIconButtonStyle}"
+               TargetType="Button">
+            <Setter Property="Width" Value="{StaticResource ProjectStripItemSize}" />
+            <Setter Property="Height" Value="{StaticResource ProjectStripItemSize}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="ProjectStripIconButtonActiveStyle"
+               BasedOn="{StaticResource ProjectStripIconButtonStyle}"
+               TargetType="Button">
+            <Setter Property="Background" Value="{ThemeResource TabRailToggleCheckedBrush}" />
+            <Setter Property="Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+        </Style>
+
+        <!--
+            A project's close button, built like the rail's row action and for
+            the same reason: no Foreground setter, so the glyph inherits the
+            chip's foreground and stays readable on an active chip in high
+            contrast. TerminalPage.cpp holds it at Opacity=0 until the chip is
+            hovered or takes keyboard focus.
+        -->
+        <Style x:Key="ProjectStripCloseButtonStyle"
+               TargetType="Button">
+            <Setter Property="Background" Value="{ThemeResource TabRailRowActionRestBrush}" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+            <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+            <Setter Property="FontSize" Value="{StaticResource TabRailSmallGlyphFontSize}" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Height" Value="{StaticResource ProjectStripActionSize}" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Margin" Value="8,0,0,0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Template" Value="{StaticResource TabRailIconButtonTemplate}" />
+            <Setter Property="UseSystemFocusVisuals" Value="True" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Width" Value="{StaticResource ProjectStripActionSize}" />
+        </Style>
+
+        <!--  A very long project name truncates rather than pushing the strip.  -->
+        <Style x:Key="ProjectStripLabelStyle"
+               TargetType="TextBlock">
+            <Setter Property="MaxWidth" Value="180" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="TextWrapping" Value="NoWrap" />
+        </Style>
+
+        <Style x:Key="ProjectStripDividerStyle"
+               TargetType="Border">
+            <Setter Property="Width" Value="1" />
+            <Setter Property="Margin" Value="6,5,6,5" />
+            <Setter Property="Background" Value="{ThemeResource TabRailDividerBrush}" />
+        </Style>
+
+        <!--  Orchestrator transcript rows are built in code; these keep them theme-aware.  -->
+        <Style x:Key="OrchestratorUserBubbleStyle"
+               TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource TabRailRowSelectedBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TabRailDividerBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="12,12,4,12" />
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="HorizontalAlignment" Value="Right" />
+            <Setter Property="MaxWidth" Value="380" />
+        </Style>
+        <Style x:Key="OrchestratorBodyTextStyle"
+               TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{ThemeResource TabRailPrimaryTextBrush}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="IsTextSelectionEnabled" Value="True" />
+        </Style>
+        <Style x:Key="OrchestratorMetaTextStyle"
+               TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+            <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="OrchestratorCodeTextStyle"
+               TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{ThemeResource TabRailSecondaryTextBrush}" />
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="IsTextSelectionEnabled" Value="True" />
+        </Style>
+        <Style x:Key="OrchestratorToolRowStyle"
+               TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource TabRailRowHoverBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TabRailDividerBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="8,5" />
+        </Style>
+        <Style x:Key="OrchestratorErrorRowStyle"
+               TargetType="Border">
+            <Setter Property="Background" Value="#33C42B1C" />
+            <Setter Property="BorderBrush" Value="#66C42B1C" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="8,6" />
+        </Style>
+    </Page.Resources>
+
     <Grid x:Name="Root"
           Background="Transparent">
         <Grid.RowDefinitions>
@@ -40,33 +233,41 @@
                       HorizontalScrollMode="Auto"
                       VerticalScrollBarVisibility="Disabled"
                       VerticalScrollMode="Disabled">
+            <!--
+                The right padding reserves the orchestrator toggle's slot: it
+                is pinned over the strip's right edge and does not scroll, so
+                without it the last project would slide underneath.
+            -->
             <StackPanel x:Name="ProjectTabPanel"
-                        Padding="6,4,6,4"
+                        Padding="8,4,44,4"
                         Orientation="Horizontal"
-                        Spacing="4" />
+                        Spacing="2" />
         </ScrollViewer>
 
         <!--
             Orchestrator toggle: pinned to the window's right edge, outside the
             scrolling project strip, so it stays put no matter how many
-            projects are open. Accented while the panel is open.
+            projects are open. It wears the strip's "filled chip means on"
+            marking while the pane is open (see _ToggleOrchestratorPane).
+
+            Its visibility follows the strip's, so focus mode drops the whole
+            row rather than leaving one floating button behind - _UpdateTabView
+            collapses ProjectTabScroller and this rides along.
         -->
         <Border Grid.Row="0"
                 Grid.Column="0"
                 Grid.ColumnSpan="3"
                 HorizontalAlignment="Right"
-                Background="{x:Bind TitlebarBrush, Mode=OneWay}">
+                Background="{x:Bind TitlebarBrush, Mode=OneWay}"
+                Visibility="{Binding ElementName=ProjectTabScroller, Path=Visibility, Mode=OneWay}">
             <Button x:Name="OrchestratorToggleButton"
-                    Margin="4,4,6,4"
-                    Padding="8,2,8,2"
+                    Margin="0,4,8,4"
                     HorizontalAlignment="Right"
                     VerticalAlignment="Center"
                     AutomationProperties.Name="Orchestrator"
-                    ToolTipService.ToolTip="Orchestrator">
-                <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                          FontSize="12"
-                          Glyph="&#xE99A;" />
-            </Button>
+                    Content="&#xE99A;"
+                    Style="{StaticResource ProjectStripIconButtonStyle}"
+                    ToolTipService.ToolTip="Orchestrator" />
         </Border>
 
         <Grid x:Name="VerticalTabPane"
@@ -87,6 +288,19 @@
                                  HorizontalAlignment="Stretch"
                                  KeyUp="_KeyDownHandler" />
 
+            <!--
+                The rail's edge, and the grab handle for resizing it. The
+                hairline is TabRailDividerBrush rather than a card stroke: the
+                pane behind it is the titlebar brush, which may be acrylic or a
+                user colour, and a card stroke is a black wash that disappears
+                against a dark one.
+
+                The grip line is the affordance - invisible at rest, half up
+                under the pointer, full while the pane is being dragged. It
+                escalates in weight, not in hue: the accent means "this is the
+                tab you are looking at" and belongs to the rail alone. Only
+                Opacity moves, so both lines stay theme resources.
+            -->
             <Border x:Name="VerticalTabResizeHandle"
                     Grid.Column="1"
                     Background="Transparent"
@@ -97,9 +311,19 @@
                     PointerMoved="_VerticalTabResizePointerMoved"
                     PointerPressed="_VerticalTabResizePointerPressed"
                     PointerReleased="_VerticalTabResizePointerReleased">
-                <Rectangle Width="1"
-                           HorizontalAlignment="Center"
-                           Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Grid>
+                    <Rectangle Width="1"
+                               HorizontalAlignment="Center"
+                               Fill="{ThemeResource TabRailDividerBrush}" />
+                    <Rectangle x:Name="VerticalTabResizeGrip"
+                               Width="2"
+                               Margin="0,4,0,4"
+                               HorizontalAlignment="Center"
+                               Fill="{ThemeResource ControlStrongStrokeColorDefaultBrush}"
+                               Opacity="0"
+                               RadiusX="1"
+                               RadiusY="1" />
+                </Grid>
             </Border>
         </Grid>
 
@@ -146,10 +370,11 @@
         </Grid>
 
         <!--
-            Orchestrator panel: a collapsible right-side pane hosting the
-            server-managed orchestrator session (Claude Code / Codex with
-            cross-session tools). The TermControl is attached in code once the
-            session exists; until then the empty state offers start buttons.
+            Orchestrator panel: a chat agent hosted by the terminal bridge
+            that sees every tab (native, web and mobile) and drives them
+            through tools. The transcript is shared with the web/mobile
+            clients; this pane renders it from GET /api/orchestrator and
+            sends messages to POST /api/orchestrator/messages.
         -->
         <Grid x:Name="OrchestratorPane"
               Grid.Row="1"
@@ -160,18 +385,21 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="6" />
                 <ColumnDefinition x:Name="OrchestratorColumn"
-                                  Width="430"
+                                  Width="440"
                                   MinWidth="320"
-                                  MaxWidth="800" />
+                                  MaxWidth="820" />
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
+            <!--  Same edge and the same grab affordance as the rail, mirrored.  -->
             <Border x:Name="OrchestratorResizeHandle"
                     Grid.Row="0"
-                    Grid.RowSpan="2"
+                    Grid.RowSpan="4"
                     Grid.Column="0"
                     Background="Transparent"
                     PointerCanceled="_OrchestratorResizePointerCanceled"
@@ -181,9 +409,19 @@
                     PointerMoved="_OrchestratorResizePointerMoved"
                     PointerPressed="_OrchestratorResizePointerPressed"
                     PointerReleased="_OrchestratorResizePointerReleased">
-                <Rectangle Width="1"
-                           HorizontalAlignment="Center"
-                           Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Grid>
+                    <Rectangle Width="1"
+                               HorizontalAlignment="Center"
+                               Fill="{ThemeResource TabRailDividerBrush}" />
+                    <Rectangle x:Name="OrchestratorResizeGrip"
+                               Width="2"
+                               Margin="0,4,0,4"
+                               HorizontalAlignment="Center"
+                               Fill="{ThemeResource ControlStrongStrokeColorDefaultBrush}"
+                               Opacity="0"
+                               RadiusX="1"
+                               RadiusY="1" />
+                </Grid>
             </Border>
 
             <Grid Grid.Row="0"
@@ -204,8 +442,9 @@
 
                 <StackPanel Grid.Column="1"
                             VerticalAlignment="Center">
-                    <TextBlock FontSize="13"
+                    <TextBlock FontSize="{StaticResource TabRailTitleFontSize}"
                                FontWeight="SemiBold"
+                               Foreground="{ThemeResource TabRailPrimaryTextBrush}"
                                Text="Orchestrator" />
                     <StackPanel Orientation="Horizontal"
                                 Spacing="6">
@@ -215,90 +454,246 @@
                                  VerticalAlignment="Center"
                                  Fill="Gray" />
                         <TextBlock x:Name="OrchestratorStatusText"
-                                   FontSize="11"
-                                   Opacity="0.75"
-                                   Text="Not running" />
+                                   FontSize="{StaticResource TabRailMetaFontSize}"
+                                   Foreground="{ThemeResource TabRailTertiaryTextBrush}"
+                                   Text="Connecting…"
+                                   TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                 </StackPanel>
 
+                <!--  Header actions match the project strip's quiet icon buttons.  -->
                 <StackPanel Grid.Column="2"
                             Orientation="Horizontal"
                             Spacing="2">
-                    <Button x:Name="OrchestratorRestartButton"
-                            Padding="6"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            ToolTipService.ToolTip="Restart orchestrator"
-                            Visibility="Collapsed">
-                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                  FontSize="13"
-                                  Glyph="&#xE72C;" />
-                    </Button>
-                    <Button x:Name="OrchestratorStopButton"
-                            Padding="6"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            ToolTipService.ToolTip="Stop orchestrator"
-                            Visibility="Collapsed">
-                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                  FontSize="13"
-                                  Glyph="&#xE7E8;" />
+                    <Button x:Name="OrchestratorClearButton"
+                            AutomationProperties.Name="Clear conversation"
+                            Content="&#xE74D;"
+                            IsEnabled="False"
+                            Style="{StaticResource ProjectStripIconButtonStyle}"
+                            ToolTipService.ToolTip="Clear conversation" />
+                    <Button x:Name="OrchestratorSettingsButton"
+                            AutomationProperties.Name="Model and endpoint settings"
+                            Content="&#xE713;"
+                            Style="{StaticResource ProjectStripIconButtonStyle}"
+                            ToolTipService.ToolTip="Model &amp; endpoint">
+                        <Button.Flyout>
+                            <Flyout x:Name="OrchestratorSettingsFlyout"
+                                    Placement="Bottom">
+                                <ScrollViewer MaxHeight="620"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <StackPanel Width="380"
+                                                Spacing="8">
+                                        <ComboBox x:Name="OrchestratorProviderBox"
+                                                  HorizontalAlignment="Stretch"
+                                                  Header="Endpoint">
+                                            <ComboBoxItem Content="OpenRouter"
+                                                          Tag="openrouter" />
+                                            <ComboBoxItem Content="Custom OpenAI-compatible"
+                                                          Tag="custom" />
+                                        </ComboBox>
+                                        <TextBox x:Name="OrchestratorBaseUrlBox"
+                                                 Header="Base URL"
+                                                 PlaceholderText="http://localhost:11434/v1"
+                                                 Visibility="Collapsed" />
+                                        <TextBlock x:Name="OrchestratorKeyStatusText"
+                                                   FontSize="{StaticResource TabRailMetaFontSize}"
+                                                   Foreground="{ThemeResource TabRailSecondaryTextBrush}"
+                                                   Text="API key"
+                                                   TextWrapping="Wrap" />
+                                        <Grid ColumnSpacing="6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <PasswordBox x:Name="OrchestratorKeyBox"
+                                                         Grid.Column="0"
+                                                         PlaceholderText="Paste an API key to override the environment" />
+                                            <Button x:Name="OrchestratorUseKeyButton"
+                                                    Grid.Column="1"
+                                                    Content="Use key" />
+                                        </Grid>
+                                        <Grid ColumnSpacing="6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBox x:Name="OrchestratorKeyEnvBox"
+                                                     Grid.Column="0"
+                                                     Header="Environment variable"
+                                                     PlaceholderText="OPENROUTER_API_KEY" />
+                                            <Button x:Name="OrchestratorForgetKeyButton"
+                                                    Grid.Column="1"
+                                                    VerticalAlignment="Bottom"
+                                                    Content="Forget pasted key"
+                                                    Visibility="Collapsed" />
+                                        </Grid>
+                                        <TextBox x:Name="OrchestratorModelBox"
+                                                 Header="Model"
+                                                 PlaceholderText="anthropic/claude-sonnet-5" />
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       FontSize="{StaticResource TabRailMetaFontSize}"
+                                                       Foreground="{ThemeResource TabRailSecondaryTextBrush}"
+                                                       Text="Recommended for coding" />
+                                            <HyperlinkButton x:Name="OrchestratorRefreshModelsButton"
+                                                             Grid.Column="1"
+                                                             Padding="4,0"
+                                                             Content="Refresh list"
+                                                             FontSize="{StaticResource TabRailMetaFontSize}" />
+                                        </Grid>
+                                        <ListView x:Name="OrchestratorModelList"
+                                                  MaxHeight="220"
+                                                  SelectionMode="Single" />
+                                        <TextBox x:Name="OrchestratorModelSearchBox"
+                                                 PlaceholderText="Search all models…" />
+                                        <ComboBox x:Name="OrchestratorReasoningBox"
+                                                  HorizontalAlignment="Stretch"
+                                                  Header="Reasoning effort">
+                                            <ComboBoxItem Content="Off"
+                                                          Tag="off" />
+                                            <ComboBoxItem Content="Low (fast)"
+                                                          Tag="low" />
+                                            <ComboBoxItem Content="Medium"
+                                                          Tag="medium" />
+                                            <ComboBoxItem Content="High"
+                                                          Tag="high" />
+                                        </ComboBox>
+                                        <StackPanel Orientation="Horizontal"
+                                                    Spacing="6">
+                                            <Button x:Name="OrchestratorSaveButton"
+                                                    Content="Save"
+                                                    Style="{ThemeResource AccentButtonStyle}" />
+                                            <Button x:Name="OrchestratorTestButton"
+                                                    Content="Test connection" />
+                                        </StackPanel>
+                                        <TextBlock x:Name="OrchestratorSettingsMessage"
+                                                   FontSize="{StaticResource TabRailMetaFontSize}"
+                                                   Foreground="{ThemeResource TabRailSecondaryTextBrush}"
+                                                   Text=""
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock FontSize="{StaticResource TabRailMetaFontSize}"
+                                                   Foreground="{ThemeResource TabRailTertiaryTextBrush}"
+                                                   Text="Settings and any pasted key are stored by the terminal host in its local data folder."
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </Flyout>
+                        </Button.Flyout>
                     </Button>
                     <Button x:Name="OrchestratorCollapseButton"
-                            Padding="6"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            ToolTipService.ToolTip="Collapse panel">
-                        <FontIcon FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                  FontSize="13"
-                                  Glyph="&#xE76C;" />
-                    </Button>
+                            AutomationProperties.Name="Collapse panel"
+                            Content="&#xE76C;"
+                            Style="{StaticResource ProjectStripIconButtonStyle}"
+                            ToolTipService.ToolTip="Collapse panel" />
                 </StackPanel>
             </Grid>
 
-            <Grid x:Name="OrchestratorContent"
-                  Grid.Row="1"
-                  Grid.Column="1" />
+            <ScrollViewer x:Name="OrchestratorTranscriptScroller"
+                          Grid.Row="1"
+                          Grid.Column="1"
+                          Padding="12,4,12,8"
+                          HorizontalScrollMode="Disabled"
+                          VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="OrchestratorTranscript"
+                            Spacing="10" />
+            </ScrollViewer>
 
             <StackPanel x:Name="OrchestratorEmptyState"
                         Grid.Row="1"
                         Grid.Column="1"
-                        MaxWidth="300"
+                        MaxWidth="320"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         Spacing="10">
                 <FontIcon HorizontalAlignment="Center"
                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
                           FontSize="30"
-                          Glyph="&#xE99A;"
-                          Opacity="0.85" />
+                          Foreground="{ThemeResource TabRailSecondaryTextBrush}"
+                          Glyph="&#xE99A;" />
                 <TextBlock HorizontalAlignment="Center"
                            FontSize="14"
                            FontWeight="SemiBold"
-                           Text="Command every terminal" />
+                           Foreground="{ThemeResource TabRailPrimaryTextBrush}"
+                           Text="Ask about your tabs" />
                 <TextBlock HorizontalAlignment="Center"
-                           FontSize="12"
-                           Opacity="0.7"
-                           Text="One agent that watches every session on this host — it summarizes, opens, closes, and drives them for you."
+                           FontSize="{StaticResource TabRailTitleFontSize}"
+                           Foreground="{ThemeResource TabRailSecondaryTextBrush}"
+                           Text="The orchestrator sees every terminal on this machine: what is running, where, and whether it needs you. It can read, type into, open and close tabs for you."
                            TextAlignment="Center"
                            TextWrapping="Wrap" />
-                <StackPanel HorizontalAlignment="Center"
-                            Orientation="Horizontal"
-                            Spacing="8">
-                    <Button x:Name="OrchestratorStartClaudeButton"
-                            Content="Start Claude"
-                            Style="{ThemeResource AccentButtonStyle}" />
-                    <Button x:Name="OrchestratorStartCodexButton"
-                            Content="Start Codex" />
+                <StackPanel x:Name="OrchestratorQuickPrompts"
+                            HorizontalAlignment="Center"
+                            Spacing="6">
+                    <Button HorizontalAlignment="Stretch"
+                            Content="What's every tab doing?"
+                            Tag="What is every tab doing right now? One line per tab." />
+                    <Button HorizontalAlignment="Stretch"
+                            Content="What needs me?"
+                            Tag="Which tabs are waiting on me, stuck, or showing errors? Check anything suspicious." />
+                    <Button HorizontalAlignment="Stretch"
+                            Content="Summarize the agents"
+                            Tag="For each tab running Claude Code or Codex, tell me what it is working on and how far along it is." />
                 </StackPanel>
                 <TextBlock x:Name="OrchestratorHintText"
                            HorizontalAlignment="Center"
-                           FontSize="11"
-                           Opacity="0.6"
+                           FontSize="{StaticResource TabRailMetaFontSize}"
+                           Foreground="{ThemeResource TabRailTertiaryTextBrush}"
                            Text=""
                            TextAlignment="Center"
                            TextWrapping="Wrap" />
             </StackPanel>
+
+            <Border x:Name="OrchestratorErrorBar"
+                    Grid.Row="2"
+                    Grid.Column="1"
+                    Padding="12,6"
+                    Background="#33C42B1C"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="OrchestratorErrorText"
+                           FontSize="{StaticResource TabRailMetaFontSize}"
+                           Foreground="{ThemeResource TabRailPrimaryTextBrush}"
+                           IsTextSelectionEnabled="True"
+                           TextWrapping="Wrap" />
+            </Border>
+
+            <Grid Grid.Row="3"
+                  Grid.Column="1"
+                  Padding="10,6,8,8"
+                  ColumnSpacing="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="OrchestratorComposer"
+                         Grid.Column="0"
+                         MaxHeight="140"
+                         VerticalAlignment="Bottom"
+                         AcceptsReturn="True"
+                         PlaceholderText="Ask about your tabs, or tell it what to do"
+                         PreviewKeyDown="_OrchestratorComposerKeyDown"
+                         TextWrapping="Wrap" />
+                <Button x:Name="OrchestratorSendButton"
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        AutomationProperties.Name="Send"
+                        Content="&#xE724;"
+                        FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                        Style="{ThemeResource AccentButtonStyle}"
+                        ToolTipService.ToolTip="Send (Enter)" />
+                <Button x:Name="OrchestratorStopButton"
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        AutomationProperties.Name="Stop"
+                        Content="&#xE71A;"
+                        FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                        ToolTipService.ToolTip="Stop"
+                        Visibility="Collapsed" />
+            </Grid>
         </Grid>
 
         <!--

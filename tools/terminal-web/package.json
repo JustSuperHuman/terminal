@@ -9,7 +9,6 @@
     "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json && tsc -p tsconfig.bridge.json",
     "build:client": "tsc --noEmit -p tsconfig.json && vite build",
     "start": "node dist/server/index.js --static",
-    "smoke:orchestrator-rail": "node scripts/smoke-orchestrator-rail.mjs",
     "smoke:layout": "node scripts/smoke-layout.mjs",
     "smoke:profile-sync": "node scripts/smoke-profile-sync.mjs",
     "smoke:bridge-replay": "node scripts/smoke-bridge-replay.mjs",

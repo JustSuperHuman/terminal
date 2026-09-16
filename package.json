@@ -1,4 +1,6 @@
 {
+  "name": "just-terminal-desktop",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
     "build": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./build-dev-terminal.ps1",
@@ -12,6 +14,7 @@
     "terminal-web:build": "npm --prefix ./tools/terminal-web run build",
     "terminal-web:start": "npm --prefix ./tools/terminal-web run start",
     "package:ready": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/package-ready-terminal.ps1",
+    "package": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./tools/package-terminal.ps1",
     "mobile": "npm --prefix ./tools/just-terminal run start",
     "mobile:android": "npm --prefix ./tools/just-terminal run android"
   }

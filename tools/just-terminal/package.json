@@ -40,6 +40,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "smoke:terminal-html": "bun scripts/smoke-terminal-html.mjs",
+    "smoke:mobile-reliability": "bun scripts/smoke-mobile-reliability.mjs",
+    "smoke:mobile-orchestrator": "bun scripts/smoke-mobile-orchestrator.mjs",
     "build": "bunx eas-cli@latest build --platform ios --profile production-internal",
     "build:internal": "bunx eas-cli@latest build --platform ios --profile production-internal",
     "build:preview": "bunx eas-cli@latest build --platform ios --profile preview",

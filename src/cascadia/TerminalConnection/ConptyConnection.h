@@ -36,6 +36,7 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         void SetBridgeProject(const winrt::hstring& projectId);
         void UpdateBridgeCwd(const winrt::hstring& cwd);
         winrt::hstring ForegroundAgent();
+        winrt::hstring ForegroundWorkingDirectory();
 
         winrt::hstring Commandline() const;
         winrt::hstring StartingTitle() const;
@@ -72,6 +73,18 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         static void closePseudoConsoleAsync(HPCON hPC) noexcept;
         static HRESULT NewHandoff(HANDLE* in, HANDLE* out, HANDLE signal, HANDLE reference, HANDLE server, HANDLE client, const TERMINAL_STARTUP_INFO* startupInfo) noexcept;
         static winrt::hstring _commandlineFromProcess(HANDLE process);
+        static std::wstring _workingDirectoryFromProcess(HANDLE process);
+
+        // One row of the shared, short-lived process table that the
+        // foreground-process walks read from instead of each taking their own
+        // system-wide snapshot.
+        struct ProcessTableEntry
+        {
+            DWORD Pid{};
+            DWORD ParentPid{};
+            std::wstring Image;
+        };
+        static std::vector<ProcessTableEntry> _processTable();
 
         void _LaunchAttachedClient();
         void _indicateExitWithStatus(unsigned int status) noexcept;

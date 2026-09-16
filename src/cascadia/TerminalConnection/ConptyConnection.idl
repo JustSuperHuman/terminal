@@ -31,6 +31,9 @@ namespace Microsoft.Terminal.TerminalConnection
         // "claude", "codex", or "" — which coding agent is currently running
         // inside this connection's process tree.
         String ForegroundAgent();
+        // Live working directory of the deepest child process (the running
+        // program), or of the shell itself; "" when it cannot be read.
+        String ForegroundWorkingDirectory();
 
         static event NewConnectionHandler NewConnection;
         static void StartInboundListener();

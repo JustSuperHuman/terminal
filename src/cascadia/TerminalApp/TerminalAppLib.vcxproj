@@ -58,6 +58,9 @@
     <Page Include="TabRowControl.xaml">
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="TabRailStyles.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="TabHeaderControl.xaml">
       <SubType>Designer</SubType>
     </Page>

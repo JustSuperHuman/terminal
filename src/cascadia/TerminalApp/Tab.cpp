@@ -5,6 +5,7 @@
 #include "ColorPickupFlyout.h"
 #include "Tab.h"
 #include "SettingsPaneContent.h"
+#include "TabGroup.h"
 #include "Tab.g.cpp"
 #include "Utils.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -68,6 +69,13 @@ namespace winrt::TerminalApp::implementation
         }
 
         _Setup();
+    }
+
+    Tab::~Tab()
+    {
+        // The rail's shared registry keys tabs by address, so a tab that goes
+        // away has to say so before another one is allocated on top of it.
+        RailSemantics::RetireTab(reinterpret_cast<uintptr_t>(this));
     }
 
     // Method Description:
@@ -535,6 +543,9 @@ namespace winrt::TerminalApp::implementation
         _headerControl.Title(activeTitle);
         Automation::AutomationProperties::SetName(TabViewItem(), activeTitle);
         _UpdateToolTip();
+        // The rail suppresses a location that only repeats the title, so a new
+        // title can change what the row prints without anything else moving.
+        _updateRailDerived();
     }
 
     // Method Description:
@@ -985,6 +996,11 @@ namespace winrt::TerminalApp::implementation
 
         // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
         Content(nullptr);
+
+        // Stop counting towards the branch its repository agrees on: a closing
+        // tab must not keep a section's header pinned to a stale branch, and
+        // the rail rebuild that follows re-reads the rest.
+        RailSemantics::RetireTab(reinterpret_cast<uintptr_t>(this));
 
         if (_rootPane)
         {
@@ -2201,6 +2217,177 @@ namespace winrt::TerminalApp::implementation
         }
 
         return Title();
+    }
+
+    // "src/admin" and "SRC\Admin" name the same place. Neither string is ever
+    // empty-equals-empty here: callers check for empty first, because an empty
+    // location is dropped anyway.
+    static bool _sameLocationText(const std::wstring_view left, const std::wstring_view right) noexcept
+    {
+        if (left.size() != right.size())
+        {
+            return false;
+        }
+        const auto fold = [](const wchar_t ch) noexcept {
+            const auto slashed{ ch == L'/' ? L'\\' : ch };
+            return slashed >= L'A' && slashed <= L'Z' ? static_cast<wchar_t>(slashed - L'A' + L'a') : slashed;
+        };
+        return std::equal(left.begin(), left.end(), right.begin(), [&](const wchar_t l, const wchar_t r) noexcept {
+            return fold(l) == fold(r);
+        });
+    }
+
+    // Method Description:
+    // - The location half of the row's meta line. The rail hands us the
+    //   directory relative to the section the row sits in (or, in the flat
+    //   views, the project name); we only drop it when it says nothing the
+    //   title is not already saying.
+    winrt::hstring Tab::_computeRailPathText() const
+    {
+        if (_RailSubtitle.empty() || _sameLocationText(_RailSubtitle, _Title))
+        {
+            return {};
+        }
+        return _RailSubtitle;
+    }
+
+    // Method Description:
+    // - The branch half of the row's meta line.
+    // - Every tab in one checkout is on the same branch, so a branch per row is
+    //   a column of identical words; the section header for the repository
+    //   carries it once instead (TabGroup::Branch). A row only speaks up when
+    //   it genuinely differs from its siblings - a worktree, a submodule -
+    //   because then no single header can own the branch and each row has to
+    //   say its own. What a row drops is still in RailTooltip.
+    winrt::hstring Tab::_computeRailBranch() const
+    {
+        if (_GitBranch.empty() || RailSemantics::Branch(_GitRoot) == _GitBranch)
+        {
+            return {};
+        }
+        return _GitBranch;
+    }
+
+    // Method Description:
+    // - Everything the row had to leave out, one fact per line. Empty facts are
+    //   skipped rather than left as blank lines.
+    winrt::hstring Tab::_computeRailTooltip() const
+    {
+        std::wstring detail;
+        const auto line = [&detail](const std::wstring_view text) {
+            if (text.empty())
+            {
+                return;
+            }
+            if (!detail.empty())
+            {
+                detail.push_back(L'\n');
+            }
+            detail.append(text);
+        };
+
+        line(_Title);
+        line(_WorkingDirectory);
+        line(_GitBranch);
+        // The project only earns a line when it is not just the title again.
+        if (!_sameLocationText(_ProjectName, _Title))
+        {
+            line(_ProjectName);
+        }
+        line(_railAgent);
+        return winrt::hstring{ detail };
+    }
+
+    // Method Description:
+    // - The row, spelled out for a screen reader: what it shows, in the order
+    //   it shows it. It deliberately mirrors the visible suppression rules -
+    //   hearing "main" nine times in a row is no better than reading it nine
+    //   times - and the branch a row drops is announced by its section header
+    //   (see TabGroup::AccessibleName).
+    winrt::hstring Tab::_computeRailAccessibleName() const
+    {
+        std::wstring name{ std::wstring_view{ _Title } };
+        const auto part = [&name](const std::wstring_view text) {
+            if (text.empty())
+            {
+                return;
+            }
+            if (!name.empty())
+            {
+                name.append(L", ");
+            }
+            name.append(text);
+        };
+
+        part(_railPathText);
+        part(_railBranch);
+        part(_railAgent);
+        return winrt::hstring{ name };
+    }
+
+    // Method Description:
+    // - Re-decides every derived row string and raises only the ones that
+    //   actually moved. Called from every input the rules read: the rail
+    //   assigning a subtitle (unconditionally, on each rebuild, so a tab that
+    //   moved between sections is picked up), a new title, a new branch, a new
+    //   agent, and a sibling's branch moving under it.
+    void Tab::_updateRailDerived()
+    {
+        const auto raise = [this](const wchar_t* property) {
+            PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ property });
+        };
+
+        auto metaChanged{ false };
+        if (auto value{ _computeRailPathText() }; _railPathText != value)
+        {
+            _railPathText = std::move(value);
+            raise(L"RailPathText");
+            metaChanged = true;
+        }
+        if (auto value{ _computeRailBranch() }; _railBranch != value)
+        {
+            _railBranch = std::move(value);
+            raise(L"RailBranch");
+            metaChanged = true;
+        }
+        if (metaChanged)
+        {
+            raise(L"RailMeta");
+        }
+        if (auto value{ _computeRailTooltip() }; _railTooltip != value)
+        {
+            _railTooltip = std::move(value);
+            raise(L"RailTooltip");
+        }
+        // Last: it is built out of the two decisions above.
+        if (auto value{ _computeRailAccessibleName() }; _railAccessibleName != value)
+        {
+            _railAccessibleName = std::move(value);
+            raise(L"RailAccessibleName");
+        }
+    }
+
+    // Method Description:
+    // - Publishes this tab's repository and branch into the rail's shared
+    //   registry, then re-decides its own row.
+    // Return Value:
+    // - True when the branch that repository agrees on moved. The caller owns
+    //   the fan-out, because the rows that have to re-decide are the *other*
+    //   tabs in that repository, which a tab cannot reach on its own.
+    bool Tab::RefreshRailSemantics()
+    {
+        const auto consensusMoved{ RailSemantics::PublishTab(reinterpret_cast<uintptr_t>(this), _GitRoot, _GitBranch) };
+        _updateRailDerived();
+        return consensusMoved;
+    }
+
+    // Segoe Fluent Icons E99A ("Robot"), the same mark the orchestrator toggle
+    // uses, so "an agent is running here" looks the same everywhere. The agent
+    // is told apart by name, in the tooltip and to a screen reader; two glyphs
+    // that differ only in silhouette would not survive 12px.
+    winrt::hstring Tab::RailAgentGlyph() const
+    {
+        return _railAgent.empty() ? winrt::hstring{} : winrt::hstring{ L"\uE99A" };
     }
 
     // Method Description:

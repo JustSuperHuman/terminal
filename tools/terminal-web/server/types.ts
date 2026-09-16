@@ -119,18 +119,46 @@ export interface BridgeCommandInfo {
   claude?: string;
 }
 
-export type OrchestratorAgent = "claude" | "codex";
+// The orchestrator is a chat agent hosted by the native Rust bridge (see
+// src/cascadia/TerminalConnection/rust-bridge/src/orchestrator). This
+// adapter only ever reports it as unavailable; the shape mirrors the host's
+// so clients need one type.
+export interface OrchestratorTranscriptItem {
+  id: string;
+  rev: number;
+  seq: number;
+  turnId: string;
+  role: "user" | "assistant" | "tool" | "error";
+  text: string;
+  reasoning?: string;
+  toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+  tool?: { callId: string; name: string; arguments: unknown; summary: string; result: string; ok: boolean };
+  status: "streaming" | "done" | "cancelled" | "error";
+  at: string;
+  finishedAt?: string;
+  model?: string;
+}
 
 export interface OrchestratorStatus {
-  state: "stopped" | "starting" | "running";
-  agent?: OrchestratorAgent;
-  sessionId?: string;
-  startedAt?: string;
-  lastExit?: { exitCode?: number; signal?: number; at: string };
-  availableAgents: OrchestratorAgent[];
+  state: "idle" | "running" | "unconfigured" | "unavailable";
+  seq: number;
+  config?: {
+    provider: "openrouter" | "custom";
+    baseUrl: string;
+    model: string;
+    keyEnv: string;
+    keySource: "env" | "manual" | "none";
+    keyPreview?: string | null;
+    reasoning: "off" | "low" | "medium" | "high";
+  };
+  error?: string | null;
+  usage?: { promptTokens: number; completionTokens: number; cost: number; turns: number };
+  activeTurn?: { id: string; startedAt: string; step: string } | null;
+  transcript?: OrchestratorTranscriptItem[];
 }
 
 export type ClientMessage =
+  | { type: "ping" }
   // A client can watch several sessions at once through named slots (main
   // terminal + orchestrator panel); subscribing replaces only its own slot.
   | { type: "subscribe"; sessionId: string; slot?: string }
@@ -177,6 +205,7 @@ export type BridgeServerMessage =
 export type ServerMessage =
   | {
       type: "hello";
+      heartbeat?: boolean;
       sessions: TerminalSessionSummary[];
       profiles: TerminalProfile[];
       hostProcesses: HostTerminalProcess[];
@@ -187,6 +216,7 @@ export type ServerMessage =
       orchestrator: OrchestratorStatus;
       acp: AcpBridgeState;
     }
+  | { type: "pong" }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
   | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }

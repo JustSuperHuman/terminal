@@ -5,6 +5,7 @@
 // access URLs from the web sidebar are intentionally omitted.
 
 import type { AcpBridgeState, AcpSessionView } from "./acpTypes";
+import type { OrchestratorItem, OrchestratorStatus } from "./orchestratorTypes";
 
 export type SessionStatus = "running" | "exited";
 export type SessionSource = "managed" | "bridged";
@@ -45,6 +46,7 @@ export interface TerminalSessionSummary {
   agentActivity?: TerminalAgentActivity;
   /** Present once this terminal has been attached to an ACP conversation. */
   acpSessionId?: string;
+  kind?: "orchestrator";
   source: SessionSource;
   pid?: number;
   status: SessionStatus;
@@ -74,6 +76,7 @@ export interface ServerInfo {
 export type ServerMessage =
   | {
       type: "hello";
+      heartbeat?: boolean;
       sessions: TerminalSessionSummary[];
       profiles: TerminalProfile[];
       hostProcesses: unknown[];
@@ -83,7 +86,12 @@ export type ServerMessage =
       bridgeCommands: unknown;
       /** Optional so a saved connection to an older bridge still opens. */
       acp?: AcpBridgeState;
+      orchestrator?: OrchestratorStatus;
     }
+  | { type: "pong" }
+  | { type: "orchestrator"; orchestrator: OrchestratorStatus }
+  | { type: "orchestrator_item"; item: OrchestratorItem; seq: number }
+  | { type: "orchestrator_reset"; seq: number }
   | { type: "sessions"; sessions: TerminalSessionSummary[] }
   | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }
@@ -126,6 +134,7 @@ export interface TerminalNotification {
 }
 
 export type ClientMessage =
+  | { type: "ping" }
   | { type: "subscribe"; sessionId: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }

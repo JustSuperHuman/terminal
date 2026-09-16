@@ -124,6 +124,7 @@ pub struct TerminalNotification {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
+    Ping,
     Subscribe {
         #[serde(rename = "sessionId")]
         session_id: String,

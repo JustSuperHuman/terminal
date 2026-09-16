@@ -1,7 +1,9 @@
+use crate::agents;
 use crate::model::{
     empty_acp_state, iso_now, parse_since, ClientMessage, ServerEvent, TerminalNotification,
     TerminalProfile, TerminalProject, TerminalSessionSummary,
 };
+use crate::orchestrator::{self, Orchestrator};
 use crate::profiles;
 use crate::projects::{self, RememberedProject};
 use crate::prompt;
@@ -28,7 +30,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message as BridgeMessage;
@@ -45,6 +47,9 @@ pub const COMMAND_KILL: u32 = 3;
 
 const MAX_NOTIFICATIONS: usize = 200;
 const MAX_PROJECTS: usize = 200;
+/// Minimum gap between two screen observations of one session; a repainting
+/// TUI would otherwise be fingerprinted on every chunk.
+const OBSERVE_INTERVAL: Duration = Duration::from_millis(180);
 
 struct EmbeddedClientAsset {
     path: &'static str,
@@ -106,6 +111,21 @@ struct Session {
     replay: SafeReplayBuffer,
     seq: u64,
     sink: SessionSink,
+    /// When the rendered screen was last fingerprinted for agent state.
+    last_observed: Option<Instant>,
+    /// Output arrived since the last observation.
+    observation_pending: bool,
+}
+
+/// One session as the orchestrator and the composed-input context see it,
+/// read under a single lock.
+pub(crate) struct SessionView {
+    pub summary: TerminalSessionSummary,
+    /// Plain text of the visible screen.
+    pub screen: String,
+    /// The question an agent is blocked on, when one is rendered.
+    pub prompt: Option<Value>,
+    pub bracketed_paste: bool,
 }
 
 impl Session {
@@ -117,7 +137,84 @@ impl Session {
             replay: SafeReplayBuffer::default(),
             seq: 0,
             sink,
+            last_observed: None,
+            observation_pending: false,
         }
+    }
+
+    /// Re-reads the rendered screen for agent identity and activity. Returns
+    /// true when a client-visible field moved.
+    fn observe(&mut self) -> bool {
+        let text = self.plain_text();
+        let osc_agent = self
+            .output_filter
+            .osc_agent
+            .as_deref()
+            .and_then(agents::Agent::parse);
+        let observation = agents::observe(&self.summary, osc_agent, &text);
+        let waiting = observation.agent.is_some() && prompt::detect_prompt(&text).is_some();
+        let activity = agents::activity(&observation, waiting).map(str::to_owned);
+        let agent = observation.agent.map(|agent| agent.id().to_owned());
+        let source = observation.source.map(str::to_owned);
+        let changed = self.summary.agent != agent
+            || self.summary.agent_source != source
+            || self.summary.agent_activity != activity;
+        self.summary.agent = agent;
+        self.summary.agent_source = source;
+        self.summary.agent_activity = activity;
+        self.last_observed = Some(Instant::now());
+        self.observation_pending = false;
+        changed
+    }
+
+    fn view(&self) -> SessionView {
+        let screen = self.plain_text();
+        let prompt = if self.summary.agent.is_some() {
+            prompt::detect_prompt(&screen)
+        } else {
+            None
+        };
+        SessionView {
+            summary: self.summary.clone(),
+            screen,
+            prompt,
+            bracketed_paste: self.parser.screen().bracketed_paste(),
+        }
+    }
+
+    /// The last `tail` rows of the screen plus scrollback, oldest first.
+    fn text_with_scrollback(&mut self, tail: usize) -> String {
+        let screen = self.parser.screen_mut();
+        let (rows, cols) = screen.size();
+        let rows_per_window = usize::from(rows).max(1);
+        screen.set_scrollback(usize::MAX);
+        let max_offset = screen.scrollback();
+        let mut collected: VecDeque<String> = VecDeque::new();
+        let mut offset = 0usize;
+        loop {
+            let effective = offset.min(max_offset);
+            screen.set_scrollback(effective);
+            let mut window: Vec<String> = screen.rows(0, cols).collect();
+            if effective < offset {
+                // Clamped at the top of the scrollback: only the rows above
+                // the previous window are new.
+                let overlap = offset - effective;
+                window.truncate(window.len().saturating_sub(overlap));
+            }
+            for row in window.into_iter().rev() {
+                collected.push_front(row.trim_end().to_string());
+            }
+            if effective >= max_offset || collected.len() >= tail + rows_per_window {
+                break;
+            }
+            offset += rows_per_window;
+        }
+        screen.set_scrollback(0);
+        while collected.back().is_some_and(|row| row.trim().is_empty()) {
+            collected.pop_back();
+        }
+        let start = collected.len().saturating_sub(tail);
+        collected.iter().skip(start).cloned().collect::<Vec<_>>().join("\n")
     }
 
     fn append(&mut self, data: String) -> u64 {
@@ -214,6 +311,8 @@ pub struct AppState {
     pub status: Arc<AtomicU32>,
     pub config: Arc<BridgeConfig>,
     attachment_cleanup_started: Arc<AtomicBool>,
+    observer_started: Arc<AtomicBool>,
+    pub orchestrator: Arc<Orchestrator>,
 }
 
 impl AppState {
@@ -225,6 +324,7 @@ impl AppState {
     ) -> Self {
         let (events, _) = broadcast::channel(4096);
         let (bridge_events, _) = broadcast::channel(4096);
+        let orchestrator = Arc::new(Orchestrator::new(&data_root, events.clone()));
         let token = load_or_create_token(&data_root);
         let store = load_projects(&data_root, &asset_root);
         let published_projects = projects::visible_projects(
@@ -256,6 +356,8 @@ impl AppState {
             status: Arc::new(AtomicU32::new(STATUS_CONNECTING)),
             config: Arc::new(config),
             attachment_cleanup_started: Arc::new(AtomicBool::new(false)),
+            observer_started: Arc::new(AtomicBool::new(false)),
+            orchestrator,
         }
     }
 
@@ -326,9 +428,25 @@ impl AppState {
             let previous_agent = session.summary.agent.clone();
             let visible = session.output_filter.feed(&data, &mut session.summary);
             let seq = session.append(visible.clone());
-            (seq, visible, previous_agent != session.summary.agent)
+            let mut changed = previous_agent != session.summary.agent;
+            session.observation_pending = true;
+            if session
+                .last_observed
+                .is_none_or(|at| at.elapsed() >= OBSERVE_INTERVAL)
+            {
+                changed |= session.observe();
+            }
+            (seq, visible, changed)
         };
         if visible_data.is_empty() {
+            if summary_changed {
+                if let Some(summary) = self.summary(session_id) {
+                    self.publish(ServerEvent::session(
+                        json!({ "type": "session", "session": summary }),
+                        session_id,
+                    ));
+                }
+            }
             return;
         }
         self.publish(ServerEvent::output(
@@ -755,7 +873,7 @@ impl AppState {
         recents
     }
 
-    fn dispatch(
+    pub(crate) fn dispatch(
         &self,
         session_id: &str,
         kind: u32,
@@ -832,7 +950,7 @@ impl AppState {
             .map(Session::plain_text)
     }
 
-    fn input_context(&self, session_id: &str) -> Option<Value> {
+    pub(crate) fn input_context(&self, session_id: &str) -> Option<Value> {
         let inner = self.inner.lock();
         let session = inner.sessions.get(session_id)?;
         Some(prompt::input_context(
@@ -841,6 +959,61 @@ impl AppState {
             session.parser.screen().bracketed_paste(),
             session.parser.screen().application_cursor(),
         ))
+    }
+
+    pub(crate) fn session_view(&self, session_id: &str) -> Option<SessionView> {
+        self.inner
+            .lock()
+            .sessions
+            .get(session_id)
+            .map(Session::view)
+    }
+
+    pub(crate) fn session_views(&self) -> Vec<SessionView> {
+        self.inner.lock().sessions.values().map(Session::view).collect()
+    }
+
+    /// Plain text of the last `tail` rows, scrollback included.
+    pub(crate) fn session_text(&self, session_id: &str, tail: usize) -> Option<String> {
+        let mut inner = self.inner.lock();
+        let session = inner.sessions.get_mut(session_id)?;
+        Some(session.text_with_scrollback(tail.max(1)))
+    }
+
+    /// Output sequence number, which advances on every chunk a session prints.
+    pub(crate) fn session_seq(&self, session_id: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .sessions
+            .get(session_id)
+            .map(|session| session.seq)
+    }
+
+    /// Fingerprints every session whose output changed since its last
+    /// observation and was throttled at the time, so a TUI that went quiet
+    /// still ends up in its final state.
+    pub(crate) fn observe_pending_sessions(&self) {
+        let changed: Vec<TerminalSessionSummary> = {
+            let mut inner = self.inner.lock();
+            inner
+                .sessions
+                .values_mut()
+                .filter(|session| {
+                    session.observation_pending
+                        && session
+                            .last_observed
+                            .is_none_or(|at| at.elapsed() >= OBSERVE_INTERVAL)
+                })
+                .filter_map(|session| session.observe().then(|| session.summary.clone()))
+                .collect()
+        };
+        for summary in changed {
+            let id = summary.id.clone();
+            self.publish(ServerEvent::session(
+                json!({ "type": "session", "session": summary }),
+                id,
+            ));
+        }
     }
 
     fn bootstrap(&self) -> Value {
@@ -862,7 +1035,7 @@ impl AppState {
                 "urls": urls
             },
             "bridgeCommands": { "serverUrl": format!("http://127.0.0.1:{port}"), "shell": "", "codex": "", "claude": "" },
-            "orchestrator": { "state": "stopped", "availableAgents": [] },
+            "orchestrator": self.orchestrator.status(None, true),
             "acp": inner.acp
         })
     }
@@ -871,6 +1044,7 @@ impl AppState {
         let bootstrap = self.bootstrap();
         json!({
             "type": "hello",
+            "heartbeat": true,
             "sessions": bootstrap["sessions"],
             "profiles": bootstrap["profiles"],
             "hostProcesses": bootstrap["hostProcesses"],
@@ -902,7 +1076,7 @@ impl AppState {
             .collect()
     }
 
-    fn notify(&self, mut notification: TerminalNotification) {
+    pub(crate) fn notify(&self, mut notification: TerminalNotification) {
         if notification.id.is_empty() {
             notification.id = Uuid::new_v4().to_string();
         }
@@ -1031,6 +1205,9 @@ enum OutputFilterState {
 struct OutputFilter {
     state: OutputFilterState,
     frame: String,
+    /// The agent a wrapper announced through the private OSC handshake and
+    /// has not cleared yet; outranks screen fingerprinting.
+    osc_agent: Option<String>,
 }
 
 impl OutputFilter {
@@ -1110,7 +1287,7 @@ impl OutputFilter {
         let body_end = self.frame.len().saturating_sub(terminator_bytes);
         let body = self.frame.get(2..body_end).unwrap_or_default();
         if let Some(encoded) = body.strip_prefix(PRIVATE_AGENT_OSC) {
-            apply_agent_metadata(summary, encoded);
+            apply_agent_metadata(summary, &mut self.osc_agent, encoded);
         } else {
             visible.push_str(&self.frame);
         }
@@ -1119,7 +1296,11 @@ impl OutputFilter {
     }
 }
 
-fn apply_agent_metadata(summary: &mut TerminalSessionSummary, encoded: &str) {
+fn apply_agent_metadata(
+    summary: &mut TerminalSessionSummary,
+    osc_agent: &mut Option<String>,
+    encoded: &str,
+) {
     if encoded.is_empty()
         || encoded.len() > 512
         || !encoded
@@ -1150,12 +1331,18 @@ fn apply_agent_metadata(summary: &mut TerminalSessionSummary, encoded: &str) {
         return;
     }
     if state == Some("active") {
+        *osc_agent = agent.map(str::to_owned);
         summary.agent = agent.map(str::to_owned);
         summary.agent_source = Some("osc".into());
-    } else if summary.agent.as_deref() == agent {
-        summary.agent = None;
-        summary.agent_source = None;
-        summary.agent_activity = None;
+    } else if osc_agent.as_deref() == agent {
+        // Ignore stale or unpaired clears so one wrapper cannot clear a
+        // newer agent that already became active in the same terminal.
+        *osc_agent = None;
+        if summary.agent.as_deref() == agent {
+            summary.agent = None;
+            summary.agent_source = None;
+            summary.agent_activity = None;
+        }
     }
 }
 
@@ -1296,7 +1483,7 @@ async fn acp(State(state): State<AppState>) -> Json<Value> {
 }
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({ "ok": true, "runtime": "rust", "sessions": state.summaries().len(), "endpoint": state.endpoint.read().clone() }),
+        json!({ "ok": true, "runtime": "rust", "sessions": state.summaries().len(), "endpoint": state.endpoint.read().clone(), "orchestrator": true }),
     )
 }
 
@@ -1552,7 +1739,10 @@ async fn create_session(State(state): State<AppState>, Json(body): Json<Value>) 
     }
 }
 
-async fn launch_terminal(state: &AppState, body: Value) -> Result<TerminalSessionSummary, String> {
+pub(crate) async fn launch_terminal(
+    state: &AppState,
+    body: Value,
+) -> Result<TerminalSessionSummary, String> {
     let before: std::collections::HashSet<_> = state
         .summaries()
         .into_iter()
@@ -1764,8 +1954,74 @@ async fn files(Path(id): Path<String>, State(state): State<AppState>) -> Respons
     };
     Json(json!({ "cwd": summary.cwd, "files": [] })).into_response()
 }
-async fn orchestrator() -> Json<Value> {
-    Json(json!({ "state": "stopped", "availableAgents": [] }))
+async fn orchestrator_status(
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let since = query.get("since").and_then(|value| value.parse::<u64>().ok());
+    Json(state.orchestrator.status(since, true))
+}
+
+async fn orchestrator_config(State(state): State<AppState>) -> Json<Value> {
+    Json(state.orchestrator.public_config())
+}
+
+async fn orchestrator_update_config(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Response {
+    match state.orchestrator.update_config(&body) {
+        Ok(config) => Json(config).into_response(),
+        Err(message) => api_error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+async fn orchestrator_models(
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let refresh = query
+        .get("refresh")
+        .is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false"));
+    Json(state.orchestrator.models(refresh).await)
+}
+
+async fn orchestrator_send(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let text = body
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match orchestrator::send_message(&state, text).await {
+        Ok(status) => (StatusCode::ACCEPTED, Json(status)).into_response(),
+        Err((code, message)) => api_error(
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            message,
+        ),
+    }
+}
+
+async fn orchestrator_clear(State(state): State<AppState>) -> Json<Value> {
+    state.orchestrator.clear();
+    Json(state.orchestrator.status(None, true))
+}
+
+async fn orchestrator_cancel(State(state): State<AppState>) -> Json<Value> {
+    let cancelled = state.orchestrator.cancel();
+    let mut status = state.orchestrator.status(None, false);
+    status["cancelled"] = json!(cancelled);
+    Json(status)
+}
+
+async fn orchestrator_test(State(state): State<AppState>) -> Json<Value> {
+    Json(state.orchestrator.test_connection().await)
+}
+
+async fn orchestrator_retired() -> Response {
+    api_error(
+        StatusCode::GONE,
+        "The orchestrator is now a built-in chat agent: send messages to POST /api/orchestrator/messages.",
+    )
 }
 async fn unavailable() -> Response {
     api_error(
@@ -1792,9 +2048,18 @@ async fn client_socket(socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             incoming = receiver.next() => {
-                let Some(Ok(Message::Text(text))) = incoming else { break };
+                let text = match incoming {
+                    Some(Ok(Message::Text(text))) => text,
+                    // Axum answers protocol pings automatically. Control frames
+                    // are normal keepalives, not a disconnected client.
+                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => continue,
+                    _ => break,
+                };
                 let Ok(message) = serde_json::from_str::<ClientMessage>(&text) else { continue };
                 match message {
+                    ClientMessage::Ping => {
+                        if sender.send(Message::Text(json!({ "type": "pong" }).to_string().into())).await.is_err() { break; }
+                    }
                     ClientMessage::Subscribe { session_id, slot } => {
                         subscriptions.insert(slot.unwrap_or_else(|| "main".into()), session_id.clone());
                         if let Some(snapshot) = state.snapshot(&session_id) {
@@ -1958,9 +2223,24 @@ pub fn router(state: AppState) -> Router {
             patch(rename_project).delete(delete_project),
         )
         .route("/api/peers/{*rest}", any(unavailable))
-        .route("/api/orchestrator", get(orchestrator))
-        .route("/api/orchestrator/start", post(unavailable))
-        .route("/api/orchestrator/stop", post(unavailable))
+        .route("/api/orchestrator", get(orchestrator_status))
+        .route(
+            "/api/orchestrator/config",
+            get(orchestrator_config)
+                .put(orchestrator_update_config)
+                .patch(orchestrator_update_config),
+        )
+        .route("/api/orchestrator/models", get(orchestrator_models))
+        .route(
+            "/api/orchestrator/messages",
+            post(orchestrator_send).delete(orchestrator_clear),
+        )
+        .route("/api/orchestrator/cancel", post(orchestrator_cancel))
+        .route("/api/orchestrator/test", post(orchestrator_test))
+        // Routes of the retired TUI-based orchestrator; old clients get a
+        // clear message instead of a 404.
+        .route("/api/orchestrator/start", post(orchestrator_retired))
+        .route("/api/orchestrator/stop", post(orchestrator_retired))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -2110,6 +2390,17 @@ async fn run_owner(state: AppState) -> Result<(), String> {
             loop {
                 clean_old_attachments().await;
                 tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+            }
+        });
+    }
+    if !state.observer_started.swap(true, Ordering::Relaxed) {
+        // Throttled observations skip the last chunk of a burst; this sweep
+        // settles every session that printed since its last look.
+        let observer = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                observer.observe_pending_sessions();
             }
         });
     }
@@ -2585,6 +2876,12 @@ mod tests {
         let hello: Value =
             serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["heartbeat"], true);
+        socket.send(TungsteniteMessage::Ping(vec![1, 2, 3].into())).await.unwrap();
+        assert!(matches!(socket.next().await.unwrap().unwrap(), TungsteniteMessage::Pong(_)));
+        socket.send(TungsteniteMessage::Text(json!({ "type": "ping" }).to_string().into())).await.unwrap();
+        let pong: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(pong["type"], "pong");
         socket
             .send(TungsteniteMessage::Text(
                 json!({ "type": "subscribe", "sessionId": "native-session" })
@@ -2715,6 +3012,220 @@ mod tests {
         );
 
         peer_task.abort();
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mobile_and_desktop_share_orchestrator_chat_and_reconnect_history() {
+        use tokio_tungstenite::tungstenite::Message as ClientFrame;
+        let provider_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_address = provider_listener.local_addr().unwrap();
+        // A local provider fixture: no real accounts, model calls, or terminals.
+        let provider = tokio::spawn(async move {
+            axum::serve(provider_listener, Router::new().route("/v1/chat/completions", post(|Json(body): Json<Value>| async move {
+                if body.to_string().contains("wait-fixture") {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                Json(json!({ "choices": [{ "message": { "role": "assistant", "content": "Both clients share this answer." }, "finish_reason": "stop" }] }))
+            }))).await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new(root.path().into(), root.path().into(), NativeCallback { context: 0, callback }, BridgeConfig::default());
+        state.orchestrator.update_config(&json!({
+            "provider": "custom", "baseUrl": format!("http://{provider_address}/v1"),
+            "model": "fixture", "apiKey": "test-only-not-a-real-key"
+        })).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        });
+        let ws_url = format!("ws://{address}/ws");
+        let (mut desktop, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+        let (mut mobile, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+        for socket in [&mut desktop, &mut mobile] {
+            let hello: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(hello["orchestrator"]["state"], "idle");
+            assert_eq!(hello["orchestrator"]["transcript"], json!([]));
+        }
+        let client = reqwest::Client::new();
+        let response = client.post(format!("http://{address}/api/orchestrator/messages"))
+            .json(&json!({ "text": "Hello from mobile" })).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        for socket in [&mut desktop, &mut mobile] {
+            let mut saw_user = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let ClientFrame::Text(text) = socket.next().await.unwrap().unwrap() else { continue };
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] != "orchestrator_item" { continue; }
+                    if event["item"]["role"] == "user" {
+                        assert_eq!(event["item"]["text"], "Hello from mobile");
+                        saw_user = true;
+                    }
+                    if event["item"]["role"] == "assistant" && event["item"]["status"] == "done" {
+                        assert_eq!(event["item"]["text"], "Both clients share this answer.");
+                        assert!(saw_user);
+                        break;
+                    }
+                }
+            }).await.unwrap();
+        }
+        mobile.close(None).await.unwrap();
+        let (mut resumed, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+        let hello: Value = serde_json::from_str(resumed.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let transcript = hello["orchestrator"]["transcript"].as_array().unwrap();
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0]["text"], "Hello from mobile");
+        assert_eq!(transcript[1]["text"], "Both clients share this answer.");
+        let snapshot: Value = client.get(format!("http://{address}/api/orchestrator")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(snapshot["transcript"], hello["orchestrator"]["transcript"]);
+        let running = client.post(format!("http://{address}/api/orchestrator/messages"))
+            .json(&json!({ "text": "wait-fixture" })).send().await.unwrap();
+        assert_eq!(running.status(), StatusCode::ACCEPTED);
+        let conflict = client.post(format!("http://{address}/api/orchestrator/messages"))
+            .json(&json!({ "text": "must not duplicate a turn" })).send().await.unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let stopped: Value = client.post(format!("http://{address}/api/orchestrator/cancel"))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(stopped["cancelled"], true);
+        assert_eq!(stopped["state"], "idle");
+        let after_stop: Value = client.get(format!("http://{address}/api/orchestrator"))
+            .send().await.unwrap().json().await.unwrap();
+        assert!(after_stop["transcript"].as_array().unwrap().iter().all(|item| item["status"] != "streaming"));
+        desktop.close(None).await.unwrap();
+        resumed.close(None).await.unwrap();
+        server.abort();
+        provider.abort();
+    }
+
+    // Talks to the real model endpoint with the key from the environment, so
+    // it only runs on request: `cargo test live_orchestrator -- --ignored`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn live_orchestrator_reads_a_tab_and_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let commands = Arc::new(Mutex::new(Vec::<CallbackCommand>::new()));
+        let state = AppState::new(
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+            NativeCallback {
+                context: Arc::as_ptr(&commands) as usize,
+                callback: recording_callback,
+            },
+            BridgeConfig::default(),
+        );
+        state.register_native(TerminalSessionSummary::native(
+            "build-tab".into(),
+            "cargo build".into(),
+            "pwsh.exe".into(),
+            "F:\\terminal".into(),
+            42,
+            100,
+            30,
+        ));
+        state.append_output(
+            "build-tab",
+            "PS F:\\terminal> cargo build\r\n   Compiling terminal-bridge-rs v0.1.0\r\nerror[E0425]: cannot find value `frobnicate` in this scope\r\n  --> src/host.rs:12:5\r\nerror: could not compile `terminal-bridge-rs`\r\nPS F:\\terminal> ".into(),
+            false,
+        );
+        state.register_native(TerminalSessionSummary::native(
+            "agent-tab".into(),
+            "Claude".into(),
+            "pwsh.exe".into(),
+            "J:\\Projects\\instagram".into(),
+            43,
+            100,
+            30,
+        ));
+        state.append_output(
+            "agent-tab",
+            "❯ add a retry to the upload client\r\n\r\n· Editing upload.ts… (esc to interrupt)\r\n\r\n? for shortcuts        shift+tab to cycle".into(),
+            false,
+        );
+        state.observe_pending_sessions();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        state.inner.lock().port = address.port();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(server_state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let base = format!("http://{address}");
+        let client = reqwest::Client::new();
+        let status: Value = client
+            .get(format!("{base}/api/orchestrator"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "idle", "an API key must be configured: {status}");
+        assert_eq!(status["config"]["model"], orchestrator::DEFAULT_MODEL);
+
+        let models: Value = client
+            .get(format!("{base}/api/orchestrator/models"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(models["recommended"].as_array().unwrap().len() >= 5, "{models}");
+        assert_eq!(models["recommended"][0]["id"], orchestrator::DEFAULT_MODEL);
+
+        let accepted = client
+            .post(format!("{base}/api/orchestrator/messages"))
+            .json(&json!({ "text": "Which tab has a failing build, what is the error, and what is the Claude tab working on? Read the build tab before answering." }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), 202, "{}", accepted.text().await.unwrap());
+
+        let mut final_status = Value::Null;
+        for _ in 0..600 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let status: Value = client
+                .get(format!("{base}/api/orchestrator"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if status["state"] != "running" {
+                final_status = status;
+                break;
+            }
+        }
+        let transcript = final_status["transcript"].as_array().cloned().unwrap_or_default();
+        let answer: String = transcript
+            .iter()
+            .filter(|item| item["role"] == "assistant")
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tools: Vec<&str> = transcript
+            .iter()
+            .filter(|item| item["role"] == "tool")
+            .filter_map(|item| item["tool"]["name"].as_str())
+            .collect();
+        eprintln!("tools used: {tools:?}\nanswer:\n{answer}\nusage: {}", final_status["usage"]);
+        assert_eq!(final_status["state"], "idle", "{final_status}");
+        assert!(final_status["error"].is_null(), "{final_status}");
+        assert!(tools.contains(&"read_session"), "expected a read_session call, got {tools:?}");
+        let lower = answer.to_lowercase();
+        assert!(lower.contains("e0425") || lower.contains("frobnicate"), "answer did not mention the build error: {answer}");
+        assert!(lower.contains("upload") || lower.contains("retry"), "answer did not describe the agent's task: {answer}");
+
         server.abort();
     }
 }

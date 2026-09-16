@@ -127,6 +127,7 @@ const DRAFTS_KEY = "justterminal.drafts.v1";
 const MAX_DRAFTS = 40;
 
 type DraftMap = Record<string, string>;
+let draftWrites: Promise<void> = Promise.resolve();
 
 function draftKey(endpointId: string, sessionId: string): string {
   return `${endpointId}|${sessionId}`;
@@ -143,10 +144,18 @@ async function loadDrafts(): Promise<DraftMap> {
 }
 
 export async function loadDraft(endpointId: string, sessionId: string): Promise<string> {
+  await draftWrites;
   return (await loadDrafts())[draftKey(endpointId, sessionId)] ?? "";
 }
 
-export async function saveDraft(endpointId: string, sessionId: string, text: string): Promise<void> {
+export function saveDraft(endpointId: string, sessionId: string, text: string): Promise<void> {
+  // Switching sessions can flush one draft while restoring/editing another.
+  // Serialize the shared map's read/modify/write so neither overwrites the other.
+  draftWrites = draftWrites.then(() => persistDraft(endpointId, sessionId, text));
+  return draftWrites;
+}
+
+async function persistDraft(endpointId: string, sessionId: string, text: string): Promise<void> {
   const drafts = await loadDrafts();
   const key = draftKey(endpointId, sessionId);
   if (text.trim()) {
@@ -228,8 +237,8 @@ export async function forgetPrompt(endpointId: string, text: string): Promise<Pr
   return next;
 }
 
-// Sessions-drawer ordering: false = grouped by project in server order,
-// true = flat list by last update with the most recent at the bottom.
+// Both modes follow desktop project order. True shows newer sessions first
+// within each project; output timestamps never affect position.
 const SORT_RECENT_KEY = "justterminal.sortRecent.v1";
 
 export async function loadSortRecent(): Promise<boolean> {

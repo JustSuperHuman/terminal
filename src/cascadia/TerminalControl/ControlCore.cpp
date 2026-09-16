@@ -109,7 +109,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         });
 
         // GH#8969: pre-seed working directory to prevent potential races
-        _terminal->SetWorkingDirectory(_settings.StartingDirectory());
+        _terminal->SeedWorkingDirectory(_settings.StartingDirectory());
 
         _terminal->SetCopyToClipboardCallback([this](wil::zwstring_view wstr) {
             WriteToClipboard.raise(*this, winrt::make<WriteToClipboardEventArgs>(winrt::hstring{ std::wstring_view{ wstr } }, std::string{}, std::string{}));
@@ -120,6 +120,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         auto pfnTitleChanged = [this](auto&& PH1) { _terminalTitleChanged(std::forward<decltype(PH1)>(PH1)); };
         _terminal->SetTitleChangedCallback(pfnTitleChanged);
+
+        // Raised on the output thread when the client reports a new cwd via
+        // OSC 7 / OSC 9;9. Consumers hop to their own thread themselves.
+        _terminal->SetWorkingDirectoryChangedCallback([this]() {
+            WorkingDirectoryChanged.raise(*this, nullptr);
+        });
 
         auto pfnScrollPositionChanged = [this](auto&& PH1, auto&& PH2, auto&& PH3) { _terminalScrollPositionChanged(std::forward<decltype(PH1)>(PH1), std::forward<decltype(PH2)>(PH2), std::forward<decltype(PH3)>(PH3)); };
         _terminal->SetScrollPositionChangedCallback(pfnScrollPositionChanged);
@@ -1535,6 +1541,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         const auto lock = _terminal->LockForReading();
         return hstring{ _terminal->GetWorkingDirectory() };
+    }
+
+    bool ControlCore::WorkingDirectoryFromShell() const
+    {
+        const auto lock = _terminal->LockForReading();
+        return _terminal->WorkingDirectoryFromShell();
     }
 
     bool ControlCore::BracketedPasteEnabled() const noexcept

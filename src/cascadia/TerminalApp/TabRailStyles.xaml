@@ -1,0 +1,833 @@
+<!--
+    Copyright (c) Microsoft Corporation. All rights reserved. Licensed under
+    the MIT License. See LICENSE in the project root for license information.
+-->
+<!--
+    Visual language of the vertical tab rail: every colour, metric, style and
+    control template it uses. Markup that needs x:Bind, an event handler or a
+    DataTemplate lives in TabRowControl.xaml instead - this dictionary is
+    merged into App.xaml and therefore has no code-behind.
+
+    Three rules hold the system together:
+
+    1.  The accent colour means exactly one thing - "this is the tab you are
+        looking at". Only the selected row's 3px left bar may use it. Every
+        other state is a translucent neutral overlay, so a custom or acrylic
+        TitlebarBrush still shows through the rail.
+    2.  Everything inside a row inherits Foreground and FontWeight from the row
+        container's ContentPresenter and expresses hierarchy with Opacity
+        rather than with a second brush. That is what lets the container flip a
+        whole row to SystemColorHighlightTextColorBrush in high contrast, and
+        what lets the selected row's title go SemiBold from a Style that cannot
+        see selection. TextBlocks inside the row DataTemplate must therefore
+        NOT set Foreground or FontWeight of their own.
+    3.  Motion is for state, never for layout. Selection and hover animate over
+        90-120ms; the list's own reflow stays instant.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+                    xmlns:local="using:TerminalApp"
+                    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                    mc:Ignorable="d">
+
+    <ResourceDictionary.ThemeDictionaries>
+
+        <!--
+            Light. The row fills are explicit alpha overlays rather than the
+            SubtleFill* tokens: those top out around 4% and are why the focused
+            tab was indistinguishable from its neighbours. Selection also has
+            to outweigh hover, which the Fluent Subtle ramp does not do - its
+            Tertiary step is lighter than its Secondary step, so the baseline
+            drew a selected row fainter than a merely hovered one.
+        -->
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="TabRailRowHoverBrush"
+                             Color="#0D000000" />
+            <SolidColorBrush x:Key="TabRailRowPressedBrush"
+                             Color="#08000000" />
+            <SolidColorBrush x:Key="TabRailRowSelectedBrush"
+                             Color="#17000000" />
+            <SolidColorBrush x:Key="TabRailRowSelectedHoverBrush"
+                             Color="#22000000" />
+            <SolidColorBrush x:Key="TabRailRowSelectedPressedBrush"
+                             Color="#12000000" />
+            <SolidColorBrush x:Key="TabRailToggleCheckedBrush"
+                             Color="#17000000" />
+            <SolidColorBrush x:Key="TabRailRowActionRestBrush"
+                             Color="Transparent" />
+
+            <StaticResource x:Key="TabRailSelectionAccentBrush"
+                            ResourceKey="AccentFillColorDefaultBrush" />
+
+            <StaticResource x:Key="TabRailRowForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailRowSelectedForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailPrimaryTextBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailSecondaryTextBrush"
+                            ResourceKey="TextFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailTertiaryTextBrush"
+                            ResourceKey="TextFillColorTertiaryBrush" />
+            <StaticResource x:Key="TabRailBranchBrush"
+                            ResourceKey="TextFillColorTertiaryBrush" />
+            <StaticResource x:Key="TabRailDividerBrush"
+                            ResourceKey="DividerStrokeColorDefaultBrush" />
+
+            <StaticResource x:Key="TabRailChromeForegroundBrush"
+                            ResourceKey="TextFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailChromeHoverForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailToggleCheckedForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailChromeHoverBrush"
+                            ResourceKey="SubtleFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailChromePressedBrush"
+                            ResourceKey="SubtleFillColorTertiaryBrush" />
+
+            <x:Double x:Key="TabRailMetaOpacity">0.62</x:Double>
+            <x:Double x:Key="TabRailBranchOpacity">0.78</x:Double>
+        </ResourceDictionary>
+
+        <!--  Dark. The same ramp inverted: white overlays, a step heavier because a dark ground swallows them.  -->
+        <ResourceDictionary x:Key="Dark">
+            <SolidColorBrush x:Key="TabRailRowHoverBrush"
+                             Color="#14FFFFFF" />
+            <SolidColorBrush x:Key="TabRailRowPressedBrush"
+                             Color="#0DFFFFFF" />
+            <SolidColorBrush x:Key="TabRailRowSelectedBrush"
+                             Color="#21FFFFFF" />
+            <SolidColorBrush x:Key="TabRailRowSelectedHoverBrush"
+                             Color="#2EFFFFFF" />
+            <SolidColorBrush x:Key="TabRailRowSelectedPressedBrush"
+                             Color="#1AFFFFFF" />
+            <SolidColorBrush x:Key="TabRailToggleCheckedBrush"
+                             Color="#21FFFFFF" />
+            <SolidColorBrush x:Key="TabRailRowActionRestBrush"
+                             Color="Transparent" />
+
+            <StaticResource x:Key="TabRailSelectionAccentBrush"
+                            ResourceKey="AccentFillColorDefaultBrush" />
+
+            <StaticResource x:Key="TabRailRowForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailRowSelectedForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailPrimaryTextBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailSecondaryTextBrush"
+                            ResourceKey="TextFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailTertiaryTextBrush"
+                            ResourceKey="TextFillColorTertiaryBrush" />
+            <StaticResource x:Key="TabRailBranchBrush"
+                            ResourceKey="TextFillColorTertiaryBrush" />
+            <StaticResource x:Key="TabRailDividerBrush"
+                            ResourceKey="DividerStrokeColorDefaultBrush" />
+
+            <StaticResource x:Key="TabRailChromeForegroundBrush"
+                            ResourceKey="TextFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailChromeHoverForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailToggleCheckedForegroundBrush"
+                            ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TabRailChromeHoverBrush"
+                            ResourceKey="SubtleFillColorSecondaryBrush" />
+            <StaticResource x:Key="TabRailChromePressedBrush"
+                            ResourceKey="SubtleFillColorTertiaryBrush" />
+
+            <x:Double x:Key="TabRailMetaOpacity">0.62</x:Double>
+            <x:Double x:Key="TabRailBranchOpacity">0.78</x:Double>
+        </ResourceDictionary>
+
+        <!--
+            High contrast. The system brushes win outright: a hovered, pressed
+            or selected row is filled with SystemColorHighlightColorBrush and
+            the row container flips its ContentPresenter foreground to
+            SystemColorHighlightTextColorBrush, so nothing inside the row is
+            left unreadable. Selection is still told apart from hover by the
+            accent bar, which is the one thing hover never draws. Opacity-based
+            de-emphasis is switched off here - high contrast flattens hierarchy
+            on purpose rather than dimming it.
+        -->
+        <ResourceDictionary x:Key="HighContrast">
+            <StaticResource x:Key="TabRailRowHoverBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailRowPressedBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailRowSelectedBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailRowSelectedHoverBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailRowSelectedPressedBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailToggleCheckedBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+
+            <!--
+                In high contrast the row close button gets its own solid ground
+                so its WindowText glyph never has to sit on the Highlight fill
+                of the row underneath it. In light and dark this brush is fully
+                transparent and the button stays box-free.
+            -->
+            <StaticResource x:Key="TabRailRowActionRestBrush"
+                            ResourceKey="SystemColorWindowColorBrush" />
+
+            <StaticResource x:Key="TabRailSelectionAccentBrush"
+                            ResourceKey="SystemColorHighlightTextColorBrush" />
+
+            <StaticResource x:Key="TabRailRowForegroundBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailRowSelectedForegroundBrush"
+                            ResourceKey="SystemColorHighlightTextColorBrush" />
+            <StaticResource x:Key="TabRailPrimaryTextBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailSecondaryTextBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailTertiaryTextBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailBranchBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailDividerBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+
+            <StaticResource x:Key="TabRailChromeForegroundBrush"
+                            ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="TabRailChromeHoverForegroundBrush"
+                            ResourceKey="SystemColorHighlightTextColorBrush" />
+            <StaticResource x:Key="TabRailToggleCheckedForegroundBrush"
+                            ResourceKey="SystemColorHighlightTextColorBrush" />
+            <StaticResource x:Key="TabRailChromeHoverBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="TabRailChromePressedBrush"
+                            ResourceKey="SystemColorHighlightColorBrush" />
+
+            <x:Double x:Key="TabRailMetaOpacity">1</x:Double>
+            <x:Double x:Key="TabRailBranchOpacity">1</x:Double>
+        </ResourceDictionary>
+
+    </ResourceDictionary.ThemeDictionaries>
+
+    <!--
+        Metrics. Everything in the rail sits on a 4px grid.
+
+        A row is 36px tall with a title alone and grows to about 44px once the
+        meta line is there - that difference is content-driven, so the token is
+        the floor and not a fixed height. TabRailContentPadding is the depth-0
+        value of Tab.RailPadding: add TabRailIndentStep per RailDepth to its
+        left edge rather than writing a number at the call site.
+    -->
+    <x:Double x:Key="TabRailRowMinHeight">36</x:Double>
+    <x:Double x:Key="TabRailHeaderMinHeight">32</x:Double>
+    <x:Double x:Key="TabRailIndentStep">12</x:Double>
+    <x:Double x:Key="TabRailTitleFontSize">13</x:Double>
+    <x:Double x:Key="TabRailMetaFontSize">11</x:Double>
+    <x:Double x:Key="TabRailSectionFontSize">12</x:Double>
+    <x:Double x:Key="TabRailGlyphFontSize">12</x:Double>
+    <x:Double x:Key="TabRailSmallGlyphFontSize">10</x:Double>
+    <x:Double x:Key="TabRailIconButtonSize">32</x:Double>
+    <x:Double x:Key="TabRailRowActionButtonSize">24</x:Double>
+    <x:Double x:Key="TabRailSelectionBarWidth">3</x:Double>
+    <CornerRadius x:Key="TabRailRowCornerRadius">4</CornerRadius>
+    <Thickness x:Key="TabRailContentPadding">10,6,4,6</Thickness>
+    <Thickness x:Key="TabRailRowMargin">0,1,0,1</Thickness>
+    <Thickness x:Key="TabRailSelectionBarMargin">0,6,0,6</Thickness>
+
+    <!--
+        The tab row.
+
+        Layer order is fill, accent bar, content. The fill carries the corner
+        radius and is the template's focus target, so the system focus visual
+        follows that same 4px radius instead of drawing a square ring that
+        clips against it, and FocusVisualMargin pulls the ring 2px inwards so
+        the ListView never crops it. A keyboard-focused row therefore reads as
+        a ring, a hovered row as a fill, and the selected row as a fill plus
+        the accent bar plus a SemiBold title - three states nobody confuses.
+
+        The ContentPresenter's Foreground and FontWeight are what the row's
+        TextBlocks inherit. That is how the selected title goes SemiBold and
+        how every label and glyph in the row flips to highlight text in high
+        contrast. Do not set either property inside the row DataTemplate.
+    -->
+    <Style x:Key="TabRailRowContainerStyle"
+           TargetType="ListViewItem">
+        <Setter Property="AllowDrop" Value="False" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="FocusVisualMargin" Value="-2" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailRowForegroundBrush}" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="IsHoldingEnabled" Value="True" />
+        <Setter Property="Margin" Value="{StaticResource TabRailRowMargin}" />
+        <Setter Property="MinHeight" Value="{StaticResource TabRailRowMinHeight}" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="TabNavigation" Value="Local" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListViewItem">
+                    <Grid x:Name="RowContainer"
+                          Background="Transparent">
+                        <Border x:Name="RowFill"
+                                Background="Transparent"
+                                Control.IsTemplateFocusTarget="True"
+                                CornerRadius="{TemplateBinding CornerRadius}"
+                                FocusVisualMargin="{TemplateBinding FocusVisualMargin}">
+                            <Border.BackgroundTransition>
+                                <BrushTransition Duration="0:0:0.09" />
+                            </Border.BackgroundTransition>
+                        </Border>
+
+                        <!--
+                            The one accented element in the whole rail. It grows
+                            in from 40% height as it fades, so selection reads
+                            as arriving rather than as a row repainting.
+                            RenderTransformOrigin keeps that centred on rows of
+                            either height with no pixel arithmetic.
+                        -->
+                        <Rectangle x:Name="SelectionBar"
+                                   Width="{StaticResource TabRailSelectionBarWidth}"
+                                   Margin="{StaticResource TabRailSelectionBarMargin}"
+                                   HorizontalAlignment="Left"
+                                   Fill="{ThemeResource TabRailSelectionAccentBrush}"
+                                   IsHitTestVisible="False"
+                                   Opacity="0"
+                                   RadiusX="1.5"
+                                   RadiusY="1.5"
+                                   RenderTransformOrigin="0.5,0.5">
+                            <Rectangle.RenderTransform>
+                                <ScaleTransform x:Name="SelectionBarScale" ScaleY="0.4" />
+                            </Rectangle.RenderTransform>
+                        </Rectangle>
+
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Padding="{TemplateBinding Padding}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          ContentTransitions="{TemplateBinding ContentTransitions}"
+                                          FontWeight="{TemplateBinding FontWeight}"
+                                          Foreground="{TemplateBinding Foreground}" />
+
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualStateGroup.Transitions>
+                                    <VisualTransition GeneratedDuration="0:0:0.11" />
+                                </VisualStateGroup.Transitions>
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailRowSelectedForegroundBrush}" />
+                                        <Setter Target="RowFill.Background" Value="{ThemeResource TabRailRowHoverBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailRowSelectedForegroundBrush}" />
+                                        <Setter Target="RowFill.Background" Value="{ThemeResource TabRailRowPressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Selected">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.FontWeight" Value="SemiBold" />
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailRowSelectedForegroundBrush}" />
+                                        <Setter Target="RowFill.Background" Value="{ThemeResource TabRailRowSelectedBrush}" />
+                                    </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1"
+                                                         Duration="0:0:0.09" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBarScale"
+                                                         Storyboard.TargetProperty="ScaleY"
+                                                         To="1"
+                                                         Duration="0:0:0.12">
+                                            <DoubleAnimation.EasingFunction>
+                                                <CubicEase EasingMode="EaseOut" />
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </VisualState>
+                                <VisualState x:Name="PointerOverSelected">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.FontWeight" Value="SemiBold" />
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailRowSelectedForegroundBrush}" />
+                                        <Setter Target="RowFill.Background" Value="{ThemeResource TabRailRowSelectedHoverBrush}" />
+                                    </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1"
+                                                         Duration="0:0:0.09" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBarScale"
+                                                         Storyboard.TargetProperty="ScaleY"
+                                                         To="1"
+                                                         Duration="0:0:0.12" />
+                                    </Storyboard>
+                                </VisualState>
+                                <VisualState x:Name="PressedSelected">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.FontWeight" Value="SemiBold" />
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailRowSelectedForegroundBrush}" />
+                                        <Setter Target="RowFill.Background" Value="{ThemeResource TabRailRowSelectedPressedBrush}" />
+                                    </VisualState.Setters>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBar"
+                                                         Storyboard.TargetProperty="Opacity"
+                                                         To="1"
+                                                         Duration="0:0:0.09" />
+                                        <DoubleAnimation Storyboard.TargetName="SelectionBarScale"
+                                                         Storyboard.TargetProperty="ScaleY"
+                                                         To="1"
+                                                         Duration="0:0:0.12" />
+                                    </Storyboard>
+                                </VisualState>
+                            </VisualStateGroup>
+
+                            <VisualStateGroup x:Name="DisabledStates">
+                                <VisualState x:Name="Enabled" />
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+
+                            <!--  Reorder feedback only. The rail never animates its own reflow.  -->
+                            <VisualStateGroup x:Name="DragStates">
+                                <VisualState x:Name="NotDragging" />
+                                <VisualState x:Name="Dragging">
+                                    <VisualState.Setters>
+                                        <Setter Target="RowContainer.Opacity" Value="0.6" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="DraggedPlaceholder">
+                                    <VisualState.Setters>
+                                        <Setter Target="RowContainer.Opacity" Value="0" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!--
+        Section headers are not selectable rows: no hover or selection chrome,
+        no focus target, no tab stop. Everything visible in a header comes from
+        TabRailSectionHeaderButtonStyle inside it, so the container is a bare
+        presenter and TabGroup.HeaderMargin owns the gap between sections.
+    -->
+    <Style x:Key="TabRailHeaderContainerStyle"
+           TargetType="ListViewItem">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="UseSystemFocusVisuals" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListViewItem">
+                    <ContentPresenter x:Name="ContentPresenter"
+                                      HorizontalContentAlignment="Stretch"
+                                      Content="{TemplateBinding Content}"
+                                      ContentTemplate="{TemplateBinding ContentTemplate}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!--
+        Chrome. Transparent until touched - this template is what removes the
+        six filled boxes that were competing with the rail's content. Every
+        button style below shares it. The row's close button reuses it WITHOUT
+        a Foreground setter, so it inherits the row's foreground and survives
+        the high-contrast selected flip.
+    -->
+    <ControlTemplate x:Key="TabRailIconButtonTemplate"
+                     TargetType="Button">
+        <Grid x:Name="ButtonRoot"
+              Background="Transparent"
+              Control.IsTemplateFocusTarget="True"
+              CornerRadius="{TemplateBinding CornerRadius}">
+            <Border x:Name="Fill"
+                    Background="{TemplateBinding Background}"
+                    CornerRadius="{TemplateBinding CornerRadius}">
+                <Border.BackgroundTransition>
+                    <BrushTransition Duration="0:0:0.09" />
+                </Border.BackgroundTransition>
+            </Border>
+            <ContentPresenter x:Name="ContentPresenter"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                              AutomationProperties.AccessibilityView="Raw"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              ContentTransitions="{TemplateBinding ContentTransitions}"
+                              FontFamily="{TemplateBinding FontFamily}"
+                              FontSize="{TemplateBinding FontSize}"
+                              Foreground="{TemplateBinding Foreground}" />
+            <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                        <VisualState.Setters>
+                            <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailChromeHoverForegroundBrush}" />
+                            <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromeHoverBrush}" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                        <VisualState.Setters>
+                            <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailChromeHoverForegroundBrush}" />
+                            <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromePressedBrush}" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Disabled">
+                        <VisualState.Setters>
+                            <Setter Target="ContentPresenter.Opacity" Value="0.4" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+            </VisualStateManager.VisualStateGroups>
+        </Grid>
+    </ControlTemplate>
+
+    <Style x:Key="TabRailIconButtonStyle"
+           TargetType="Button">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailGlyphFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailChromeForegroundBrush}" />
+        <Setter Property="Height" Value="{StaticResource TabRailIconButtonSize}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Template" Value="{StaticResource TabRailIconButtonTemplate}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Width" Value="{StaticResource TabRailIconButtonSize}" />
+    </Style>
+
+    <!--
+        A checked toggle has to read as "on" without borrowing the accent - the
+        accent means "this is the tab you are looking at" and nothing else. So
+        "on" is the neutral fill weight a selected row uses plus the step from
+        secondary to primary foreground: pressed-in at a glance, and still
+        invisible when you are not looking for it. High contrast overrides both
+        halves with the system highlight pair.
+    -->
+    <Style x:Key="TabRailIconToggleButtonStyle"
+           TargetType="ToggleButton">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailGlyphFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailChromeForegroundBrush}" />
+        <Setter Property="Height" Value="{StaticResource TabRailIconButtonSize}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Width" Value="{StaticResource TabRailIconButtonSize}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Grid x:Name="ButtonRoot"
+                          Background="Transparent"
+                          Control.IsTemplateFocusTarget="True"
+                          CornerRadius="{TemplateBinding CornerRadius}">
+                        <Border x:Name="Fill"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="{TemplateBinding CornerRadius}">
+                            <Border.BackgroundTransition>
+                                <BrushTransition Duration="0:0:0.09" />
+                            </Border.BackgroundTransition>
+                        </Border>
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Padding="{TemplateBinding Padding}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          AutomationProperties.AccessibilityView="Raw"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          FontFamily="{TemplateBinding FontFamily}"
+                                          FontSize="{TemplateBinding FontSize}"
+                                          Foreground="{TemplateBinding Foreground}" />
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailChromeHoverForegroundBrush}" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromeHoverBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailChromeHoverForegroundBrush}" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromePressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Checked">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailToggleCheckedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedPointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailRowSelectedHoverBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedPressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TabRailToggleCheckedForegroundBrush}" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailRowSelectedPressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CheckedDisabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Opacity" Value="0.4" />
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailToggleCheckedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Indeterminate" />
+                                <VisualState x:Name="IndeterminatePointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromeHoverBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="IndeterminatePressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="Fill.Background" Value="{ThemeResource TabRailChromePressedBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="IndeterminateDisabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!--
+        The row's close button. It deliberately has no Foreground setter: it
+        inherits the row's, so it turns to highlight text on a selected row in
+        high contrast. Agent 4 animates the Opacity of its container, so it is
+        invisible until the row is hovered, focused or selected - which is what
+        gives the title its 24px back.
+    -->
+    <Style x:Key="TabRailRowActionButtonStyle"
+           TargetType="Button">
+        <Setter Property="Background" Value="{ThemeResource TabRailRowActionRestBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailSmallGlyphFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailChromeForegroundBrush}" />
+        <Setter Property="Height" Value="{StaticResource TabRailRowActionButtonSize}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Template" Value="{StaticResource TabRailIconButtonTemplate}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Width" Value="{StaticResource TabRailRowActionButtonSize}" />
+    </Style>
+
+    <!--  The whole section header is one wide, chrome-free button.  -->
+    <Style x:Key="TabRailSectionHeaderButtonStyle"
+           TargetType="Button">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailSecondaryTextBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="MinHeight" Value="{StaticResource TabRailHeaderMinHeight}" />
+        <Setter Property="Padding" Value="6,4,6,4" />
+        <Setter Property="Template" Value="{StaticResource TabRailIconButtonTemplate}" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="TabRailFooterProfileButtonStyle"
+           BasedOn="{StaticResource TabRailIconButtonStyle}"
+           TargetType="Button">
+        <Setter Property="Margin" Value="2,0,0,0" />
+    </Style>
+
+    <!--
+        Search. It keeps its own border and focus underline - it is an input
+        and has to look like one - but is pulled onto the rail's radius, type
+        scale and control height so it lines up with everything below it.
+    -->
+    <Style x:Key="TabRailSearchBoxStyle"
+           BasedOn="{StaticResource DefaultTextBoxStyle}"
+           TargetType="TextBox">
+        <Setter Property="CornerRadius" Value="{StaticResource TabRailRowCornerRadius}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailTitleFontSize}" />
+        <Setter Property="MinHeight" Value="{StaticResource TabRailIconButtonSize}" />
+        <Setter Property="Padding" Value="10,4,8,6" />
+        <Setter Property="PlaceholderForeground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <!--
+        Type. Three levels, and no other sizes anywhere in the rail:
+        title 13px Medium primary (SemiBold when the row is selected), meta
+        11px tertiary, section name 12px SemiBold secondary with its path at
+        11px tertiary.
+
+        The title style sets neither Foreground nor FontWeight on purpose. Both
+        are inherited from the row container's ContentPresenter, which is the
+        only thing in the system that knows whether the row is selected.
+    -->
+    <Style x:Key="TabRailTitleTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailTitleFontSize}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <Style x:Key="TabRailMetaTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Opacity" Value="{ThemeResource TabRailMetaOpacity}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <!--
+        The branch, inside a row. One notch less transparent than the path it
+        sits beside, so a repeated "main" reads as a separate token instead of
+        as more of the same sentence - without spending a colour on it, which
+        is what made the meta line feel like noise.
+    -->
+    <Style x:Key="TabRailBranchTextBlockStyle"
+           BasedOn="{StaticResource TabRailMetaTextBlockStyle}"
+           TargetType="TextBlock">
+        <Setter Property="Opacity" Value="{ThemeResource TabRailBranchOpacity}" />
+    </Style>
+
+    <Style x:Key="TabRailSectionNameTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailSectionFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailSecondaryTextBrush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <Style x:Key="TabRailSectionPathTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <!--
+        A tab count is neither urgent nor unread, so it is not a badge. Plain
+        tertiary digits, right aligned, no fill and no capsule.
+    -->
+    <Style x:Key="TabRailCountTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Right" />
+        <Setter Property="Margin" Value="4,0,2,0" />
+        <Setter Property="MinWidth" Value="12" />
+        <Setter Property="TextAlignment" Value="Right" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!--
+        Kept for the token contract and deliberately not a pill: the branch is
+        told apart by its glyph and its opacity, never by a capsule. This is
+        only the alignment box those two sit in.
+    -->
+    <Style x:Key="TabRailBranchPillStyle"
+           TargetType="Border">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="CornerRadius" Value="3" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!--  Glyphs. No Foreground on the row one: status glyphs inherit the row's and flip with it.  -->
+    <Style x:Key="TabRailRowGlyphStyle"
+           TargetType="FontIcon">
+        <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailGlyphFontSize}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="TabRailSectionGlyphStyle"
+           TargetType="FontIcon">
+        <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TabRailSmallGlyphFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!--  A hairline above every top-level section except the first.  -->
+    <Style x:Key="TabRailDividerStyle"
+           TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource TabRailDividerBrush}" />
+        <Setter Property="Height" Value="1" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="Margin" Value="4,8,4,4" />
+    </Style>
+
+    <!--  "No tabs match ..." - a filtered rail is never left blank.  -->
+    <Style x:Key="TabRailEmptyStateTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailTitleFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailSecondaryTextBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="16,24,16,4" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="TabRailEmptyStateHintTextBlockStyle"
+           TargetType="TextBlock">
+        <Setter Property="FontSize" Value="{StaticResource TabRailMetaFontSize}" />
+        <Setter Property="Foreground" Value="{ThemeResource TabRailTertiaryTextBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="16,0,16,8" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+</ResourceDictionary>

@@ -1,5 +1,7 @@
+mod agents;
 mod host;
 mod model;
+mod orchestrator;
 mod profiles;
 mod projects;
 mod prompt;

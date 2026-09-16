@@ -16,7 +16,6 @@ import { BridgeRegistry } from "./bridge-registry.js";
 import { searchFiles } from "./file-search.js";
 import { discoverHostTerminals } from "./host-discovery.js";
 import { BellDetector, NotificationCenter } from "./notifications.js";
-import { Orchestrator } from "./orchestrator.js";
 import { discoverTerminalWebPeers } from "./peer-discovery.js";
 import { PeerProxy } from "./peer-proxy.js";
 import { listenOnAvailablePort } from "./ports.js";
@@ -35,7 +34,7 @@ import type {
   BridgeCommandInfo,
   ClientMessage,
   HostTerminalProcess,
-  OrchestratorAgent,
+  OrchestratorStatus,
   ServerInfo,
   ServerMessage,
   TerminalNotification,
@@ -56,11 +55,16 @@ const agentLinks = new AgentLinkRegistry();
 const bridgeRegistry = new BridgeRegistry();
 const projectStore = new ProjectStore();
 const peerProxy = new PeerProxy(() => peerHosts);
-const orchestrator = new Orchestrator({
-  manager,
-  getPort: () => serverInfo.port,
-  getToken: () => accessToken
-});
+// The orchestrator (a chat agent over every tab) is part of the native Rust
+// bridge host; this optional adapter only reports that it is not here.
+function unavailableOrchestrator(): OrchestratorStatus {
+  return {
+    state: "unavailable",
+    seq: 0,
+    error: "The orchestrator runs inside the Windows Terminal bridge host, not this adapter.",
+    transcript: []
+  };
+}
 
 let hostProcesses: HostTerminalProcess[] = [];
 let peerHosts: TerminalHostPeer[] = [];
@@ -1436,10 +1440,6 @@ bridgeRegistry.on("exit", (event) => {
   });
 });
 
-orchestrator.on("status", (status) => {
-  broadcast({ type: "orchestrator", orchestrator: status });
-});
-
 acpManager.on("state", (acp) => {
   broadcast({ type: "acp_state", acp });
 });
@@ -1477,7 +1477,7 @@ app.get("/api/bootstrap", (_req, res) => {
     projects: projectStore.list(),
     server: serverInfo,
     bridgeCommands: getBridgeCommands(),
-    orchestrator: orchestrator.status(),
+    orchestrator: unavailableOrchestrator(),
     acp: acpManager.state()
   });
 });
@@ -1884,28 +1884,13 @@ app.post("/api/sessions/:id/compose", async (req, res) => {
 });
 
 app.get("/api/orchestrator", (_req, res) => {
-  res.json(orchestrator.status());
+  res.json(unavailableOrchestrator());
 });
 
-app.post("/api/orchestrator/start", async (req, res) => {
-  const agent = optionalString(req.body?.agent);
-  if (agent !== "claude" && agent !== "codex") {
-    res.status(400).json({ message: 'Orchestrator agent must be "claude" or "codex".' });
-    return;
-  }
-
-  try {
-    res.json(await orchestrator.start(agent as OrchestratorAgent, { restart: req.body?.restart === true }));
-  } catch (error) {
-    res.status(400).json({
-      message: "Orchestrator could not be started.",
-      detail: error instanceof Error ? error.message : String(error)
-    });
-  }
-});
-
-app.post("/api/orchestrator/stop", async (_req, res) => {
-  res.json(await orchestrator.stop());
+app.all("/api/orchestrator/{*rest}", (_req, res) => {
+  res.status(503).json({
+    message: "The orchestrator runs inside the Windows Terminal bridge host (Rust runtime), not this adapter."
+  });
 });
 
 app.get("/api/projects", (_req, res) => {
@@ -2198,6 +2183,7 @@ app.post("/api/host/refresh", async (_req, res) => {
 wss.on("connection", (ws) => {
   send(ws, {
     type: "hello",
+    heartbeat: true,
     sessions: allSessions(),
     profiles: manager.profiles,
     hostProcesses,
@@ -2205,7 +2191,7 @@ wss.on("connection", (ws) => {
     projects: projectStore.list(),
     server: serverInfo,
     bridgeCommands: getBridgeCommands(),
-    orchestrator: orchestrator.status(),
+    orchestrator: unavailableOrchestrator(),
     acp: acpManager.state()
   });
 
@@ -2218,6 +2204,9 @@ wss.on("connection", (ws) => {
 
     safeAction(ws, async () => {
       switch (message.type) {
+        case "ping":
+          send(ws, { type: "pong" });
+          break;
         case "subscribe": {
           const slots = clientSubscriptions.get(ws) ?? new Map<string, string>();
           slots.set(message.slot ?? "main", message.sessionId);

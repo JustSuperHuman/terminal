@@ -486,7 +486,7 @@ function AgentHome({
   busy?: string;
 }) {
   const sortedSessions = useMemo(
-    () => [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    () => [...sessions].sort((a, b) => a.cwd.localeCompare(b.cwd) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
     [sessions]
   );
   return (
@@ -622,7 +622,7 @@ function SessionPickerSheet({
           <View style={styles.newWorkspaceMark}><Text style={styles.newWorkspacePlus}>+</Text></View>
           <View style={styles.sessionCopy}><Text style={styles.sessionTitle}>New ACP session</Text><Text style={styles.sessionMeta}>Choose Claude or Codex and a directory</Text></View>
         </Pressable>
-        {[...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((session) => {
+        {[...sessions].sort((a, b) => a.cwd.localeCompare(b.cwd) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map((session) => {
           const selected = session.id === activeId;
           const count = requests.filter((request) => request.sessionId === session.id).length;
           return (
@@ -1432,7 +1432,7 @@ export function AgentWorkspaceScreen({
         visible={sheet === "create"}
         agents={bridge?.agents ?? []}
         initialAgent={createAgent}
-        initialCwd={defaultCwd ?? session?.cwd}
+        initialCwd={session?.cwd ?? defaultCwd}
         busy={busy === "create"}
         onClose={() => setSheet(undefined)}
         onCreate={create}

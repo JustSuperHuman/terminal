@@ -33,7 +33,8 @@ Author(s):
     X(bool, BridgeAutomaticPort, "bridge.automaticPort", true)                                                                     \
     X(int32_t, BridgePort, "bridge.port", 10001)                                                                                   \
     X(hstring, BridgeBindAddress, "bridge.bindAddress", L"0.0.0.0")                                                              \
-    X(bool, BridgeWebInterface, "bridge.webInterface", true)
+    X(bool, BridgeWebInterface, "bridge.webInterface", true)                                                                       \
+    X(bool, AutoInstallShellIntegration, "shellIntegration.autoInstall", true)
 
 // Settings that are per-window (may vary by window name in the future)
 #define MTSM_WINDOW_SETTINGS(X)                                                                                                                                                                       \

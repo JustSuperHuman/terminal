@@ -543,6 +543,15 @@ export const TERMINAL_HTML = `<!doctype html>
           setTimeout(hardRepaint, 300);
         }
 
+        function focusKeyboard() {
+          // ghostty's focus() targets its container and schedules another focus
+          // on that DIV. A phone needs the editable textarea for the keyboard.
+          try {
+            if (term.textarea) { term.textarea.focus(); }
+            else { term.focus(); }
+          } catch (e) {}
+        }
+
         function dismissKeyboard() {
           // Dismiss the soft keyboard. ghostty's hidden textarea holds the
           // input connection, so term.blur() alone doesn't always tear it
@@ -572,14 +581,14 @@ export const TERMINAL_HTML = `<!doctype html>
               break;
             case "write": try { term.write(msg.data); } catch (e) {} setTimeout(reportScroll, 0); break;
             case "fit": applyLayout(); break;
-            case "focus": try { term.focus(); } catch (e) {} break;
+            case "focus": focusKeyboard(); break;
             case "blur":
               keepFocus = false;
               dismissKeyboard();
               break;
             case "keepFocus":
               keepFocus = !!msg.enabled;
-              if (keepFocus) { try { term.focus(); } catch (e) {} }
+              if (keepFocus) { focusKeyboard(); }
               else { dismissKeyboard(); }
               break;
             case "scrollToBottom": try { term.scrollToBottom(); } catch (e) {} setTimeout(reportScroll, 0); break;
@@ -693,7 +702,7 @@ export const TERMINAL_HTML = `<!doctype html>
                 ta.addEventListener("blur", function () {
                   if (!keepFocus) { return; }
                   setTimeout(function () {
-                    if (keepFocus) { try { term.focus(); } catch (e) {} }
+                    if (keepFocus) { focusKeyboard(); }
                   }, 60);
                 });
                 // Hold-to-repeat backspace: Android IMEs auto-repeat a held

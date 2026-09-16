@@ -1,3 +1,8 @@
+import { SessionLaunchDirectory } from "./lib/sessionLaunchDirectory";
+import { useOrchestrator } from "./useOrchestrator";
+import { OrchestratorChat } from "./components/OrchestratorChat";
+import { groupSessions } from "./lib/sessionOrder";
+import type { TerminalProject } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -113,7 +118,9 @@ function selectPreferredSessionId(sessions: TerminalSessionSummary[], currentId?
 export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) {
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
-  const [sessions, setSessions] = useState<TerminalSessionSummary[]>([]);
+  const [sessionData, setSessions] = useState<TerminalSessionSummary[]>([]);
+  const [projects, setProjects] = useState<TerminalProject[]>([]);
+  const sessions = useMemo(() => groupSessions(sessionData.filter((session) => session.kind !== "orchestrator"), projects).flatMap((group) => group.sessions), [sessionData, projects]);
   const [profiles, setProfiles] = useState<TerminalProfile[]>([]);
   const [serverInfo, setServerInfo] = useState<ServerInfo | undefined>();
   const [activeId, setActiveId] = useState<string | undefined>();
@@ -121,6 +128,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [agentWorkspaceOpen, setAgentWorkspaceOpen] = useState(false);
+  const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  const orchestrator = useOrchestrator(endpoint);
   const [agentWorkspaceSessionId, setAgentWorkspaceSessionId] = useState<string | undefined>();
   const [agentSheetOpen, setAgentSheetOpen] = useState(false);
   const [agentState, setAgentState] = useState<SessionAgentState>();
@@ -130,8 +139,12 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   const [acpState, setAcpState] = useState<AcpBridgeState>();
   const [recentCwds, setRecentCwds] = useState<string[]>([]);
   const [activeCwd, setActiveCwd] = useState<string | undefined>(undefined);
+  const launchDirectoryRef = useRef(new SessionLaunchDirectory());
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [keyboardHidden, setKeyboardHidden] = useState(false);
   const [commandBarHeight, setCommandBarHeight] = useState(0);
   // True while the session switcher is being scrubbed (live terminal preview).
   const [scrubbing, setScrubbing] = useState(false);
@@ -300,6 +313,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     const hideSub = Keyboard.addListener(Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide", hideKeyboard);
     const appStateSub = AppState.addEventListener("change", (state) => {
       if (state === "active") {
+        terminalSocket.resume();
         requestAnimationFrame(syncKeyboardMetrics);
         settleTerminalToInput();
         // Bring the persistent keyboard straight back after backgrounding.
@@ -328,7 +342,8 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         return;
       }
       setRecentCwds(cwds);
-      setActiveCwd(cwds[0]); // saved default for this host (undefined if none)
+      launchDirectoryRef.current.restore(cwds[0]);
+      setActiveCwd(launchDirectoryRef.current.cwd);
     });
     return () => {
       mounted = false;
@@ -405,6 +420,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         case "hello":
           setSessions(message.sessions);
           setProfiles(message.profiles);
+          setProjects(message.projects ?? []);
           setServerInfo(message.server);
           setActiveId((current) => current ?? message.sessions[0]?.id);
           if (message.acp) applyAcpState(message.acp);
@@ -412,6 +428,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         case "sessions":
           setSessions(message.sessions);
           setActiveId((current) => current ?? message.sessions[0]?.id);
+          break;
+        case "projects":
+          setProjects(message.projects);
           break;
         case "profiles":
           setProfiles(message.profiles);
@@ -509,12 +528,21 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   }, [activeSession]);
 
   useEffect(() => {
+    if (!scrubbing) {
+      launchDirectoryRef.current.select(activeSession);
+      const cwd = launchDirectoryRef.current.cwd;
+      setActiveCwd(cwd);
+      if (cwd) void rememberCwd(endpoint.id, cwd).then(setRecentCwds);
+    }
+  }, [activeSession?.id, activeSession?.cwd, scrubbing, endpoint.id]);
+
+  useEffect(() => {
     loadComposerMode().then(setComposerMode);
   }, []);
 
   const sessionLive = socketStatus === "open" && activeSession?.status === "running";
   const composerActive =
-    composerMode && !drawerOpen && !agentWorkspaceOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
+    !keyboardHidden && composerMode && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
 
   // What the active terminal needs to know about the far end: which agent is
   // listening, whether it is mid-turn, and any dialog it is blocking on. This
@@ -522,16 +550,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // having enabled the composer first (bro-cli and shells that launch an agent
   // after startup are common examples).
   const { context: inputContext, refresh: refreshInputContext } = useInputContext(endpoint, activeId, {
-    enabled: !drawerOpen && !agentWorkspaceOpen && Boolean(sessionLive),
+    enabled: !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && Boolean(sessionLive),
   });
   inputContextRefreshRef.current = refreshInputContext;
-
-  const sendKeys = useCallback((data: string) => {
-    const id = activeIdRef.current;
-    if (id) {
-      terminalSocket.send({ type: "input", sessionId: id, data });
-    }
-  }, []);
 
   // On-device voice dictation. While composing, phrases land in the message so
   // they can be edited before they run; in direct mode they go straight to the
@@ -562,7 +583,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
 
   const dictation = useDictation({
     onText: injectDictatedText,
-    enabled: !agentWorkspaceOpen && !inputContext?.prompt && socketStatus === "open" && activeSession?.status === "running",
+    enabled: !agentWorkspaceOpen && !orchestratorOpen && !inputContext?.prompt && socketStatus === "open" && activeSession?.status === "running",
   });
 
   // Persistent keyboard: while a live session is connected, the terminal input
@@ -571,7 +592,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // The composer must not fight for focus, so this is off while it is up — the
   // composer's own field is then what holds the keyboard.
   const keepKeyboardOpen =
-    !composerMode && !inputContext?.prompt && !drawerOpen && !agentWorkspaceOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
+    !keyboardHidden && !composerMode && !inputContext?.prompt && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
   useEffect(() => {
     keepKeyboardOpenRef.current = keepKeyboardOpen;
     terminalRef.current?.setKeepFocus(keepKeyboardOpen);
@@ -581,6 +602,9 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   }, [keepKeyboardOpen, settleTerminalToInput]);
 
   const selectSession = useCallback((id: string) => {
+    launchDirectoryRef.current.select(sessionsRef.current.find((session) => session.id === id));
+    setActiveCwd(launchDirectoryRef.current.cwd);
+    activeIdRef.current = id;
     setActiveId(id);
     setUnread((current) => {
       if (!current[id]) return current;
@@ -671,22 +695,24 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // raw terminal is one dismissal away and stays dismissed until asked for.
   useEffect(() => {
     if (!activeSession?.acpSessionId) return;
-    if (drawerOpen || agentSheetOpen || agentWorkspaceOpen) return;
+    if (drawerOpen || agentSheetOpen || agentWorkspaceOpen || orchestratorOpen) return;
     if (agentViewDismissedRef.current.has(activeSession.id)) return;
     openAgentWorkspace(activeSession.acpSessionId);
-  }, [activeSession?.id, activeSession?.acpSessionId, drawerOpen, agentSheetOpen, agentWorkspaceOpen, openAgentWorkspace]);
+  }, [activeSession?.id, activeSession?.acpSessionId, drawerOpen, agentSheetOpen, agentWorkspaceOpen, orchestratorOpen, openAgentWorkspace]);
 
   const createSession = useCallback(
     async (spec?: CreateSpec) => {
       setDrawerOpen(false);
-      const options = { ...(spec ?? {}), ...(activeCwd ? { cwd: activeCwd } : {}) };
+      const cwd = launchDirectoryRef.current.cwd;
+      const options = { ...(spec ?? {}), ...(cwd ? { cwd } : {}) };
       setCreating(true);
       try {
         const session = await createSessionApi(endpoint, options);
         upsertSession(session);
+        launchDirectoryRef.current.select(session);
         selectSession(session.id);
-        if (activeCwd) {
-          rememberCwd(endpoint.id, activeCwd).then(setRecentCwds);
+        if (cwd) {
+          rememberCwd(endpoint.id, cwd).then(setRecentCwds);
         }
       } catch {
         terminalSocket.send({ type: "create", ...options });
@@ -694,7 +720,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         setCreating(false);
       }
     },
-    [endpoint, selectSession, activeCwd, upsertSession]
+    [endpoint, selectSession, upsertSession]
   );
 
   const killSession = useCallback((id: string) => {
@@ -809,6 +835,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
 
   const setCwd = useCallback(
     (cwd?: string) => {
+      launchDirectoryRef.current.choose(cwd);
       setActiveCwd(cwd);
       if (cwd) {
         rememberCwd(endpoint.id, cwd).then(setRecentCwds);
@@ -821,7 +848,10 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
     (cwd: string) => {
       forgetCwd(endpoint.id, cwd).then((next) => {
         setRecentCwds(next);
-        setActiveCwd((current) => (current === cwd ? undefined : current));
+        if (launchDirectoryRef.current.cwd === cwd) {
+          launchDirectoryRef.current.choose(undefined);
+          setActiveCwd(undefined);
+        }
       });
     },
     [endpoint.id]
@@ -907,6 +937,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
               stale-response guard and keyboard handoff for both paths. */}
           {composerMode || inputContext?.prompt ? (
             <Composer
+              key={`${endpoint.id}:${activeId}`}
               ref={composerRef}
               endpoint={endpoint}
               sessionId={activeId}
@@ -914,7 +945,6 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
               disabled={!sessionLive}
               active={composerActive}
               blurTarget={blurTargetRef}
-              onSendKeys={sendKeys}
               onRefreshContext={refreshInputContext}
               onNotice={(title, body) => setToast({ key: `composer-${Date.now()}`, title, body })}
               dictation={{
@@ -942,6 +972,15 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
             composerMode={composerMode}
             onInsertToken={(token) => composerRef.current?.insertToken(token)}
             onToggleComposer={toggleComposerMode}
+            keyboardHidden={keyboardHidden}
+            onToggleKeyboard={() => {
+              if (!keyboardHidden) {
+                keepKeyboardOpenRef.current = false;
+                terminalRef.current?.setKeepFocus(false);
+                Keyboard.dismiss();
+              }
+              setKeyboardHidden((hidden) => !hidden);
+            }}
             dictation={{
               status: dictation.status,
               active: dictation.active,
@@ -1012,6 +1051,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
       <SessionsScreen
         visible={drawerOpen}
         sessions={sessions}
+        projects={projects}
         profiles={profiles}
         activeId={activeId}
         unread={unread}
@@ -1019,6 +1059,15 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         activeCwd={activeCwd}
         recentCwds={recentCwds}
         acpState={acpState}
+        orchestratorState={orchestrator.status?.state}
+        onOpenOrchestrator={() => {
+          keepKeyboardOpenRef.current = false;
+          terminalRef.current?.setKeepFocus(false);
+          Keyboard.dismiss();
+          setAgentWorkspaceOpen(false);
+          setOrchestratorOpen(true);
+          setDrawerOpen(false);
+        }}
         onClose={() => setDrawerOpen(false)}
         onOpenAgentWorkspace={() => openAgentWorkspace()}
         onSelect={selectSession}
@@ -1043,11 +1092,24 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         onClose={() => setAgentSheetOpen(false)}
         onPick={attachAgentView}
       />
+      <OrchestratorChat
+        key={endpoint.id}
+        visible={orchestratorOpen}
+        endpointId={endpoint.id}
+        status={orchestrator.status}
+        socketStatus={socketStatus}
+        error={orchestrator.error}
+        refreshing={orchestrator.refreshing}
+        onRefresh={orchestrator.refresh}
+        onSend={orchestrator.send}
+        onCancel={orchestrator.cancel}
+        onClose={() => { setDrawerOpen(true); setOrchestratorOpen(false); }}
+      />
       <AgentWorkspaceScreen
         visible={agentWorkspaceOpen}
         endpoint={endpoint}
         initialSessionId={agentWorkspaceSessionId}
-        defaultCwd={activeCwd ?? activeSession?.cwd}
+        defaultCwd={activeCwd}
         onClose={closeAgentWorkspace}
         onStateChange={applyAcpState}
       />

@@ -244,6 +244,7 @@
                 </ResourceDictionary>
 
                 <ResourceDictionary Source="ms-resource:///Files/TerminalApp/HighlightedTextControlStyle.xaml" />
+                <ResourceDictionary Source="ms-resource:///Files/TerminalApp/TabRailStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
 

@@ -111,15 +111,92 @@ export interface BridgeCommandInfo {
   claude?: string;
 }
 
-export type OrchestratorAgent = "claude" | "codex";
+// The orchestrator: a chat agent hosted by the native terminal bridge that
+// sees every tab and drives them through tools. One transcript is shared by
+// every client; `seq` advances on each change so clients can catch up.
+export type OrchestratorProvider = "openrouter" | "custom";
+export type OrchestratorReasoning = "off" | "low" | "medium" | "high";
+
+export interface OrchestratorConfig {
+  provider: OrchestratorProvider;
+  baseUrl: string;
+  model: string;
+  keyEnv: string;
+  keySource: "env" | "manual" | "none";
+  keyPreview?: string | null;
+  reasoning: OrchestratorReasoning;
+  defaults?: { model: string; openrouterBaseUrl: string; openrouterKeyEnv: string; customKeyEnv: string };
+}
+
+export interface OrchestratorToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+export interface OrchestratorToolRecord {
+  callId: string;
+  name: string;
+  arguments: unknown;
+  summary: string;
+  result: string;
+  ok: boolean;
+}
+
+export interface OrchestratorTranscriptItem {
+  id: string;
+  rev: number;
+  seq: number;
+  turnId: string;
+  role: "user" | "assistant" | "tool" | "error";
+  text: string;
+  reasoning?: string;
+  toolCalls?: OrchestratorToolCall[];
+  tool?: OrchestratorToolRecord;
+  status: "streaming" | "done" | "cancelled" | "error";
+  at: string;
+  finishedAt?: string;
+  model?: string;
+}
+
+export interface OrchestratorUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cost: number;
+  turns: number;
+}
 
 export interface OrchestratorStatus {
-  state: "stopped" | "starting" | "running";
-  agent?: OrchestratorAgent;
-  sessionId?: string;
-  startedAt?: string;
-  lastExit?: { exitCode?: number; signal?: number; at: string };
-  availableAgents: OrchestratorAgent[];
+  state: "idle" | "running" | "unconfigured" | "unavailable";
+  seq: number;
+  config?: OrchestratorConfig;
+  error?: string | null;
+  usage?: OrchestratorUsage;
+  itemCount?: number;
+  activeTurn?: { id: string; startedAt: string; step: string } | null;
+  transcript?: OrchestratorTranscriptItem[];
+  partial?: boolean;
+}
+
+export interface OrchestratorModel {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+  contextLength: number;
+  promptPrice: number;
+  completionPrice: number;
+  tools: boolean;
+  reasoning: boolean;
+  created: number;
+}
+
+export interface OrchestratorCatalog {
+  fetchedAt: string | null;
+  source: "openrouter" | "custom" | null;
+  recommended: OrchestratorModel[];
+  models: OrchestratorModel[];
+  error?: string | null;
 }
 
 export interface BootstrapPayload {
@@ -158,6 +235,8 @@ export type ServerMessage =
   | { type: "profiles"; profiles: TerminalProfile[] }
   | { type: "projects"; projects: TerminalProject[] }
   | { type: "orchestrator"; orchestrator: OrchestratorStatus }
+  | { type: "orchestrator_item"; item: OrchestratorTranscriptItem; seq: number }
+  | { type: "orchestrator_reset"; seq: number }
   | { type: "notify"; title?: string; body?: string; sound?: string }
   | { type: "session"; session: TerminalSessionSummary }
   | { type: "snapshot"; sessionId: string; screen?: string; chunks: TranscriptChunk[]; session: TerminalSessionSummary }

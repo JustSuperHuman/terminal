@@ -13,13 +13,42 @@ namespace TerminalApp
         // Stable key (project id, or a normalized directory).
         String Key { get; set; };
         String Name { get; set; };
-        // Full project directory (home folder shortened to "~").
+        // Directory shown under the name: the full path (home shortened to
+        // "~") for a top-level section, the path relative to the parent
+        // section for a nested one.
         String Path { get; set; };
+        // Real directory of the section, for opening new tabs there.
+        String Directory { get; set; };
+        // Is that directory the root of a git repository? Assigning Directory
+        // works it out; it stays settable so the rail can override it.
+        Boolean IsRepositoryRoot { get; set; };
+        // Folder or repository glyph for the header, derived from IsRepositoryRoot.
+        String SectionGlyph { get; };
+        // The repository's branch ("" for a plain folder). Every tab in one
+        // checkout is on the same branch, so the rail says it here, once,
+        // instead of repeating it on every row underneath.
+        String Branch { get; };
+        // Nesting level (0 = top-level project, 1+ = subheading inside an
+        // ancestor section) and the header indent/size derived from it.
+        UInt32 Depth { get; set; };
+        Windows.UI.Xaml.Thickness HeaderMargin { get; };
+        Double NameFontSize { get; };
+        // Draw the hairline above this header? Only between top-level
+        // sections: the first one needs none (the search row above it already
+        // supplies the edge) and a nested subheading stays quiet.
+        Boolean ShowDivider { get; set; };
         // Number of tabs in the section, even while collapsed.
         UInt32 Count { get; set; };
         String CountText { get; };
         Boolean IsCollapsed { get; set; };
-        String ChevronGlyph { get; };
+        // Rotation of the chevron: 0 expanded, -90 collapsed.
+        Double ChevronAngle { get; };
+        // "<name>, <n> tabs, expanded/collapsed" for screen readers.
+        String AccessibleName { get; };
+        // True while the focused tab lives in this section; the header shows
+        // an accent marker for it once the section is collapsed.
+        Boolean ContainsActiveTab { get; };
+        Windows.UI.Xaml.Visibility ActiveMarkerVisibility { get; };
         // False for the "no directory" section, which has nothing to open.
         Boolean CanOpenNewTab { get; set; };
     }

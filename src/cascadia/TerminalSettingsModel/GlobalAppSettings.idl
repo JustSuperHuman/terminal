@@ -74,6 +74,7 @@ namespace Microsoft.Terminal.Settings.Model
         INHERITABLE_SETTING(Int32, BridgePort);
         INHERITABLE_SETTING(String, BridgeBindAddress);
         INHERITABLE_SETTING(Boolean, BridgeWebInterface);
+        INHERITABLE_SETTING(Boolean, AutoInstallShellIntegration);
 
         // ---- Color schemes ----
         Windows.Foundation.Collections.IMapView<String, ColorScheme> ColorSchemes();

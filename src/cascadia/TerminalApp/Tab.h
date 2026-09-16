@@ -19,6 +19,7 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         Tab(std::shared_ptr<Pane> rootPane);
+        ~Tab();
 
         // Called after construction to perform the necessary setup, which relies on weak_ptr
         void Initialize();
@@ -134,18 +135,145 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ProjectName, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, ProjectPath, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, WorkingDirectory, PropertyChanged.raise);
-        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, RailSubtitle, PropertyChanged.raise);
+        // Root of the git repository containing WorkingDirectory ("" if none).
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, GitRoot, PropertyChanged.raise);
+
+    public:
+        // Nesting level of the rail section this tab sits in; drives the
+        // row's left padding so tabs line up under a nested subheading.
+        uint32_t RailDepth() const noexcept { return _RailDepth; }
+        void RailDepth(const uint32_t value)
+        {
+            if (_RailDepth != value)
+            {
+                _RailDepth = value;
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RailDepth" });
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RailPadding" });
+            }
+        }
+        // Mirrors the rail's tokens: TabRailContentPadding (10,6,4,6) plus
+        // one TabRailIndentStep (12) per level of nesting. The right edge
+        // stays small because RailRowActions supplies its own gap.
+        winrt::Windows::UI::Xaml::Thickness RailPadding() const noexcept
+        {
+            return winrt::Windows::UI::Xaml::Thickness{ 10.0 + 12.0 * _RailDepth, 6.0, 4.0, 6.0 };
+        }
+
+        // Raw location line handed down by the rail: the directory relative to
+        // the tab's section, or the project name in the flat views. The rail
+        // assigns this on every rebuild - unchanged value included - which is
+        // what makes it the point where every derived row string is re-decided.
+        winrt::hstring RailSubtitle() const noexcept { return _RailSubtitle; }
+        void RailSubtitle(const winrt::hstring& value)
+        {
+            if (_RailSubtitle != value)
+            {
+                _RailSubtitle = value;
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RailSubtitle" });
+            }
+            // Not guarded by the change above: what the row prints also
+            // depends on the other tabs in its repository, and a rebuild is
+            // exactly when those move.
+            _updateRailDerived();
+        }
+        winrt::hstring GitBranch() const noexcept { return _GitBranch; }
+        void GitBranch(const winrt::hstring& value)
+        {
+            if (_GitBranch != value)
+            {
+                _GitBranch = value;
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"GitBranch" });
+                _updateRailDerived();
+            }
+        }
+
+        // The row's location line, branch excluded and dropped entirely when
+        // it only repeats the title.
+        winrt::hstring RailPathText() const noexcept { return _railPathText; }
+        // The branch on its own: "" outside a repository, and "" whenever it
+        // is simply the branch the whole repository is on, which the section
+        // header says once for all of its rows.
+        winrt::hstring RailBranch() const noexcept { return _railBranch; }
+        // Both of the above joined with a middle dot, for the single-TextBlock
+        // meta line; either alone when the other is empty.
+        winrt::hstring RailMeta() const
+        {
+            if (_railPathText.empty())
+            {
+                return _railBranch;
+            }
+            if (_railBranch.empty())
+            {
+                return _railPathText;
+            }
+            return _railPathText + L"  \u00B7  " + _railBranch;
+        }
+        // Everything the row had to leave out, one fact per line, for the
+        // hover tooltip.
+        winrt::hstring RailTooltip() const noexcept { return _railTooltip; }
+        // "claude", "codex", ... when a coding agent is running in the tab's
+        // foreground; "" otherwise. Filled in by TerminalPage's directory
+        // refresh, which is the only thing holding the tab's connection.
+        winrt::hstring RailAgent() const noexcept { return _railAgent; }
+        void RailAgent(const winrt::hstring& value)
+        {
+            if (_railAgent != value)
+            {
+                _railAgent = value;
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RailAgent" });
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RailAgentGlyph" });
+                _updateRailDerived();
+            }
+        }
+        winrt::hstring RailAgentGlyph() const;
+        // Everything the row shows, spelled out for a screen reader.
+        winrt::hstring RailAccessibleName() const noexcept { return _railAccessibleName; }
+
+        // Publishes this tab's repository and branch into the shared rail
+        // registry and re-decides every derived row string.
+        // Returns true when the branch that repository agrees on moved, which
+        // means the other rows filed under it have to re-decide as well.
+        bool RefreshRailSemantics();
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);
-        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, GitBranch, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, ReadOnly, PropertyChanged.raise, false);
         WINRT_PROPERTY(winrt::Microsoft::UI::Xaml::Controls::TabViewItem, TabViewItem, nullptr);
 
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::FrameworkElement, Content, PropertyChanged.raise, nullptr);
 
+    public:
+        // Bookkeeping for directory/branch refreshes. Not projected: only
+        // TerminalPage touches these, and they are pure throttling state.
+        //
+        // A TUI that repaints re-emits its title many times a second, and each
+        // of those asks for a refresh; without coalescing, every one of them
+        // started a process walk, filesystem probes and a rail regroup.
+        std::chrono::steady_clock::time_point LastDirectoryRefresh{};
+        bool DirectoryRefreshInFlight{ false };
+        // The agent probe walks a process tree, so it rides the sweep's
+        // cadence rather than the (much noisier) title-change path.
+        std::chrono::steady_clock::time_point LastAgentProbe{};
+
     private:
         static constexpr double HeaderRenameBoxWidthDefault{ 165 };
+        winrt::hstring _RailSubtitle;
+        winrt::hstring _GitBranch;
+        uint32_t _RailDepth{ 0 };
+        // Cached results of the rules in _updateRailDerived, so the getters
+        // are pure reads and only genuine changes raise PropertyChanged.
+        winrt::hstring _railPathText;
+        winrt::hstring _railBranch;
+        winrt::hstring _railTooltip;
+        winrt::hstring _railAgent;
+        winrt::hstring _railAccessibleName;
+
+        void _updateRailDerived();
+        winrt::hstring _computeRailPathText() const;
+        winrt::hstring _computeRailBranch() const;
+        winrt::hstring _computeRailTooltip() const;
+        winrt::hstring _computeRailAccessibleName() const;
+
         static constexpr double HeaderRenameBoxWidthTitleLength{ std::numeric_limits<double>::infinity() };
 
         winrt::Windows::UI::Xaml::FocusState _focusState{ winrt::Windows::UI::Xaml::FocusState::Unfocused };

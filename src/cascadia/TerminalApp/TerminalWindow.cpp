@@ -1025,16 +1025,6 @@ namespace winrt::TerminalApp::implementation
         return _root ? _root->NumberOfTabs() : 0;
     }
 
-    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalWindow::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount)
-    {
-        if (_root)
-        {
-            co_return co_await _root->ConfirmCollectOtherWindows(windowCount, tabCount, externalWindowCount);
-        }
-
-        co_return false;
-    }
-
     bool TerminalWindow::FocusMode() const
     {
         return _root ? _root->FocusMode() : false;
@@ -1361,14 +1351,6 @@ namespace winrt::TerminalApp::implementation
         if (_root)
         {
             _root->SendContentToOther(args);
-        }
-    }
-
-    void TerminalWindow::SendAllTabsToWindow(uint64_t targetWindowId)
-    {
-        if (_root)
-        {
-            _root->SendAllTabsToWindow(targetWindowId);
         }
     }
 

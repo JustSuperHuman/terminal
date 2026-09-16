@@ -99,6 +99,8 @@ public:
     void SetOptionalFeatures(winrt::Microsoft::Terminal::Core::ICoreSettings settings);
     bool IsXtermBracketedPasteModeEnabled() const noexcept;
     std::wstring_view GetWorkingDirectory() noexcept;
+    void SeedWorkingDirectory(std::wstring_view uri);
+    bool WorkingDirectoryFromShell() const noexcept;
 
     til::point GetViewportRelativeCursorPosition() const noexcept;
 
@@ -228,6 +230,7 @@ public:
     void SetWriteInputCallback(std::function<void(std::wstring_view)> pfn) noexcept;
     void SetWarningBellCallback(std::function<void()> pfn) noexcept;
     void SetTitleChangedCallback(std::function<void(std::wstring_view)> pfn) noexcept;
+    void SetWorkingDirectoryChangedCallback(std::function<void()> pfn) noexcept;
     void SetCopyToClipboardCallback(std::function<void(wil::zwstring_view)> pfn) noexcept;
     void SetScrollPositionChangedCallback(std::function<void(const int, const int, const int)> pfn) noexcept;
     void TaskbarProgressChangedCallback(std::function<void()> pfn) noexcept;
@@ -328,6 +331,7 @@ private:
     std::function<void(std::wstring_view)> _pfnWriteInput;
     std::function<void()> _pfnWarningBell;
     std::function<void(std::wstring_view)> _pfnTitleChanged;
+    std::function<void()> _pfnWorkingDirectoryChanged;
     std::function<void(wil::zwstring_view)> _pfnCopyToClipboard;
 
     // I've specifically put this instance here as it requires
@@ -382,6 +386,9 @@ private:
 
     std::wstring _answerbackMessage;
     std::wstring _workingDirectory;
+    // True once the client application reported its cwd (OSC 7 / OSC 9;9);
+    // false while _workingDirectory only holds the profile's starting directory.
+    bool _workingDirectoryFromShell = false;
     bool _highContrastMode = false;
 
     // This default fake font value is only used to check if the font is a raster font.

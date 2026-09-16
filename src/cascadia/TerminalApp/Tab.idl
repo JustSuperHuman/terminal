@@ -32,9 +32,32 @@ namespace TerminalApp
         String ProjectPath { get; };
         // Live working directory of the active pane ("" when unknown).
         String WorkingDirectory { get; };
-        // Second line under the title in the rail: the project name in flat
+        // Root of the git repository containing WorkingDirectory ("" if none).
+        String GitRoot { get; };
+        // Nesting level of this tab's rail section and the row padding derived from it.
+        UInt32 RailDepth { get; };
+        Windows.UI.Xaml.Thickness RailPadding { get; };
+        // Raw second line handed down by the rail: the project name in flat
         // views, or the path relative to the group's directory when grouped.
         String RailSubtitle { get; };
+        // The location line the row actually prints: RailSubtitle with
+        // anything the title already says removed.
+        String RailPathText { get; };
+        // The branch on its own: "" outside a repository, and "" whenever it
+        // is simply the branch the whole repository is on - TabGroup.Branch
+        // says that once, on the section header, for all of its rows.
+        String RailBranch { get; };
+        // RailPathText and RailBranch joined with a middle dot (either alone if the other is empty).
+        String RailMeta { get; };
+        // Title, working directory, branch, project and agent - one per line,
+        // empties skipped - for the row's hover tooltip.
+        String RailTooltip { get; };
+        // "claude", "codex", ... when a coding agent is running in the tab's
+        // foreground, "" otherwise, and the glyph that stands for it.
+        String RailAgent { get; };
+        String RailAgentGlyph { get; };
+        // Everything the row shows, spelled out for a screen reader.
+        String RailAccessibleName { get; };
 
         void Focus(Windows.UI.Xaml.FocusState focusState);
         void Close();

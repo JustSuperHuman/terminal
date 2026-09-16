@@ -500,6 +500,18 @@ try {
     return new Promise((resolve) => setTimeout(() => resolve({ value: ta.value, selStart: ta.selectionStart }), 60));
   })()`);
 
+  // Explicit hiding must beat the terminal's blur-to-refocus loop; showing
+  // it again should focus the same input without reloading the WebView.
+  await host(cdp, { type: "keepFocus", enabled: true });
+  const heldFocus = await evalValue(cdp, 'document.activeElement === window.__term.textarea');
+  await evalValue(cdp, 'window.__term.textarea.blur()');
+  await host(cdp, { type: "keepFocus", enabled: false });
+  await sleep(200);
+  const releasedFocus = await evalValue(cdp, 'document.activeElement !== window.__term.textarea');
+  await host(cdp, { type: "keepFocus", enabled: true });
+  const restoredFocus = await evalValue(cdp, 'document.activeElement === window.__term.textarea');
+  await host(cdp, { type: "keepFocus", enabled: false });
+
   const managedFullResize = latestMessage(managedFull.messages, "resize");
 
   // With the 13px base font on a 390px-wide viewport, the readability floor is
@@ -507,6 +519,9 @@ try {
   const FLOOR = 10 / 13;
 
   const checks = {
+    keyboardFocusHeld: heldFocus,
+    keyboardHideSurvivesPendingRefocus: releasedFocus,
+    keyboardShowRestoresFocus: restoredFocus,
     enginePostsReady: managedFull.messages.some((m) => m.type === "ready"),
     canvasMounted: managedFull.hasCanvas === true,
     // Mirror: the grid matches the host session's cols/rows exactly...

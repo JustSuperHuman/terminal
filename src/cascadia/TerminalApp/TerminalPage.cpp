@@ -6,6 +6,9 @@
 #include "TerminalPage.h"
 
 #include <algorithm>
+#include <fstream>
+#include <mutex>
+#include <shlobj_core.h>
 
 #include <TerminalCore/ControlKeyStates.hpp>
 #include <TerminalThemeHelpers.h>
@@ -105,7 +108,16 @@ namespace
         return { host, port };
     }
 
-    std::optional<std::string> _projectServerRequest(const wchar_t* verb, const std::wstring& path, const std::string& body = {})
+    struct ProjectServerResponse
+    {
+        DWORD Status{ 0 };
+        std::string Body;
+    };
+
+    // Synchronous request to the bridge host; call from a background thread.
+    // Returns the HTTP status and body for any completed exchange, or nullopt
+    // when the host could not be reached at all.
+    std::optional<ProjectServerResponse> _projectServerRequestDetailed(const wchar_t* verb, const std::wstring& path, const std::string& body = {})
     {
         const unique_winhttp_handle session{ WinHttpOpen(L"WindowsTerminal-Projects/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
         if (!session)
@@ -146,11 +158,6 @@ namespace
         {
             return std::nullopt;
         }
-        if (statusCode < 200 || statusCode >= 300)
-        {
-            return std::nullopt;
-        }
-
         std::string response;
         for (;;)
         {
@@ -173,7 +180,47 @@ namespace
             }
             response.resize(offset + read);
         }
-        return response;
+        return ProjectServerResponse{ statusCode, std::move(response) };
+    }
+
+    // The common case: the body of a 2xx response, nothing otherwise.
+    std::optional<std::string> _projectServerRequest(const wchar_t* verb, const std::wstring& path, const std::string& body = {})
+    {
+        auto response{ _projectServerRequestDetailed(verb, path, body) };
+        if (!response || response->Status < 200 || response->Status >= 300)
+        {
+            return std::nullopt;
+        }
+        return std::move(response->Body);
+    }
+
+    // Pulls the `message`/`detail` out of a bridge error body, or falls back
+    // to the status code.
+    std::wstring _projectServerErrorMessage(const std::optional<ProjectServerResponse>& response)
+    {
+        if (!response)
+        {
+            return L"Bridge server offline";
+        }
+        try
+        {
+            winrt::Windows::Data::Json::JsonObject obj{ nullptr };
+            if (winrt::Windows::Data::Json::JsonObject::TryParse(winrt::to_hstring(response->Body), obj))
+            {
+                std::wstring message{ obj.GetNamedString(L"message", L"") };
+                const std::wstring detail{ obj.GetNamedString(L"detail", L"") };
+                if (!detail.empty())
+                {
+                    message += message.empty() ? detail : L" " + detail;
+                }
+                if (!message.empty())
+                {
+                    return message;
+                }
+            }
+        }
+        CATCH_LOG();
+        return L"The bridge host answered HTTP " + std::to_wstring(response->Status);
     }
 }
 
@@ -333,6 +380,243 @@ namespace clipboard
 
 namespace winrt::TerminalApp::implementation
 {
+    // Reads a whole file as bytes. Returns "" when it cannot be read.
+    static std::string _readFileUtf8(const std::filesystem::path& path)
+    {
+        std::ifstream stream{ path, std::ios::binary };
+        if (!stream)
+        {
+            return {};
+        }
+        std::string text{ std::istreambuf_iterator<char>{ stream }, std::istreambuf_iterator<char>{} };
+        // PowerShell writes a UTF-8 BOM into profiles it creates; keep the
+        // text BOM-free internally and put one back on write.
+        static constexpr std::string_view bom{ "\xEF\xBB\xBF" };
+        if (text.starts_with(bom))
+        {
+            text.erase(0, bom.size());
+        }
+        return text;
+    }
+
+    // Writes a file as UTF-8 with a BOM, atomically via a sibling temp file so
+    // a profile is never left truncated.
+    static void _writeFileUtf8(const std::filesystem::path& path, std::string_view text)
+    {
+        auto temporary = path;
+        temporary += L".wt-new";
+        {
+            std::ofstream stream{ temporary, std::ios::binary | std::ios::trunc };
+            if (!stream)
+            {
+                return;
+            }
+            // Windows PowerShell 5.1 reads a BOM-less file as ANSI, which
+            // would mangle a non-ASCII path in the block.
+            stream << "\xEF\xBB\xBF" << text;
+        }
+        std::error_code ec;
+        std::filesystem::rename(temporary, path, ec);
+        if (ec)
+        {
+            std::filesystem::remove(temporary, ec);
+        }
+    }
+
+    // The managed block that shell-integration installs into a PowerShell
+    // profile, and the markers that let it be found and replaced in place.
+    //
+    // Everything about grouping tabs by directory depends on the shell saying
+    // where it is. PowerShell is the one shell that can never be inferred from
+    // the outside: Set-Location moves its provider location, not the process
+    // cwd that the PEB holds, so a pwsh tab that has not reported looks like it
+    // never left the directory it launched in. OSC 9;9 from the prompt is the
+    // only source of truth, and the prompt runs after every command, so `cd`
+    // reports immediately.
+    //
+    // The block wraps whatever prompt the earlier profiles installed instead of
+    // replacing it, and lives in the current-host profile, which loads last, so
+    // it wins without clobbering oh-my-posh/starship style prompts.
+    static constexpr std::wstring_view shellIntegrationBeginMarker{ L"# >>> Windows Terminal working directory reporting (managed) >>>" };
+    static constexpr std::wstring_view shellIntegrationEndMarker{ L"# <<< Windows Terminal working directory reporting (managed) <<<" };
+
+    // Markers from earlier iterations of this feature. They dot-sourced a
+    // script out of the package LocalState folder, which re-registering the
+    // dev package deletes - leaving a Test-Path guarded no-op behind that
+    // silently reported nothing. Strip them wherever they are still present.
+    static constexpr std::array legacyShellIntegrationMarkers{
+        std::pair{ std::wstring_view{ L"# >>> Windows Terminal path tab color shell integration >>>" },
+                   std::wstring_view{ L"# <<< Windows Terminal path tab color shell integration <<<" } },
+    };
+
+    static std::wstring _shellIntegrationBlock()
+    {
+        std::wstring block;
+        block.append(shellIntegrationBeginMarker);
+        block.append(L"\n");
+        block.append(LR"(# Reports the current directory to Windows Terminal (OSC 9;9) on every prompt
+# so tabs can be grouped by the directory they are working in. Managed by
+# Windows Terminal: this block is rewritten on launch, so edit it there.
+if ($env:WT_SESSION) {
+    # Capture whatever prompt is installed so it keeps rendering. Never
+    # capture this wrapper itself: doing so makes prompt call itself, which
+    # recurses until the prompt is nothing but escape sequences. Matching on
+    # the body rather than trusting the variable also survives the variable
+    # being removed while the function is still in place.
+    $existingPrompt = $function:prompt
+    if ($existingPrompt -and "$existingPrompt" -notmatch '__WTPromptInner') {
+        $global:__WTPromptInner = $existingPrompt
+    }
+
+    function global:prompt {
+        $inner = if ($global:__WTPromptInner) {
+            & $global:__WTPromptInner
+        }
+        else {
+            "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+        }
+
+        $location = $ExecutionContext.SessionState.Path.CurrentLocation
+        if ($location.Provider.Name -ne 'FileSystem') {
+            return $inner
+        }
+
+        $report = "$([char]27)]9;9;`"$($location.ProviderPath)`"$([char]27)\"
+        # A prompt function may return several strings; prefixing the array
+        # would stringify it, so only the first line carries the report.
+        if ($inner -is [array] -and $inner.Count -gt 0) {
+            $inner[0] = $report + [string]$inner[0]
+            return $inner
+        }
+        return $report + [string]$inner
+    }
+}
+)");
+        block.append(shellIntegrationEndMarker);
+        block.append(L"\n");
+        return block;
+    }
+
+    // Removes a marker-delimited block (and the blank lines around it) from
+    // `text`. Returns true when something was removed.
+    static bool _removeManagedBlock(std::wstring& text, std::wstring_view begin, std::wstring_view end)
+    {
+        auto removed = false;
+        for (;;)
+        {
+            const auto from = text.find(begin);
+            if (from == std::wstring::npos)
+            {
+                break;
+            }
+            auto to = text.find(end, from);
+            if (to == std::wstring::npos)
+            {
+                // Truncated block (hand-edited, or a failed earlier write):
+                // drop everything from the marker on rather than leave half.
+                to = text.size();
+            }
+            else
+            {
+                to += end.size();
+                // Take the line break that ended the marker line with it.
+                if (to < text.size() && text[to] == L'\r')
+                {
+                    ++to;
+                }
+                if (to < text.size() && text[to] == L'\n')
+                {
+                    ++to;
+                }
+            }
+
+            // Cut whole lines. Trimming by character instead would split a
+            // CRLF and leave a stray carriage return welded to the line above
+            // when the block sits in the middle of a profile.
+            const auto previousBreak = text.rfind(L'\n', from);
+            const auto start = previousBreak == std::wstring::npos ? 0 : previousBreak + 1;
+
+            text.erase(start, to - start);
+            removed = true;
+        }
+        return removed;
+    }
+
+    // Method Description:
+    // - Makes sure every PowerShell that starts in a Terminal tab reports its
+    //   working directory, by keeping a managed block at the end of the user's
+    //   PowerShell profiles. Idempotent, and only writes when the content
+    //   actually differs, so a launch does not touch the file needlessly.
+    // - Off the UI thread: this is file I/O in the user's profile folder,
+    //   which may be redirected to OneDrive.
+    static void _installShellIntegration()
+    {
+        wil::unique_cotaskmem_string documents;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents)) || !documents)
+        {
+            return;
+        }
+
+        const std::filesystem::path documentsPath{ documents.get() };
+        // pwsh 7 and Windows PowerShell 5.1 keep separate profiles, and both
+        // land in a Terminal tab. CurrentUserCurrentHost is the last profile
+        // PowerShell loads, so a prompt installed here wraps every other one.
+        const std::array profiles{
+            documentsPath / L"PowerShell" / L"Microsoft.PowerShell_profile.ps1",
+            documentsPath / L"WindowsPowerShell" / L"Microsoft.PowerShell_profile.ps1",
+        };
+
+        const auto block = _shellIntegrationBlock();
+
+        for (const auto& profile : profiles)
+        {
+            try
+            {
+                std::wstring existing;
+                std::error_code ec;
+                if (std::filesystem::exists(profile, ec) && !ec)
+                {
+                    existing = til::u8u16(_readFileUtf8(profile));
+                }
+
+                auto updated = existing;
+                for (const auto& [begin, end] : legacyShellIntegrationMarkers)
+                {
+                    _removeManagedBlock(updated, begin, end);
+                }
+                _removeManagedBlock(updated, shellIntegrationBeginMarker, shellIntegrationEndMarker);
+
+                // Append the current block at the very end.
+                while (!updated.empty() && (updated.back() == L'\n' || updated.back() == L'\r'))
+                {
+                    updated.pop_back();
+                }
+                if (!updated.empty())
+                {
+                    updated.append(L"\n\n");
+                }
+                updated.append(block);
+
+                if (updated == existing)
+                {
+                    continue;
+                }
+
+                std::filesystem::create_directories(profile.parent_path(), ec);
+                _writeFileUtf8(profile, til::u16u8(updated));
+            }
+            CATCH_LOG();
+        }
+    }
+
+    static safe_void_coroutine _installShellIntegrationAsync()
+    {
+        // Profile files may sit on a redirected (OneDrive) Documents folder,
+        // so keep this off the UI thread.
+        co_await winrt::resume_background();
+        _installShellIntegration();
+    }
+
     static constexpr double MinimumTerminalContentWidth = 320.0;
 
     TerminalPage::TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager) :
@@ -465,19 +749,32 @@ namespace winrt::TerminalApp::implementation
         _bridgeStatusTimer.Tick({ get_weak(), &TerminalPage::_BridgeStatusTimerTick });
         _bridgeStatusTimer.Start();
 
-        // Refresh each tab's git branch periodically. Title updates already
-        // refresh the branch immediately when the shell changes directory;
-        // this poll catches checkouts made without a cwd change (e.g. from
-        // another window or an editor).
-        _gitBranchTimer.Interval(std::chrono::milliseconds(3000));
-        _gitBranchTimer.Tick({ get_weak(), &TerminalPage::_GitBranchTimerTick });
-        _gitBranchTimer.Start();
+        // Keep the shell reporting its working directory. A shell that never
+        // emits OSC 7 / OSC 9;9 cannot be tracked from the outside - pwsh in
+        // particular leaves its process cwd at the launch directory across
+        // every `cd` - so grouping tabs by directory depends on this being in
+        // place. Idempotent, and only writes when the content differs.
+        if (_settings.GlobalSettings().AutoInstallShellIntegration())
+        {
+            static std::once_flag once;
+            std::call_once(once, []() { _installShellIntegrationAsync(); });
+        }
+
+        // Directory and branch sweep. A reporting shell delivers its directory
+        // on an event the moment it changes; this catches what events cannot -
+        // shells with no integration, TUI agents that never report, and
+        // branch changes made outside the terminal, which move no directory.
+        _directoryRefreshTimer.Interval(std::chrono::milliseconds(3000));
+        _directoryRefreshTimer.Tick({ get_weak(), &TerminalPage::_DirectoryRefreshTimerTick });
+        _directoryRefreshTimer.Start();
 
         // Populate the project strip ("All" + "+") immediately; the timer
         // tick keeps it in sync with the terminal-web store afterwards.
         _RebuildProjectTabs();
 
-        // Orchestrator panel buttons (right-edge toggle + header + empty state).
+        // Orchestrator panel: header actions, composer, quick prompts and the
+        // settings flyout. Status polling rides the 2s bridge tick while the
+        // pane is open, plus a faster timer while a turn is streaming.
         {
             const auto weakThis{ get_weak() };
             OrchestratorToggleButton().Click([weakThis](auto&&, auto&&) {
@@ -492,29 +789,127 @@ namespace winrt::TerminalApp::implementation
                     page->_ToggleOrchestratorPane();
                 }
             });
-            OrchestratorStartClaudeButton().Click([weakThis](auto&&, auto&&) {
+            OrchestratorClearButton().Click([weakThis](auto&&, auto&&) {
                 if (const auto page{ weakThis.get() })
                 {
-                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":"claude"})");
+                    page->_ResetOrchestratorTranscript();
+                    page->_UpdateOrchestratorChrome();
+                    page->_PostOrchestratorCommand(L"DELETE", L"/api/orchestrator/messages", "");
                 }
             });
-            OrchestratorStartCodexButton().Click([weakThis](auto&&, auto&&) {
+            OrchestratorSendButton().Click([weakThis](auto&&, auto&&) {
                 if (const auto page{ weakThis.get() })
                 {
-                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":"codex"})");
-                }
-            });
-            OrchestratorRestartButton().Click([weakThis](auto&&, auto&&) {
-                if (const auto page{ weakThis.get() })
-                {
-                    const auto agent = page->_orchestratorStatus.Agent.empty() ? std::string{ "claude" } : winrt::to_string(page->_orchestratorStatus.Agent);
-                    page->_PostOrchestratorCommand(L"/api/orchestrator/start", R"({"agent":")" + agent + R"(","restart":true})");
+                    page->_SendOrchestratorMessage(page->OrchestratorComposer().Text());
                 }
             });
             OrchestratorStopButton().Click([weakThis](auto&&, auto&&) {
                 if (const auto page{ weakThis.get() })
                 {
-                    page->_PostOrchestratorCommand(L"/api/orchestrator/stop", "{}");
+                    page->_PostOrchestratorCommand(L"POST", L"/api/orchestrator/cancel", "{}");
+                }
+            });
+            for (const auto& child : OrchestratorQuickPrompts().Children())
+            {
+                if (const auto button{ child.try_as<Button>() })
+                {
+                    button.Click([weakThis](auto&& sender, auto&&) {
+                        if (const auto page{ weakThis.get() })
+                        {
+                            const auto prompt{ winrt::unbox_value_or<winrt::hstring>(sender.template as<FrameworkElement>().Tag(), L"") };
+                            page->_SendOrchestratorMessage(prompt);
+                        }
+                    });
+                }
+            }
+            OrchestratorTranscriptScroller().ViewChanged([weakThis](auto&& sender, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    const auto scroller{ sender.template as<ScrollViewer>() };
+                    page->_orchestratorStickToBottom = scroller.VerticalOffset() + scroller.ViewportHeight() >= scroller.ScrollableHeight() - 40.0;
+                }
+            });
+
+            // Settings flyout.
+            OrchestratorSettingsFlyout().Opening([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_PopulateOrchestratorSettings();
+                }
+            });
+            OrchestratorProviderBox().SelectionChanged([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    const auto selected{ page->OrchestratorProviderBox().SelectedItem().try_as<ComboBoxItem>() };
+                    const auto provider{ selected ? winrt::unbox_value_or<winrt::hstring>(selected.Tag(), L"openrouter") : winrt::hstring{ L"openrouter" } };
+                    const auto custom = provider == L"custom";
+                    page->OrchestratorBaseUrlBox().Visibility(custom ? Visibility::Visible : Visibility::Collapsed);
+                    if (custom && page->OrchestratorKeyEnvBox().Text() == L"OPENROUTER_API_KEY")
+                    {
+                        page->OrchestratorKeyEnvBox().Text(L"OPENAI_API_KEY");
+                    }
+                    else if (!custom && page->OrchestratorKeyEnvBox().Text() == L"OPENAI_API_KEY")
+                    {
+                        page->OrchestratorKeyEnvBox().Text(L"OPENROUTER_API_KEY");
+                    }
+                }
+            });
+            OrchestratorRefreshModelsButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_LoadOrchestratorModels(true);
+                }
+            });
+            OrchestratorModelList().SelectionChanged([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    if (const auto selected{ page->OrchestratorModelList().SelectedItem().try_as<ListViewItem>() })
+                    {
+                        const auto id{ winrt::unbox_value_or<winrt::hstring>(selected.Tag(), L"") };
+                        if (!id.empty())
+                        {
+                            page->OrchestratorModelBox().Text(id);
+                        }
+                    }
+                }
+            });
+            OrchestratorModelSearchBox().TextChanged([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_FilterOrchestratorModels();
+                }
+            });
+            OrchestratorSaveButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_SaveOrchestratorConfig(page->_OrchestratorConfigBody(true));
+                }
+            });
+            OrchestratorUseKeyButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_SaveOrchestratorConfig(page->_OrchestratorConfigBody(true));
+                }
+            });
+            OrchestratorForgetKeyButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_SaveOrchestratorConfig(R"({"apiKey":""})");
+                }
+            });
+            OrchestratorTestButton().Click([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_TestOrchestratorConnection();
+                }
+            });
+
+            _orchestratorPollTimer = DispatcherTimer{};
+            _orchestratorPollTimer.Interval(std::chrono::milliseconds(350));
+            _orchestratorPollTimer.Tick([weakThis](auto&&, auto&&) {
+                if (const auto page{ weakThis.get() })
+                {
+                    page->_RefreshOrchestratorStatus();
                 }
             });
         }
@@ -541,7 +936,7 @@ namespace winrt::TerminalApp::implementation
                         if (const auto page{ weakThis.get() })
                         {
                             // The coroutine marshals itself back to the UI thread.
-                            page->_ProjectDropReorder(operation.GetResults(), dropX);
+                            page->_SectionDropReorder(operation.GetResults(), dropX);
                         }
                     }
                     deferral.Complete();
@@ -560,6 +955,15 @@ namespace winrt::TerminalApp::implementation
         _newTabButton = tabRowImpl->NewTabButton();
         _workspaceFlyout = tabRowImpl->WorkspaceFlyout();
         _workspaceDropdown = tabRowImpl->WorkspaceDropdown();
+        // The rail's headings are the project strip's contents, so subscribe
+        // before handing it the tabs: SetTabs computes the first set of
+        // sections and this is what turns them into chips.
+        tabRowImpl->RailSectionsChanged = [weakThis{ get_weak() }]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->_OnRailSectionsChanged();
+            }
+        };
         tabRowImpl->SetTabs(_tabs);
         tabRowImpl->VerticalTabSelected([weakThis{ get_weak() }](auto&&, const auto& tab) {
             if (auto page{ weakThis.get() })
@@ -574,12 +978,6 @@ namespace winrt::TerminalApp::implementation
                 {
                     page->_TryMoveTab(*currentIndex, static_cast<int32_t>(targetIndex));
                 }
-            }
-        };
-        tabRowImpl->CollectWindowsRequested = [weakThis{ get_weak() }]() {
-            if (auto page{ weakThis.get() })
-            {
-                page->CollectOtherWindowsRequested.raise(*page, nullptr);
             }
         };
         // The [+] on a project header in the rail opens a terminal in that
@@ -765,10 +1163,21 @@ namespace winrt::TerminalApp::implementation
         column.Width(GridLengthHelper::FromValueAndType(clampedWidth, GridUnitType::Pixel));
     }
 
+    // Both pane edges carry a grip line that is invisible at rest, half up
+    // under the pointer and full while the pane is being dragged, so a 6px
+    // strip of window chrome looks like something you can grab. It escalates
+    // in weight rather than hue - the accent belongs to the rail's selected
+    // tab - and only Opacity moves, so the brushes stay theme resources
+    // declared in the XAML.
+    static constexpr auto ResizeHandleRestOpacity = 0.0;
+    static constexpr auto ResizeHandleHoverOpacity = 0.5;
+    static constexpr auto ResizeHandleDragOpacity = 1.0;
+
     void TerminalPage::_VerticalTabResizePointerEntered(const Windows::Foundation::IInspectable&,
                                                         const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
     {
         _SetVerticalTabResizeCursor(true);
+        VerticalTabResizeGrip().Opacity(_resizingVerticalTabPane ? ResizeHandleDragOpacity : ResizeHandleHoverOpacity);
     }
 
     void TerminalPage::_VerticalTabResizePointerExited(const Windows::Foundation::IInspectable&,
@@ -777,6 +1186,7 @@ namespace winrt::TerminalApp::implementation
         if (!_resizingVerticalTabPane)
         {
             _SetVerticalTabResizeCursor(false);
+            VerticalTabResizeGrip().Opacity(ResizeHandleRestOpacity);
         }
     }
 
@@ -795,6 +1205,7 @@ namespace winrt::TerminalApp::implementation
         _verticalTabResizeStartWidth = VerticalTabColumn().ActualWidth();
         _resizingVerticalTabPane = true;
         _SetVerticalTabResizeCursor(true);
+        VerticalTabResizeGrip().Opacity(ResizeHandleDragOpacity);
         e.Handled(true);
     }
 
@@ -803,6 +1214,10 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_resizingVerticalTabPane)
         {
+            // Releasing the drag with the pointer still over the handle
+            // leaves no exit event behind, so re-assert the hover state on
+            // the next move rather than waiting for one.
+            VerticalTabResizeGrip().Opacity(ResizeHandleHoverOpacity);
             return;
         }
 
@@ -823,6 +1238,7 @@ namespace winrt::TerminalApp::implementation
         {
             _resizingVerticalTabPane = false;
             _SetVerticalTabResizeCursor(false);
+            VerticalTabResizeGrip().Opacity(ResizeHandleRestOpacity);
             e.Handled(true);
         }
     }
@@ -1540,6 +1956,20 @@ namespace winrt::TerminalApp::implementation
         const auto panel = tabRowImpl->NewTabProfilesPanel();
         panel.Children().Clear();
 
+        // These buttons are the only part of the rail's footer that markup
+        // can't reach, so they pick up the footer's style here instead. It
+        // carries the size, margin, radius, glyph metrics and the chrome
+        // ramp - transparent until touched - that the rest of the rail uses;
+        // FitNewTabProfileButtons reads Width and Margin back off them, and
+        // a Style setter sets those properties for real, so the fit maths
+        // keeps working.
+        WUX::Style profileButtonStyle{ nullptr };
+        try
+        {
+            profileButtonStyle = Application::Current().Resources().Lookup(winrt::box_value(L"TabRailFooterProfileButtonStyle")).try_as<WUX::Style>();
+        }
+        CATCH_LOG();
+
         const auto activeProfiles = _settings.ActiveProfiles();
         const auto profileCount = activeProfiles.Size();
         for (uint32_t profileIndex = 0; profileIndex < profileCount; profileIndex++)
@@ -1547,12 +1977,21 @@ namespace winrt::TerminalApp::implementation
             const auto profile = activeProfiles.GetAt(profileIndex);
 
             auto button = WUX::Controls::Button{};
-            button.Width(32);
-            button.Height(32);
-            button.Padding({ 0, 0, 0, 0 });
-            button.Margin({ 4, 0, 0, 0 });
-            button.BorderThickness({ 0, 0, 0, 0 });
-            button.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+            if (profileButtonStyle)
+            {
+                button.Style(profileButtonStyle);
+            }
+            else
+            {
+                button.Width(32);
+                button.Height(32);
+                button.Padding({ 0, 0, 0, 0 });
+                button.Margin({ 4, 0, 0, 0 });
+                button.BorderThickness({ 0, 0, 0, 0 });
+                button.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+                button.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                button.FontSize(12);
+            }
 
             if (const auto icon = _CreateNewTabFlyoutIcon(profile.Icon().Resolved()))
             {
@@ -1562,11 +2001,9 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
-                WUX::Controls::FontIcon fallbackIcon{};
-                fallbackIcon.Glyph(L"\xE756"); // CommandPrompt
-                fallbackIcon.FontSize(12);
-                fallbackIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-                button.Content(fallbackIcon);
+                // A bare glyph, so the style's SymbolThemeFontFamily and glyph
+                // size apply the way they do on every other rail icon button.
+                button.Content(winrt::box_value(L"\xE756")); // CommandPrompt
             }
 
             const auto profileName = profile.Name();
@@ -2048,11 +2485,6 @@ namespace winrt::TerminalApp::implementation
             // process until later, on another thread, after we've already
             // restored the CWD to its original value.
             auto newWorkingDirectory{ _evaluatePathForCwd(settings.StartingDirectory()) };
-            if (!_activeProjectCwd.empty())
-            {
-                // A project tab is active: new terminals start in its directory.
-                newWorkingDirectory = std::wstring{ _activeProjectCwd };
-            }
             auto commandline{ settings.Commandline() };
 
             connection = TerminalConnection::ConptyConnection{};
@@ -2290,8 +2722,14 @@ namespace winrt::TerminalApp::implementation
     // directory by walking up to the repository root and reading HEAD
     // directly; spawning git.exe per tab per tick would be far too heavy.
     // Returns an empty string when the directory isn't inside a repository.
-    static std::wstring _gitBranchForDirectory(std::wstring cwd)
+    // `repositoryRoot`, when given, receives the directory holding `.git`.
+
+    static std::wstring _gitBranchUncached(std::wstring cwd, std::wstring* repositoryRoot, std::filesystem::path* headFile)
     {
+        if (repositoryRoot)
+        {
+            repositoryRoot->clear();
+        }
         if (cwd.empty())
         {
             return {};
@@ -2336,6 +2774,14 @@ namespace winrt::TerminalApp::implementation
 
             if (!headPath.empty())
             {
+                if (repositoryRoot)
+                {
+                    *repositoryRoot = dir.wstring();
+                }
+                if (headFile)
+                {
+                    *headFile = headPath;
+                }
                 const auto head = _readGitLine(headPath);
                 static constexpr std::string_view refPrefix{ "ref: refs/heads/" };
                 if (head.starts_with(refPrefix))
@@ -2363,6 +2809,22 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // The rail's top-level headings. These are the project strip's contents:
+    // a chip exists exactly when a heading does, carries the heading's name
+    // and count, and filters the rail back down to it. Before this the strip
+    // was built from the terminal-web project store instead, so a saved
+    // project with no terminal open showed a chip with nothing behind it and
+    // an offline bridge showed a stale strip - or none - beside a rail full
+    // of sections.
+    static std::vector<implementation::TabRowControl::RailSection> _railSectionsOf(const TerminalApp::TabRowControl& tabRow)
+    {
+        if (tabRow)
+        {
+            return winrt::get_self<implementation::TabRowControl>(tabRow)->RailSections();
+        }
+        return {};
+    }
+
     static std::wstring _projectDirectoryKey(std::wstring_view cwd)
     {
         if (cwd.empty())
@@ -2386,123 +2848,383 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+
+    // Cached git lookup for a directory.
+    //
+    // Resolving a branch means probing for .git up the parent chain and then
+    // reading HEAD. That is a handful of filesystem calls, which was fine
+    // until it ran once per tab per refresh - on a repo checked out on ReFS,
+    // with a dozen tabs open, that is the bulk of what the tab poll costs.
+    //
+    // Which repository a directory belongs to is effectively immutable, and
+    // the branch only moves when HEAD is rewritten, so a directory-keyed
+    // cache revalidated against HEAD's write time collapses a refresh to one
+    // stat in the steady state. A branch changed from outside (a checkout in
+    // another window, an editor) still shows up on the next poll.
+    struct GitDirectoryInfo
+    {
+        std::wstring Root;
+        std::wstring Branch;
+        std::filesystem::path HeadFile;
+        std::filesystem::file_time_type HeadWriteTime{};
+        std::chrono::steady_clock::time_point RevalidatedAt{};
+    };
+
+    static std::wstring _gitBranchForDirectory(std::wstring cwd, std::wstring* repositoryRoot = nullptr)
+    {
+        if (repositoryRoot)
+        {
+            repositoryRoot->clear();
+        }
+        if (cwd.empty())
+        {
+            return {};
+        }
+
+        // Revalidating more often than this buys nothing: the poll that drives
+        // this runs on the same order, and HEAD is not rewritten in bursts.
+        static constexpr auto revalidateAfter = std::chrono::milliseconds(2000);
+
+        static std::mutex mutex;
+        static std::unordered_map<std::wstring, GitDirectoryInfo> cache;
+
+        const auto key{ _projectDirectoryKey(cwd) };
+        const auto now = std::chrono::steady_clock::now();
+
+        std::optional<GitDirectoryInfo> known;
+        {
+            const std::lock_guard guard{ mutex };
+            if (const auto entry = cache.find(key); entry != cache.end())
+            {
+                if (now - entry->second.RevalidatedAt < revalidateAfter)
+                {
+                    if (repositoryRoot)
+                    {
+                        *repositoryRoot = entry->second.Root;
+                    }
+                    return entry->second.Branch;
+                }
+                known = entry->second;
+            }
+        }
+
+        // Known repository: one stat tells us whether the branch can have moved.
+        if (known && !known->HeadFile.empty())
+        {
+            std::error_code ec;
+            const auto written = std::filesystem::last_write_time(known->HeadFile, ec);
+            if (!ec && written == known->HeadWriteTime)
+            {
+                const std::lock_guard guard{ mutex };
+                if (const auto entry = cache.find(key); entry != cache.end())
+                {
+                    entry->second.RevalidatedAt = now;
+                }
+                if (repositoryRoot)
+                {
+                    *repositoryRoot = known->Root;
+                }
+                return known->Branch;
+            }
+        }
+
+        GitDirectoryInfo fresh;
+        fresh.Branch = _gitBranchUncached(std::move(cwd), &fresh.Root, &fresh.HeadFile);
+        if (!fresh.HeadFile.empty())
+        {
+            std::error_code ec;
+            const auto written = std::filesystem::last_write_time(fresh.HeadFile, ec);
+            if (!ec)
+            {
+                fresh.HeadWriteTime = written;
+            }
+        }
+        fresh.RevalidatedAt = now;
+
+        if (repositoryRoot)
+        {
+            *repositoryRoot = fresh.Root;
+        }
+        const auto branch = fresh.Branch;
+        {
+            const std::lock_guard guard{ mutex };
+            cache[key] = std::move(fresh);
+        }
+        return branch;
+    }
+
     // Method Description:
-    // - Polls every tab for its git branch: a couple of small file reads per
-    //   tab, off the UI thread. This catches branch changes that don't move
-    //   the cwd (checkouts from another window, an editor, etc.).
-    void TerminalPage::_GitBranchTimerTick(const IInspectable&, const IInspectable&)
+    // - The periodic sweep behind directory and branch tracking.
+    // - A shell that reports OSC 7 / OSC 9;9 does not need this at all: the
+    //   working directory arrives on an event the moment it changes. The sweep
+    //   exists for what events cannot cover - a shell with no integration, a
+    //   TUI agent that never reports, and branch changes made from outside the
+    //   terminal, which move no directory at all.
+    void TerminalPage::_DirectoryRefreshTimerTick(const IInspectable&, const IInspectable&)
     {
         for (const auto& tab : _tabs)
         {
-            _RefreshTabGitBranch(tab);
+            _RefreshTabDirectory(tab);
         }
     }
 
     // Method Description:
-    // - Recomputes the git branch for the tab's active pane's cwd on a
-    //   background thread and publishes it onto the Tab, where the vertical
-    //   rail's row template binds it.
-    safe_void_coroutine TerminalPage::_RefreshTabGitBranch(winrt::TerminalApp::Tab tab)
+    // - A pane reported a new working directory (OSC 7 / OSC 9;9). Push it
+    //   through immediately rather than waiting for the sweep.
+    void TerminalPage::_ControlWorkingDirectoryChangedHandler(const IInspectable& sender, const IInspectable&)
+    {
+        const auto control{ sender.try_as<TermControl>() };
+        if (!control)
+        {
+            return;
+        }
+
+        // Only the pane the user is looking at names the tab's directory.
+        for (const auto& tab : _tabs)
+        {
+            if (const auto tabImpl{ _GetTabImpl(tab) })
+            {
+                if (tabImpl->GetActiveTerminalControl() == control)
+                {
+                    _RefreshTabDirectory(tab);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Method Description:
+    // - Resolves where a tab's active pane is working - and, from that, its git
+    //   branch and project - and publishes all three onto the Tab, where the
+    //   vertical rail's row template binds them. The resolution itself runs on
+    //   a background thread; only the publish happens on the UI thread.
+    // - Cheap to over-call: it coalesces, so the title-change path and the
+    //   periodic sweep can both ask freely.
+    safe_void_coroutine TerminalPage::_RefreshTabDirectory(winrt::TerminalApp::Tab tab)
     {
         std::wstring cwd;
-        const auto tabImpl{ _GetTabImpl(tab) };
-        if (tabImpl)
+        std::wstring seededCwd;
+        TerminalConnection::ConptyConnection conpty{ nullptr };
+        const auto observedTab{ _GetTabImpl(tab) };
+        if (!observedTab)
         {
-            if (const auto control{ tabImpl->GetActiveTerminalControl() })
+            co_return;
+        }
+
+        if (const auto control{ observedTab->GetActiveTerminalControl() })
+        {
+            // The control pre-seeds its cwd with the profile's starting
+            // directory. Only trust it as "where the shell is now" once
+            // the shell has actually reported a cwd; otherwise it stays
+            // frozen at the opening directory across every `cd`.
+            if (control.WorkingDirectoryFromShell())
             {
                 cwd = std::wstring{ control.WorkingDirectory() };
             }
+            else
+            {
+                seededCwd = std::wstring{ control.WorkingDirectory() };
+            }
+            if (const auto conn{ control.Connection() })
+            {
+                conpty = conn.try_as<TerminalConnection::ConptyConnection>();
+            }
+        }
+
+        // Nothing to resolve and nothing to clear? Skip the thread hops.
+        if (cwd.empty() && seededCwd.empty() && !conpty && tab.GitBranch().empty() && tab.WorkingDirectory().empty())
+        {
+            co_return;
+        }
+
+        // A refresh already on its way will observe everything we just did.
+        if (observedTab->DirectoryRefreshInFlight)
+        {
+            co_return;
+        }
+
+        // _UpdateTitle asks for a refresh on every title change, and a TUI that
+        // repaints re-emits its title constantly - so without coalescing, a
+        // window that merely took focus kicks off a thread hop, a process walk
+        // and a rail regroup per tab per repaint. Anything a suppressed pass
+        // would have found (a branch moved outside the terminal, a fallback
+        // directory that shifted) the periodic sweep picks up.
+        //
+        // The one thing that must never wait is a shell reporting a directory
+        // this tab is not already filed under: that is the `cd` the user just
+        // typed, and SetWorkingDirectory only raises its event when the
+        // directory actually moved.
+        const auto now = std::chrono::steady_clock::now();
+        static constexpr auto coalesceWindow = std::chrono::milliseconds(2000);
+        const auto refreshedRecently = observedTab->LastDirectoryRefresh.time_since_epoch().count() != 0 &&
+                                       now - observedTab->LastDirectoryRefresh < coalesceWindow;
+        const auto shellMovedUs = !cwd.empty() && cwd != std::wstring{ tab.WorkingDirectory() };
+        if (refreshedRecently && !shellMovedUs)
+        {
+            co_return;
+        }
+
+        observedTab->DirectoryRefreshInFlight = true;
+        observedTab->LastDirectoryRefresh = now;
+
+        // Which coding agent is running in this tab, for the rail's agent mark.
+        // ForegroundAgent walks the process tree; the snapshot behind it is
+        // shared and short-lived, but a tab whose shell reports OSC 7 never
+        // asks for one otherwise, so this must not ride along on every pass.
+        // Once per tab per sweep interval is enough: a tab that just started
+        // `claude` picks up its mark on the following sweep.
+        static constexpr auto agentProbeWindow = std::chrono::seconds(3);
+        const auto probeAgent = conpty &&
+                                (observedTab->LastAgentProbe.time_since_epoch().count() == 0 ||
+                                 now - observedTab->LastAgentProbe >= agentProbeWindow);
+        if (probeAgent)
+        {
+            observedTab->LastAgentProbe = now;
+        }
+
+        const auto shellReported{ !cwd.empty() };
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+
+        // Shell integration (OSC 7 / OSC 9;9) is authoritative and is never
+        // second-guessed here. It is also the only thing that can be right for
+        // pwsh, which moves its provider location on `cd` and leaves the
+        // process cwd where the tab started.
+        //
+        // Without it, fall back to the directory the process tree is running
+        // in. That is genuinely correct for a program launched in a directory
+        // (a TUI agent, cmd) and merely stale for a bare pwsh prompt.
+        if (!shellReported && conpty)
+        {
+            cwd = std::wstring{ conpty.ForegroundWorkingDirectory() };
+        }
+        if (cwd.empty())
+        {
+            // No shell report and no readable process: the opening directory
+            // is the best remaining guess.
+            cwd = std::move(seededCwd);
+        }
+
+        std::wstring gitRoot;
+        const auto branch = _gitBranchForDirectory(cwd, &gitRoot);
+
+        // Nothing on a suppressed pass: leaving the value untouched is what
+        // keeps a mark from blinking off between probes.
+        std::optional<winrt::hstring> agent;
+        if (probeAgent)
+        {
+            agent = conpty.ForegroundAgent();
+        }
+
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        const auto tabImpl{ page->_GetTabImpl(tab) };
+        if (!tabImpl)
+        {
+            co_return;
+        }
+        tabImpl->DirectoryRefreshInFlight = false;
+
+        auto railNeedsRefresh{ false };
+        if (tabImpl->GitRoot() != gitRoot)
+        {
+            tabImpl->GitRoot(winrt::hstring{ gitRoot });
+            railNeedsRefresh = true;
+        }
+        tabImpl->GitBranch(winrt::hstring{ branch });
+        if (agent)
+        {
+            tabImpl->RailAgent(*agent);
         }
 
         // A project's identity follows the active pane's live working
         // directory. The server discovers/names directories centrally; once
         // its refreshed list contains this cwd, move the tab into that filter
         // and mirror the assignment back to web/mobile clients.
-        if (tabImpl && !cwd.empty())
+        if (!cwd.empty())
         {
-            // The rail groups the "All" view by path, so it needs the live
-            // directory even before the bridge has a project for it.
+            // The rail groups by path, so it needs the live directory even
+            // before the bridge has a project for it.
+            auto directoryMoved{ false };
             if (tabImpl->WorkingDirectory() != cwd)
             {
                 tabImpl->WorkingDirectory(winrt::hstring{ cwd });
-                if (_tabRow)
-                {
-                    winrt::get_self<implementation::TabRowControl>(_tabRow)->NotifyTabDirectoryUpdated();
-                }
+                railNeedsRefresh = true;
+                directoryMoved = true;
             }
 
             // The bridge derives the project list from every session's live
             // directory, so tell it where this pane is now. Deduped inside.
-            if (const auto control{ tabImpl->GetActiveTerminalControl() })
+            if (conpty)
             {
-                if (const auto conn{ control.Connection() })
-                {
-                    if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
-                    {
-                        conpty.UpdateBridgeCwd(winrt::hstring{ cwd });
-                    }
-                }
+                conpty.UpdateBridgeCwd(winrt::hstring{ cwd });
             }
 
             const auto cwdKey{ _projectDirectoryKey(cwd) };
-            const auto project = std::find_if(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& candidate) {
+            const auto project = std::find_if(page->_bridgeProjects.begin(), page->_bridgeProjects.end(), [&](const auto& candidate) {
                 return _projectDirectoryKey(candidate.Cwd) == cwdKey;
             });
 
-            if (project != _bridgeProjects.end() && tab.ProjectId() != project->Id)
+            if (project != page->_bridgeProjects.end() && tab.ProjectId() != project->Id)
             {
-                const auto previousProjectId{ tab.ProjectId() };
                 tabImpl->ProjectId(project->Id);
                 tabImpl->ProjectName(project->Name);
                 tabImpl->ProjectPath(project->Cwd);
 
-                if (const auto control{ tabImpl->GetActiveTerminalControl() })
+                if (conpty)
                 {
-                    if (const auto conn{ control.Connection() })
-                    {
-                        if (const auto conpty{ conn.try_as<TerminalConnection::ConptyConnection>() })
-                        {
-                            conpty.SetBridgeProject(project->Id);
-                        }
-                    }
+                    conpty.SetBridgeProject(project->Id);
                 }
 
-                // If the user is looking at the project this focused tab just
-                // left, follow the tab to its new project. Otherwise just
-                // refresh the filtered rail in place.
-                const auto focused{ _GetFocusedTab() };
-                if (!_activeProjectId.empty() && _activeProjectId == previousProjectId && focused && focused == tab)
-                {
-                    _SelectProject(project->Id, project->Cwd);
-                }
-                else if (_tabRow)
-                {
-                    winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectFilter(_activeProjectId);
-                }
+                // The rail's sections are keyed by directory, not by project
+                // id, so a remapped tab still has to be regrouped.
+                railNeedsRefresh = true;
             }
-        }
 
-        // Nothing to resolve and nothing to clear? Skip the thread hops.
-        if (cwd.empty() && tab.GitBranch().empty())
-        {
-            co_return;
-        }
-
-        const auto weakThis{ get_weak() };
-        const auto dispatcher{ Dispatcher() };
-
-        co_await winrt::resume_background();
-
-        const auto branch = _gitBranchForDirectory(std::move(cwd));
-
-        co_await wil::resume_foreground(dispatcher);
-
-        if (const auto page{ weakThis.get() })
-        {
-            if (const auto tabImpl{ page->_GetTabImpl(tab) })
+            // The strip filters the rail by section. A `cd` that walks the
+            // focused tab out of the section the user is looking at takes the
+            // strip with it, rather than leaving them staring at a rail the
+            // tab has left. Only an actual move counts - a tab merely being
+            // focused must not retarget the filter - and the test itself is
+            // two string compares, no process or filesystem work.
+            if (directoryMoved &&
+                !page->_activeSectionKey.empty() &&
+                !implementation::TabRowControl::SectionContainsTab(page->_activeSectionKey, tab))
             {
-                tabImpl->GitBranch(winrt::hstring{ branch });
+                if (const auto focused{ page->_GetFocusedTab() }; focused && focused == tab)
+                {
+                    page->_SelectSection(implementation::TabRowControl::SectionKeyForTab(tab));
+                }
             }
+        }
+
+        // Hand the tab's repository and branch to the rail's shared registry
+        // and let it re-decide what its row prints. The rail says a branch once
+        // per repository, on the section header, so a `git checkout` in one tab
+        // changes what every other tab in that checkout shows: fan the verdict
+        // out, and rebuild so the headers pick it up too.
+        if (tabImpl->RefreshRailSemantics())
+        {
+            for (const auto& sibling : page->_tabs)
+            {
+                if (const auto siblingImpl{ page->_GetTabImpl(sibling) }; siblingImpl && siblingImpl != tabImpl)
+                {
+                    siblingImpl->RefreshRailSemantics();
+                }
+            }
+            railNeedsRefresh = true;
+        }
+
+        if (railNeedsRefresh && page->_tabRow)
+        {
+            winrt::get_self<implementation::TabRowControl>(page->_tabRow)->NotifyTabDirectoryUpdated();
         }
     }
 
@@ -2568,36 +3290,34 @@ namespace winrt::TerminalApp::implementation
             // for the next git-branch timer tick.
             for (const auto& tab : page->_tabs)
             {
-                page->_RefreshTabGitBranch(tab);
+                page->_RefreshTabDirectory(tab);
             }
+            // Names and order for the rail's sections. Which sections exist is
+            // not the bridge's call any more - a saved project with no live
+            // terminal simply has no heading and therefore no chip - so a
+            // project vanishing server-side cannot invalidate the selection.
             page->_ApplyProjectNames();
-
-            // If the active project disappeared (deleted remotely), fall back
-            // to "All"; _SelectProject rebuilds the strip either way.
-            auto activeStillExists = page->_activeProjectId.empty();
-            for (const auto& project : page->_bridgeProjects)
-            {
-                if (project.Id == page->_activeProjectId)
-                {
-                    activeStillExists = true;
-                    break;
-                }
-            }
-
-            if (activeStillExists)
-            {
-                page->_RebuildProjectTabs();
-            }
-            else
-            {
-                page->_SelectProject({}, {});
-            }
+            page->_UpdateActiveSectionTargets();
+            page->_RebuildProjectTabs();
         }
     }
 
     // Method Description:
-    // - Rebuilds the horizontal project tab strip: "All", one tab per
-    //   project (with an inline close button), and a trailing "+".
+    // - Rebuilds the horizontal strip: "All", then one chip per top-level
+    //   heading in the rail below, then a hairline and the strip's own quiet
+    //   actions.
+    // - The chips come straight from TabRowControl::RailSections(), so the
+    //   strip and the rail cannot disagree: a chip exists exactly when a
+    //   heading does, wears the heading's name, and mirrors its tab count.
+    //   The count is the point - reading "Projects 3" above and "Projects 3"
+    //   below is what makes the two lists legible as one thing.
+    // - Every metric, brush and template it uses is a resource declared in
+    //   TerminalPage.xaml, which derives them from the rail's own token set,
+    //   so nothing here hand-writes a size or a colour. The active chip wears
+    //   the "on" mark the rail gives a checked toggle - a neutral fill plus
+    //   primary foreground, SemiBold on top - and deliberately not an accent
+    //   fill: the accent means "the tab you are looking at", which is the
+    //   rail's selection bar, and a second accent here would compete.
     void TerminalPage::_RebuildProjectTabs()
     {
         const auto panel{ ProjectTabPanel() };
@@ -2608,83 +3328,214 @@ namespace winrt::TerminalApp::implementation
 
         panel.Children().Clear();
 
-        WUX::Style accentStyle{ nullptr };
-        try
-        {
-            accentStyle = Application::Current().Resources().Lookup(winrt::box_value(L"AccentButtonStyle")).try_as<WUX::Style>();
-        }
-        CATCH_LOG();
+        // A missing key must never take the strip down with it, so each lookup
+        // degrades to "unstyled" rather than throwing.
+        const auto lookupStyle = [this](const wchar_t* key) -> WUX::Style {
+            try
+            {
+                return Resources().Lookup(winrt::box_value(key)).try_as<WUX::Style>();
+            }
+            CATCH_LOG();
+            return nullptr;
+        };
+
+        const auto chipStyle{ lookupStyle(L"ProjectStripChipStyle") };
+        const auto activeChipStyle{ lookupStyle(L"ProjectStripChipActiveStyle") };
+        const auto scopeChipStyle{ lookupStyle(L"ProjectStripScopeChipStyle") };
+        const auto scopeChipActiveStyle{ lookupStyle(L"ProjectStripScopeChipActiveStyle") };
+        const auto iconButtonStyle{ lookupStyle(L"ProjectStripIconButtonStyle") };
+        const auto closeButtonStyle{ lookupStyle(L"ProjectStripCloseButtonStyle") };
+        const auto labelStyle{ lookupStyle(L"ProjectStripLabelStyle") };
+        const auto countStyle{ lookupStyle(L"ProjectStripCountStyle") };
+        const auto dividerStyle{ lookupStyle(L"ProjectStripDividerStyle") };
 
         const auto weakThis{ get_weak() };
+        const auto sections{ _railSectionsOf(_tabRow) };
 
-        auto addProjectTab = [&](const winrt::hstring& label, const winrt::hstring& id, const winrt::hstring& cwd, const bool closable) {
-            Button tabButton;
-            tabButton.Padding(ThicknessHelper::FromLengths(10, 2, closable ? 4 : 10, 2));
-            if (id == _activeProjectId && accentStyle)
+        const auto addDivider = [&]() {
+            Border divider;
+            if (dividerStyle)
             {
-                tabButton.Style(accentStyle);
+                divider.Style(dividerStyle);
             }
+            panel.Children().Append(divider);
+        };
+
+        // Every chip in strip order. The keyboard walks these as one tablist:
+        // the active chip is the strip's only tab stop and the arrows move
+        // between chips, so a dozen open projects don't cost a dozen Tab
+        // presses to step past.
+        std::vector<Button> chips;
+
+        auto addChip = [&](const winrt::hstring& label,
+                           const winrt::hstring& key,
+                           const winrt::hstring& directory,
+                           const uint32_t count,
+                           const bool scope) {
+            const auto active{ key == _activeSectionKey };
+            Button tabButton;
+            const auto style{ scope ? (active ? scopeChipActiveStyle : scopeChipStyle) : (active ? activeChipStyle : chipStyle) };
+            if (style)
+            {
+                tabButton.Style(style);
+            }
+            // The section key travels with the chip so the drop handler can
+            // read the strip's real order back off the panel instead of
+            // assuming its child indices line up with some other list.
+            tabButton.Tag(winrt::box_value(key));
 
             StackPanel content;
             content.Orientation(Orientation::Horizontal);
-            content.Spacing(6);
 
             TextBlock text;
             text.Text(label);
-            text.VerticalAlignment(VerticalAlignment::Center);
+            if (labelStyle)
+            {
+                text.Style(labelStyle);
+            }
             content.Children().Append(text);
 
-            if (closable)
+            // The heading's own count, mirrored. Raw to automation: the number
+            // is already part of the chip's name, and hearing it twice is
+            // exactly the kind of repetition the rail spent a pass removing.
+            TextBlock countText;
+            countText.Text(winrt::to_hstring(count));
+            if (countStyle)
+            {
+                countText.Style(countStyle);
+            }
+            Automation::AutomationProperties::SetAccessibilityView(countText, Automation::Peers::AccessibilityView::Raw);
+            content.Children().Append(countText);
+
+            if (!scope)
             {
                 Button closeButton;
-                FontIcon closeIcon;
-                closeIcon.Glyph(L"\xE711"); // Cancel
-                closeIcon.FontSize(10);
-                closeIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-                closeButton.Content(closeIcon);
-                closeButton.Padding(ThicknessHelper::FromLengths(4, 2, 4, 2));
-                closeButton.Background(Media::SolidColorBrush{ Colors::Transparent() });
-                closeButton.BorderThickness(ThicknessHelper::FromUniformLength(0));
-                Automation::AutomationProperties::SetName(closeButton, L"Close project " + label);
-                closeButton.Click([weakThis, id, label](auto&&, auto&&) {
+                if (closeButtonStyle)
+                {
+                    closeButton.Style(closeButtonStyle);
+                }
+                closeButton.Content(winrt::box_value(L"\xE711")); // Cancel
+
+                // Row actions in the rail appear on hover or on keyboard focus
+                // and are invisible otherwise; a chip's close button reads the
+                // same way. Its slot stays reserved either way, so the strip
+                // never reflows out from under the pointer.
+                closeButton.Opacity(0.0);
+                // Not a tab stop: the strip is one stop, and the same action
+                // sits on the chip's context menu and on its Delete key.
+                closeButton.IsTabStop(false);
+                Automation::AutomationProperties::SetName(closeButton, L"Close " + label);
+                ToolTipService::SetToolTip(closeButton, winrt::box_value(L"Close project"));
+                closeButton.Click([weakThis, key, label, directory](auto&&, auto&&) {
                     if (const auto page{ weakThis.get() })
                     {
-                        page->_CloseProjectRequested(id, label);
+                        page->_CloseSectionRequested(key, label, directory);
                     }
                 });
                 content.Children().Append(closeButton);
+
+                const auto weakChip{ winrt::make_weak(tabButton) };
+                const auto weakClose{ winrt::make_weak(closeButton) };
+                const auto hovered{ std::make_shared<bool>(false) };
+                const auto focused{ std::make_shared<bool>(false) };
+                const auto revealClose = [weakClose, hovered, focused]() {
+                    if (const auto button{ weakClose.get() })
+                    {
+                        button.Opacity((*hovered || *focused) ? 1.0 : 0.0);
+                    }
+                };
+
+                tabButton.PointerEntered([hovered, revealClose](auto&&, auto&&) {
+                    *hovered = true;
+                    revealClose();
+                });
+                tabButton.PointerExited([weakChip, hovered, revealClose](auto&&, const WUX::Input::PointerRoutedEventArgs& e) {
+                    // The close button's own exit bubbles up here too, and
+                    // acting on it would hide the button the instant the
+                    // pointer reached it. Only a pointer that has actually
+                    // left the chip counts.
+                    if (const auto chip{ weakChip.get() })
+                    {
+                        const auto position{ e.GetCurrentPoint(chip).Position() };
+                        if (position.X >= 0 && position.Y >= 0 &&
+                            position.X <= chip.ActualWidth() && position.Y <= chip.ActualHeight())
+                        {
+                            return;
+                        }
+                    }
+                    *hovered = false;
+                    revealClose();
+                });
+                tabButton.GotFocus([focused, revealClose](auto&&, auto&&) {
+                    *focused = true;
+                    revealClose();
+                });
+                tabButton.LostFocus([focused, revealClose](auto&&, auto&&) {
+                    *focused = false;
+                    revealClose();
+                });
             }
 
             tabButton.Content(content);
-            if (!cwd.empty())
+
+            // The full directory belongs in the tooltip, not on the chip: the
+            // strip has to stay one quiet line however deep the paths go.
+            const winrt::hstring tooltip{ scope ? winrt::hstring{ L"Every tab in this window" } :
+                                                 (directory.empty() ? winrt::hstring{ L"Tabs with no working directory" } : directory) };
+            ToolTipService::SetToolTip(tabButton, winrt::box_value(tooltip));
+            Automation::AutomationProperties::SetName(tabButton, label + L", " + winrt::to_hstring(count) + L" tabs");
+            Automation::AutomationProperties::SetLocalizedControlType(tabButton, L"filter");
+            Automation::AutomationProperties::SetFullDescription(tabButton, tooltip);
+            if (active)
             {
-                ToolTipService::SetToolTip(tabButton, winrt::box_value(cwd));
+                Automation::AutomationProperties::SetItemStatus(tabButton, L"Selected");
             }
-            Automation::AutomationProperties::SetName(tabButton, label);
-            tabButton.Click([weakThis, id, cwd](auto&&, auto&&) {
-                if (const auto page{ weakThis.get() })
+
+            tabButton.Click([weakThis, key](auto&&, auto&&) {
+                const auto page{ weakThis.get() };
+                if (!page)
                 {
-                    page->_SelectProject(id, cwd);
+                    return;
+                }
+                // Selecting rebuilds the strip, which releases this very chip
+                // and the captures that came with it; keep the key on the
+                // stack for the rest of the handler.
+                const auto sectionKey{ key };
+                if (!sectionKey.empty() && sectionKey == page->_activeSectionKey)
+                {
+                    // Clicking the chip you are already inside is the way back
+                    // out. Clearing to "All" and scrolling that heading into
+                    // view means the round trip never loses your place in the
+                    // full index.
+                    page->_SelectSection({});
+                    if (page->_tabRow)
+                    {
+                        winrt::get_self<implementation::TabRowControl>(page->_tabRow)->ScrollSectionIntoView(sectionKey);
+                    }
+                }
+                else
+                {
+                    page->_SelectSection(sectionKey);
                 }
             });
 
-            if (closable)
+            if (!scope)
             {
-                // Right-click: rename (persisted by the bridge per directory)
-                // or close the project.
+                // Right-click: rename (remembered per directory) or close.
                 MenuFlyout contextFlyout;
                 MenuFlyoutItem renameItem;
                 renameItem.Text(L"Rename project...");
                 FontIcon renameIcon;
                 renameIcon.Glyph(L"\xE8AC"); // Rename
                 renameItem.Icon(renameIcon);
+                renameItem.IsEnabled(!directory.empty());
                 const auto weakButton{ winrt::make_weak(tabButton) };
-                renameItem.Click([weakThis, weakButton, id, label](auto&&, auto&&) {
+                renameItem.Click([weakThis, weakButton, directory, label](auto&&, auto&&) {
                     const auto page{ weakThis.get() };
                     const auto button{ weakButton.get() };
                     if (page && button)
                     {
-                        page->_ShowRenameProjectFlyout(button, id, label);
+                        page->_ShowRenameSectionFlyout(button, directory, label);
                     }
                 });
                 contextFlyout.Items().Append(renameItem);
@@ -2694,125 +3545,361 @@ namespace winrt::TerminalApp::implementation
                 FontIcon closeItemIcon;
                 closeItemIcon.Glyph(L"\xE711"); // Cancel
                 closeItem.Icon(closeItemIcon);
-                closeItem.Click([weakThis, id, label](auto&&, auto&&) {
+                closeItem.Click([weakThis, key, label, directory](auto&&, auto&&) {
                     if (const auto page{ weakThis.get() })
                     {
-                        page->_CloseProjectRequested(id, label);
+                        page->_CloseSectionRequested(key, label, directory);
                     }
                 });
                 contextFlyout.Items().Append(closeItem);
                 tabButton.ContextFlyout(contextFlyout);
 
                 // Double-click renames too.
-                tabButton.DoubleTapped([weakThis, weakButton, id, label](auto&&, auto&&) {
+                tabButton.DoubleTapped([weakThis, weakButton, directory, label](auto&&, auto&&) {
                     const auto page{ weakThis.get() };
                     const auto button{ weakButton.get() };
                     if (page && button)
                     {
-                        page->_ShowRenameProjectFlyout(button, id, label);
+                        page->_ShowRenameSectionFlyout(button, directory, label);
                     }
                 });
 
-                // Project tabs can be dragged to reorder; the panel's Drop
-                // handler (wired in Create()) computes the target position.
+                // Chips can be dragged to reorder; the panel's Drop handler
+                // (wired in Create()) computes the target position.
                 tabButton.CanDrag(true);
-                tabButton.DragStarting([id](const WUX::UIElement&, const WUX::DragStartingEventArgs& args) {
-                    args.Data().SetText(id);
+                tabButton.DragStarting([key](const WUX::UIElement&, const WUX::DragStartingEventArgs& args) {
+                    args.Data().SetText(key);
                     args.Data().RequestedOperation(DataPackageOperation::Move);
                 });
             }
 
+            chips.push_back(tabButton);
             panel.Children().Append(tabButton);
         };
 
-        addProjectTab(L"All", {}, {}, false);
-        for (const auto& project : _bridgeProjects)
+        // "All" is a scope over the sections, not a peer of them: it takes a
+        // quieter chip and stands on its own side of a hairline, so the strip
+        // reads as "scope | the things in it" rather than as one flat row in
+        // which the first entry happens to mean something different.
+        uint32_t total{ 0 };
+        for (const auto& section : sections)
         {
-            addProjectTab(project.Name, project.Id, project.Cwd, true);
+            total += section.Count;
+        }
+        addChip(L"All", {}, {}, total, true);
+        if (!sections.empty())
+        {
+            addDivider();
         }
 
-        Button addButton;
-        FontIcon addIcon;
-        addIcon.Glyph(L"\xE710"); // Add
-        addIcon.FontSize(12);
-        addIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        addButton.Content(addIcon);
-        addButton.Padding(ThicknessHelper::FromLengths(8, 2, 8, 2));
-        ToolTipService::SetToolTip(addButton, winrt::box_value(L"New Project"));
-        Automation::AutomationProperties::SetName(addButton, L"New Project");
-        addButton.Click([weakThis](auto&&, auto&&) {
+        for (const auto& section : sections)
+        {
+            addChip(section.Name, section.Key, section.Directory, section.Count, false);
+        }
+
+        // One tab stop, arrows between chips - the standard tablist. The stop
+        // is the active chip, so Tab always lands on where you already are.
+        const auto weakChips{ std::make_shared<std::vector<winrt::weak_ref<Button>>>() };
+        for (const auto& chip : chips)
+        {
+            weakChips->push_back(winrt::make_weak(chip));
+        }
+
+        auto anyTabStop{ false };
+        for (uint32_t i = 0; i < chips.size(); ++i)
+        {
+            const auto& chip{ chips[i] };
+            const auto isActiveStop{ winrt::unbox_value_or<winrt::hstring>(chip.Tag(), winrt::hstring{}) == _activeSectionKey };
+            chip.IsTabStop(isActiveStop);
+            anyTabStop = anyTabStop || isActiveStop;
+            Automation::AutomationProperties::SetPositionInSet(chip, gsl::narrow_cast<int32_t>(i) + 1);
+            Automation::AutomationProperties::SetSizeOfSet(chip, gsl::narrow_cast<int32_t>(chips.size()));
+
+            const size_t index{ i };
+            chip.KeyDown([weakThis, weakChips, index](const IInspectable& sender, const WUX::Input::KeyRoutedEventArgs& e) {
+                const auto count{ weakChips->size() };
+                if (count == 0)
+                {
+                    return;
+                }
+
+                auto target{ count };
+                switch (e.Key())
+                {
+                case VirtualKey::Left:
+                    target = index == 0 ? count - 1 : index - 1;
+                    break;
+                case VirtualKey::Right:
+                    target = index + 1 >= count ? 0 : index + 1;
+                    break;
+                case VirtualKey::Home:
+                    target = 0;
+                    break;
+                case VirtualKey::End:
+                    target = count - 1;
+                    break;
+                case VirtualKey::Delete:
+                {
+                    // Closing the focused section without reaching for a
+                    // button that stays invisible until it is hovered.
+                    const auto page{ weakThis.get() };
+                    const auto source{ sender.try_as<Button>() };
+                    if (page && source)
+                    {
+                        const auto sectionKey{ winrt::unbox_value_or<winrt::hstring>(source.Tag(), winrt::hstring{}) };
+                        if (!sectionKey.empty())
+                        {
+                            e.Handled(true);
+                            page->_CloseSectionForKey(sectionKey);
+                        }
+                    }
+                    return;
+                }
+                case VirtualKey::F2:
+                {
+                    const auto page{ weakThis.get() };
+                    const auto source{ sender.try_as<Button>() };
+                    if (page && source)
+                    {
+                        const auto sectionKey{ winrt::unbox_value_or<winrt::hstring>(source.Tag(), winrt::hstring{}) };
+                        if (!sectionKey.empty())
+                        {
+                            e.Handled(true);
+                            page->_RenameSectionForKey(source, sectionKey);
+                        }
+                    }
+                    return;
+                }
+                default:
+                    return;
+                }
+
+                if (target < count)
+                {
+                    if (const auto next{ (*weakChips)[target].get() })
+                    {
+                        e.Handled(true);
+                        // A roving tab stop, and not only for tab order:
+                        // IsTabStop is also UWP's focusability gate, so the
+                        // chip being arrowed to has to become the stop before
+                        // it can take focus. Moving the stop with the focus is
+                        // what the tablist pattern wants anyway - Tab comes
+                        // back to wherever the arrows left off.
+                        for (const auto& weak : *weakChips)
+                        {
+                            if (const auto other{ weak.get() })
+                            {
+                                other.IsTabStop(other == next);
+                            }
+                        }
+                        next.Focus(FocusState::Keyboard);
+                    }
+                }
+            });
+        }
+        if (!anyTabStop && !chips.empty())
+        {
+            // The filter points at a section that is momentarily gone; the
+            // strip must still be reachable from the keyboard.
+            chips.front().IsTabStop(true);
+        }
+
+        // A hairline separates the sections from the strip's own actions, so
+        // "+" and the globe read as chrome rather than as two more projects.
+        addDivider();
+
+        const auto addStripAction = [&](const wchar_t* glyph, const winrt::hstring& name, const WUX::RoutedEventHandler& onClick) {
+            Button button;
+            if (iconButtonStyle)
+            {
+                button.Style(iconButtonStyle);
+            }
+            button.Content(winrt::box_value(glyph));
+            ToolTipService::SetToolTip(button, winrt::box_value(name));
+            Automation::AutomationProperties::SetName(button, name);
+            button.Click(onClick);
+            panel.Children().Append(button);
+        };
+
+        // Add.
+        addStripAction(L"\xE710", L"New Project", [weakThis](auto&&, auto&&) {
             if (const auto page{ weakThis.get() })
             {
                 page->_ShowNewProjectTip();
             }
         });
-        panel.Children().Append(addButton);
 
-        // Globe button: open the terminal-web view in the default browser.
-        Button webButton;
-        FontIcon webIcon;
-        webIcon.Glyph(L"\xE774"); // Globe
-        webIcon.FontSize(12);
-        webIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        webButton.Content(webIcon);
-        webButton.Padding(ThicknessHelper::FromLengths(8, 2, 8, 2));
-        ToolTipService::SetToolTip(webButton, winrt::box_value(L"Open web view"));
-        Automation::AutomationProperties::SetName(webButton, L"Open web view");
-        webButton.Click([](auto&&, auto&&) {
+        // Globe: open the terminal-web view in the default browser.
+        addStripAction(L"\xE774", L"Open web view", [](auto&&, auto&&) {
             const auto [host, port] = _projectServerEndpoint();
             std::ignore = Launcher::LaunchUriAsync(Windows::Foundation::Uri{ L"http://" + host + L":" + std::to_wstring(port) + L"/" });
         });
-        panel.Children().Append(webButton);
     }
 
     // Method Description:
-    // - Makes the given project the active one: new terminals start in its
-    //   directory and the vertical rail filters down to its tabs.
-    void TerminalPage::_SelectProject(const winrt::hstring& projectId, const winrt::hstring& projectCwd)
+    // - The keyboard shortcuts on a focused chip need the section's name and
+    //   directory, which only the rail knows. Look them up at the moment the
+    //   key is pressed rather than capturing a copy a rebuild would have
+    //   staled.
+    void TerminalPage::_CloseSectionForKey(const winrt::hstring& sectionKey)
     {
-        _activeProjectId = projectId;
-        _activeProjectCwd = projectCwd;
+        for (const auto& section : _railSectionsOf(_tabRow))
+        {
+            if (section.Key == sectionKey)
+            {
+                _CloseSectionRequested(sectionKey, section.Name, section.Directory);
+                return;
+            }
+        }
+    }
+
+    void TerminalPage::_RenameSectionForKey(const FrameworkElement& anchor, const winrt::hstring& sectionKey)
+    {
+        for (const auto& section : _railSectionsOf(_tabRow))
+        {
+            if (section.Key == sectionKey && !section.Directory.empty())
+            {
+                _ShowRenameSectionFlyout(anchor, section.Directory, section.Name);
+                return;
+            }
+        }
+    }
+
+    // Method Description:
+    // - The rail's sections are the strip's contents, so a change to them -
+    //   a tab moved directory, the last tab under a heading closed - is what
+    //   rebuilds the strip. Nothing else may add or remove a chip.
+    void TerminalPage::_OnRailSectionsChanged()
+    {
+        if (!_activeSectionKey.empty())
+        {
+            auto stillExists{ false };
+            for (const auto& section : _railSectionsOf(_tabRow))
+            {
+                if (section.Key == _activeSectionKey)
+                {
+                    stillExists = true;
+                    break;
+                }
+            }
+            if (!stillExists)
+            {
+                // The last terminal under that heading closed, so the heading
+                // is gone and its chip goes with it: fall back to the whole
+                // index rather than to a filter that can match nothing.
+                _SelectSection({});
+                return;
+            }
+        }
+
+        _UpdateActiveSectionTargets();
+        _RebuildProjectTabs();
+    }
+
+    // Method Description:
+    // - Re-derives what the active section means downstream: the directory
+    //   new terminals start in, and the terminal-web project id (when one
+    //   sits behind that directory) that new tabs are stamped with so remote
+    //   clients group them. A section with no project behind it leaves the id
+    //   empty, which is exactly what an untagged tab wants.
+    void TerminalPage::_UpdateActiveSectionTargets()
+    {
+        winrt::hstring directory;
+        if (!_activeSectionKey.empty())
+        {
+            for (const auto& section : _railSectionsOf(_tabRow))
+            {
+                if (section.Key == _activeSectionKey)
+                {
+                    directory = section.Directory;
+                    break;
+                }
+            }
+        }
+
+        _activeProjectCwd = directory;
+        _activeProjectId = {};
+        if (directory.empty())
+        {
+            return;
+        }
+
+        const auto key{ _projectDirectoryKey(directory) };
+        for (const auto& project : _bridgeProjects)
+        {
+            if (_projectDirectoryKey(project.Cwd) == key)
+            {
+                _activeProjectId = project.Id;
+                return;
+            }
+        }
+    }
+
+    // Method Description:
+    // - Makes one rail section the active filter: the rail narrows to it (its
+    //   own heading and any subheading nested under it included) and new
+    //   terminals start in its directory. An empty key is "All".
+    // - `sectionDirectory` is only for a section the rail has not seen yet -
+    //   a project just created in a directory with no terminal in it - which
+    //   is also the one case that opens a terminal of its own.
+    void TerminalPage::_SelectSection(const winrt::hstring& sectionKey, const winrt::hstring& sectionDirectory)
+    {
+        _activeSectionKey = sectionKey;
+        _UpdateActiveSectionTargets();
+        if (_activeProjectCwd.empty() && !sectionDirectory.empty())
+        {
+            _activeProjectCwd = sectionDirectory;
+        }
 
         if (_tabRow)
         {
-            winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectFilter(projectId);
+            winrt::get_self<implementation::TabRowControl>(_tabRow)->SetSectionFilter(sectionKey);
         }
 
         _RebuildProjectTabs();
 
-        // If the focused tab isn't part of the newly selected project, move
-        // focus to the project's first tab. A newly created project has no
-        // tab yet, so selecting it also launches one in its directory.
-        if (!projectId.empty())
+        // Filtering the rail can retire the very section being selected (its
+        // last tab closed in the same beat), which clears the selection from
+        // under us; don't then act on a section that is gone.
+        if (sectionKey.empty() || _activeSectionKey != sectionKey)
         {
-            const auto focused{ _GetFocusedTab() };
-            auto foundProjectTab = false;
-            for (const auto& tab : _tabs)
-            {
-                if (tab.ProjectId() == projectId)
-                {
-                    foundProjectTab = true;
-                    if (!focused || focused.ProjectId() != projectId)
-                    {
-                        _SetFocusedTab(tab);
-                    }
-                    break;
-                }
-            }
+            return;
+        }
 
-            if (!foundProjectTab && !projectCwd.empty())
+        // Keep the focused tab inside the section the user is now looking at.
+        if (const auto focused{ _GetFocusedTab() }; focused && implementation::TabRowControl::SectionContainsTab(sectionKey, focused))
+        {
+            return;
+        }
+        for (const auto& tab : _tabs)
+        {
+            if (implementation::TabRowControl::SectionContainsTab(sectionKey, tab))
             {
-                NewTerminalArgs args;
-                args.StartingDirectory(projectCwd);
-                _OpenNewTerminalViaDropdown(args);
+                _SetFocusedTab(tab);
+                return;
             }
+        }
+
+        // A brand-new project has no terminal in it yet, so selecting it
+        // launches one. Every section the rail publishes already has a tab,
+        // so this can only fire for that case.
+        if (!sectionDirectory.empty())
+        {
+            NewTerminalArgs args;
+            args.StartingDirectory(sectionDirectory);
+            _OpenNewTerminalViaDropdown(args);
         }
     }
 
     // Method Description:
     // - Refreshes every tab's project display name from the current project
-    //   list and hands the strip order to the rail so the "All" view groups
-    //   tabs by project.
+    //   list, then hands the rail the two things the bridge still owns about
+    //   a section: what a directory is *called* and what order the strip
+    //   shows directories in.
+    // - Membership is deliberately not among them. Which sections exist comes
+    //   from the live tabs, so a saved project with no terminal open in it
+    //   simply has no heading and therefore no chip, and an offline bridge
+    //   costs names and ordering rather than the whole strip.
     void TerminalPage::_ApplyProjectNames()
     {
         for (const auto& tab : _tabs)
@@ -2839,22 +3926,59 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        if (_tabRow)
+        if (!_tabRow)
         {
-            std::vector<winrt::hstring> order;
-            order.reserve(_bridgeProjects.size());
-            for (const auto& project : _bridgeProjects)
-            {
-                order.push_back(project.Id);
-            }
-            winrt::get_self<implementation::TabRowControl>(_tabRow)->SetProjectOrder(std::move(order));
+            return;
         }
+
+        // Names, keyed by directory the way the rail keys its sections.
+        std::map<std::wstring, winrt::hstring> names;
+        for (const auto& project : _bridgeProjects)
+        {
+            auto key{ implementation::TabRowControl::NormalizeDirectory(project.Cwd) };
+            if (!key.empty() && !project.Name.empty())
+            {
+                names.emplace(std::move(key), project.Name);
+            }
+        }
+
+        // A rename made here while the bridge was unreachable outranks the
+        // bridge's own name - and retires itself the moment the bridge comes
+        // back agreeing with it, so it can never shadow a later rename made
+        // from the web.
+        std::erase_if(_sectionNameOverrides, [&](const auto& entry) {
+            const auto found{ names.find(entry.first) };
+            return found != names.end() && found->second == entry.second;
+        });
+        for (const auto& [key, name] : _sectionNameOverrides)
+        {
+            names[key] = name;
+        }
+
+        // Order: whatever the user last dragged the strip into, with the
+        // bridge's project order filling in every directory that drag never
+        // named. Sections outside both sort by name after the ranked ones.
+        auto order{ _sectionOrder };
+        for (const auto& project : _bridgeProjects)
+        {
+            auto key{ implementation::TabRowControl::NormalizeDirectory(project.Cwd) };
+            if (!key.empty() && std::find(order.begin(), order.end(), key) == order.end())
+            {
+                order.push_back(std::move(key));
+            }
+        }
+
+        const auto rail{ winrt::get_self<implementation::TabRowControl>(_tabRow) };
+        rail->SetSectionNames(std::move(names));
+        rail->SetSectionOrder(std::move(order));
     }
 
     // Method Description:
-    // - Opens a small flyout with a text box anchored to a project tab.
-    //   Enter (or losing focus with a changed name) renames the project.
-    void TerminalPage::_ShowRenameProjectFlyout(const FrameworkElement& anchor, const winrt::hstring& projectId, const winrt::hstring& currentName)
+    // - Opens a small flyout with a text box anchored to a chip. Enter (or
+    //   losing focus with a changed name) renames the *directory* - which is
+    //   what a section is - rather than a project id, so a heading with no
+    //   saved project behind it can be renamed too.
+    void TerminalPage::_ShowRenameSectionFlyout(const FrameworkElement& anchor, const winrt::hstring& directory, const winrt::hstring& currentName)
     {
         Flyout flyout;
         TextBox nameBox;
@@ -2866,7 +3990,7 @@ namespace winrt::TerminalApp::implementation
         const auto weakThis{ get_weak() };
         // Weak: the flyout owns the box, which owns these handlers.
         const auto weakFlyout{ winrt::make_weak(flyout) };
-        auto commit = [weakThis, projectId, currentName, weakFlyout](const TextBox& box) {
+        auto commit = [weakThis, directory, currentName, weakFlyout](const TextBox& box) {
             const auto newName{ box.Text() };
             if (const auto flyout{ weakFlyout.get() })
             {
@@ -2876,7 +4000,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (!newName.empty() && newName != currentName)
                 {
-                    page->_RenameProject(projectId, newName);
+                    page->_RenameSection(directory, newName);
                 }
             }
         };
@@ -2911,24 +4035,66 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Method Description:
-    // - Renames a project on the bridge (PATCH /api/projects/:id) and applies
-    //   the new name locally without waiting for the next poll.
-    safe_void_coroutine TerminalPage::_RenameProject(winrt::hstring projectId, winrt::hstring newName)
+    // - Renames a rail section, i.e. a directory.
+    // - Applied here first, then pushed to the bridge, because the bridge is
+    //   often the thing that is down: a rename that visibly does nothing is
+    //   worse than one that is only remembered for this session. The local
+    //   override retires itself in _ApplyProjectNames once the bridge reports
+    //   the same name.
+    // - A directory the bridge has no saved project for is renamed by
+    //   *creating* one (POST /api/projects) - that is how the bridge
+    //   remembers a name per directory, and the Rust host reuses the
+    //   directory's automatic id, so nothing is duplicated. It does not make
+    //   the section any more or less real: membership still comes from the
+    //   live tabs, so a saved project whose last terminal closes loses its
+    //   chip exactly like any other section.
+    safe_void_coroutine TerminalPage::_RenameSection(winrt::hstring directory, winrt::hstring newName)
     {
-        const auto weakThis{ get_weak() };
-        const auto dispatcher{ Dispatcher() };
+        if (directory.empty() || newName.empty())
+        {
+            co_return;
+        }
+
+        _sectionNameOverrides[implementation::TabRowControl::NormalizeDirectory(directory)] = newName;
+        _ApplyProjectNames();
+
+        winrt::hstring projectId;
+        const auto directoryKey{ _projectDirectoryKey(directory) };
+        for (const auto& project : _bridgeProjects)
+        {
+            if (_projectDirectoryKey(project.Cwd) == directoryKey)
+            {
+                projectId = project.Id;
+                break;
+            }
+        }
 
         WDJ::JsonObject body;
         body.SetNamedValue(L"name", WDJ::JsonValue::CreateStringValue(newName));
+        std::wstring path{ L"/api/projects" };
+        if (projectId.empty())
+        {
+            body.SetNamedValue(L"cwd", WDJ::JsonValue::CreateStringValue(directory));
+        }
+        else
+        {
+            path += L"/" + std::wstring{ projectId };
+        }
+        const auto* const verb{ projectId.empty() ? L"POST" : L"PATCH" };
         const auto payload{ winrt::to_string(body.Stringify()) };
 
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
         co_await winrt::resume_background();
-        const auto response{ _projectServerRequest(L"PATCH", L"/api/projects/" + std::wstring{ projectId }, payload) };
+        const auto response{ _projectServerRequest(verb, path, payload) };
         co_await wil::resume_foreground(dispatcher);
 
         const auto page{ weakThis.get() };
         if (!page || !response)
         {
+            // Offline: the local override above is the whole of the rename,
+            // and it holds until the bridge is reachable again.
             co_return;
         }
 
@@ -2941,7 +4107,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
         page->_ApplyProjectNames();
-        page->_RebuildProjectTabs();
+        page->_RefreshBridgeProjects();
     }
 
     // Method Description:
@@ -2952,28 +4118,31 @@ namespace winrt::TerminalApp::implementation
         _orchestratorPaneOpen = !_orchestratorPaneOpen;
         OrchestratorPane().Visibility(_orchestratorPaneOpen ? Visibility::Visible : Visibility::Collapsed);
 
-        // Accent the right-edge toggle while the panel is open.
+        // Mark the right-edge toggle while the panel is open. The strip has
+        // one rule - a filled, hairlined chip means "on" - and this is the
+        // same marking the active project wears. Accent stays reserved for
+        // the rail's selected tab.
         try
         {
-            const auto accentStyle = Application::Current().Resources().Lookup(winrt::box_value(L"AccentButtonStyle")).try_as<WUX::Style>();
-            if (_orchestratorPaneOpen && accentStyle)
+            const auto key = _orchestratorPaneOpen ? L"ProjectStripIconButtonActiveStyle" : L"ProjectStripIconButtonStyle";
+            if (const auto style = Resources().Lookup(winrt::box_value(key)).try_as<WUX::Style>())
             {
-                OrchestratorToggleButton().Style(accentStyle);
-            }
-            else
-            {
-                OrchestratorToggleButton().Style(nullptr);
+                OrchestratorToggleButton().Style(style);
             }
         }
         CATCH_LOG();
 
         if (_orchestratorPaneOpen)
         {
+            // Reload the whole transcript on open: other clients may have
+            // talked to the orchestrator while the pane was closed.
+            _orchestratorNeedsFullRefresh = true;
             _RefreshOrchestratorStatus();
-            if (_orchestratorControl)
-            {
-                _orchestratorControl.Focus(FocusState::Programmatic);
-            }
+            OrchestratorComposer().Focus(FocusState::Programmatic);
+        }
+        else if (_orchestratorPollTimer)
+        {
+            _orchestratorPollTimer.Stop();
         }
     }
 
@@ -3003,6 +4172,7 @@ namespace winrt::TerminalApp::implementation
                                                          const Windows::UI::Xaml::Input::PointerRoutedEventArgs&)
     {
         _SetVerticalTabResizeCursor(true);
+        OrchestratorResizeGrip().Opacity(_resizingOrchestratorPane ? ResizeHandleDragOpacity : ResizeHandleHoverOpacity);
     }
 
     void TerminalPage::_OrchestratorResizePointerExited(const IInspectable&,
@@ -3011,6 +4181,7 @@ namespace winrt::TerminalApp::implementation
         if (!_resizingOrchestratorPane)
         {
             _SetVerticalTabResizeCursor(false);
+            OrchestratorResizeGrip().Opacity(ResizeHandleRestOpacity);
         }
     }
 
@@ -3029,6 +4200,7 @@ namespace winrt::TerminalApp::implementation
         _orchestratorResizeStartWidth = OrchestratorColumn().ActualWidth();
         _resizingOrchestratorPane = true;
         _SetVerticalTabResizeCursor(true);
+        OrchestratorResizeGrip().Opacity(ResizeHandleDragOpacity);
         e.Handled(true);
     }
 
@@ -3037,6 +4209,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_resizingOrchestratorPane)
         {
+            OrchestratorResizeGrip().Opacity(ResizeHandleHoverOpacity);
             return;
         }
 
@@ -3057,6 +4230,7 @@ namespace winrt::TerminalApp::implementation
         {
             _resizingOrchestratorPane = false;
             _SetVerticalTabResizeCursor(false);
+            OrchestratorResizeGrip().Opacity(ResizeHandleRestOpacity);
             e.Handled(true);
         }
     }
@@ -3080,8 +4254,10 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Method Description:
-    // - Fetches /api/orchestrator from the terminal-web server on a
-    //   background thread and applies the result to the panel.
+    // - Polls GET /api/orchestrator on a background thread and applies the
+    //   result to the panel. Passes `since=<seq>` so a poll only carries the
+    //   transcript items that changed; a full snapshot is requested after
+    //   open, clear, and reconnect.
     safe_void_coroutine TerminalPage::_RefreshOrchestratorStatus()
     {
         if (_orchestratorFetchInFlight.exchange(true))
@@ -3091,25 +4267,25 @@ namespace winrt::TerminalApp::implementation
 
         const auto weakThis{ get_weak() };
         const auto dispatcher{ Dispatcher() };
+        const auto partial = !_orchestratorNeedsFullRefresh;
+        const auto since = _orchestratorSeq;
 
         co_await winrt::resume_background();
 
-        OrchestratorStatus status;
-        auto fetched = false;
-        auto reachable = false;
-        if (const auto response{ _projectServerRequest(L"GET", L"/api/orchestrator") })
+        std::wstring path{ L"/api/orchestrator" };
+        if (partial)
         {
-            // A pre-orchestrator server serves the SPA's index.html for
-            // unknown /api paths, so "reachable but unparseable" means the
-            // server is running an older build and needs a restart.
+            path += L"?since=" + std::to_wstring(since);
+        }
+        WDJ::JsonObject status{ nullptr };
+        auto reachable = false;
+        if (const auto response{ _projectServerRequest(L"GET", path) })
+        {
             reachable = true;
-            WDJ::JsonObject obj{ nullptr };
-            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), obj))
+            WDJ::JsonObject parsed{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), parsed) && parsed.HasKey(L"state"))
             {
-                fetched = true;
-                status.State = obj.GetNamedString(L"state", L"stopped");
-                status.Agent = obj.GetNamedString(L"agent", L"");
-                status.SessionId = obj.GetNamedString(L"sessionId", L"");
+                status = parsed;
             }
         }
 
@@ -3122,115 +4298,778 @@ namespace winrt::TerminalApp::implementation
         }
         page->_orchestratorFetchInFlight.store(false);
 
-        if (fetched)
+        if (status)
         {
-            page->_ApplyOrchestratorStatus(status);
+            page->_ApplyOrchestratorStatus(status, partial);
         }
         else
         {
-            page->OrchestratorStatusText().Text(reachable ? L"Server outdated — restart terminal-web" : L"Bridge server offline");
-            page->OrchestratorStatusDot().Fill(SolidColorBrush{ Colors::Gray() });
+            // A pre-orchestrator host serves the SPA's index.html for unknown
+            // /api paths: reachable but unparseable means an older build.
+            page->_orchestratorNeedsFullRefresh = true;
+            page->_orchestratorState = reachable ? L"unavailable" : L"offline";
+            page->_UpdateOrchestratorChrome();
         }
     }
 
     // Method Description:
-    // - Applies an orchestrator status snapshot to the panel: status line and
-    //   dot, header buttons, and attaching/detaching the session's control.
-    void TerminalPage::_ApplyOrchestratorStatus(const OrchestratorStatus& status)
+    // - Applies a status snapshot: state, model, active step, and the
+    //   transcript items it carries (all of them, or only those changed since
+    //   the last poll).
+    void TerminalPage::_ApplyOrchestratorStatus(const WDJ::JsonObject& status, const bool partial)
     {
-        const auto running = status.State == L"running";
-        const auto starting = status.State == L"starting";
-        const auto live = (running || starting) && !status.SessionId.empty();
-
-        const auto agentLabel = status.Agent == L"claude" ? winrt::hstring{ L"Claude Code" } :
-                                status.Agent == L"codex"  ? winrt::hstring{ L"Codex" } :
-                                                            status.Agent;
-        OrchestratorStatusText().Text(running  ? agentLabel + L" · running" :
-                                      starting ? agentLabel + L" · starting" :
-                                                 winrt::hstring{ L"Not running" });
-        OrchestratorStatusDot().Fill(SolidColorBrush{ running  ? ColorHelper::FromArgb(255, 16, 185, 129) :
-                                                      starting ? ColorHelper::FromArgb(255, 251, 191, 36) :
-                                                                 Colors::Gray() });
-
-        OrchestratorRestartButton().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
-        OrchestratorStopButton().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
-        OrchestratorEmptyState().Visibility(live ? Visibility::Collapsed : Visibility::Visible);
-        OrchestratorContent().Visibility(live ? Visibility::Visible : Visibility::Collapsed);
-
-        if (live)
+        const auto itemCount = static_cast<size_t>(status.GetNamedNumber(L"itemCount", 0));
+        if (partial && itemCount < _orchestratorItems.size())
         {
-            if (_orchestratorAttachedSessionId != status.SessionId)
+            // The transcript shrank (cleared or trimmed elsewhere): reload it.
+            _orchestratorNeedsFullRefresh = true;
+            _RefreshOrchestratorStatus();
+            return;
+        }
+
+        _orchestratorState = status.GetNamedString(L"state", L"idle");
+        if (status.HasKey(L"config") && status.GetNamedValue(L"config").ValueType() == WDJ::JsonValueType::Object)
+        {
+            const auto config{ status.GetNamedObject(L"config") };
+            _orchestratorModel = config.GetNamedString(L"model", L"");
+            _orchestratorKeyEnv = config.GetNamedString(L"keyEnv", L"OPENROUTER_API_KEY");
+        }
+        _orchestratorStep = L"";
+        if (status.HasKey(L"activeTurn") && status.GetNamedValue(L"activeTurn").ValueType() == WDJ::JsonValueType::Object)
+        {
+            _orchestratorStep = status.GetNamedObject(L"activeTurn").GetNamedString(L"step", L"");
+        }
+
+        if (!partial)
+        {
+            _ResetOrchestratorTranscript();
+        }
+        if (status.HasKey(L"transcript") && status.GetNamedValue(L"transcript").ValueType() == WDJ::JsonValueType::Array)
+        {
+            for (const auto& entry : status.GetNamedArray(L"transcript"))
             {
-                _AttachOrchestratorSession(status.SessionId);
+                if (entry.ValueType() == WDJ::JsonValueType::Object)
+                {
+                    _ApplyOrchestratorItem(entry.GetObject());
+                }
             }
         }
-        else if (_orchestratorAttachedSessionId != winrt::hstring{})
+        _orchestratorSeq = static_cast<uint64_t>(status.GetNamedNumber(L"seq", static_cast<double>(_orchestratorSeq)));
+        _orchestratorNeedsFullRefresh = false;
+        _UpdateOrchestratorChrome();
+        if (_orchestratorStickToBottom)
         {
-            _DetachOrchestratorSession();
+            _ScrollOrchestratorToBottom();
         }
-
-        _orchestratorStatus = status;
     }
 
     // Method Description:
-    // - Builds a TermControl over a WebSessionConnection attached to the
-    //   orchestrator session and hosts it in the panel. Default-profile
-    //   settings give it the user's font/theme; the connection streams the
-    //   shared server-side session, so web/mobile/native all see one TUI.
-    void TerminalPage::_AttachOrchestratorSession(const winrt::hstring& sessionId)
+    // - Adds or refreshes one transcript row. Rows are keyed by item id and
+    //   only rebuilt when the item's revision moved, so streaming text
+    //   updates in place instead of re-rendering the whole conversation.
+    void TerminalPage::_ApplyOrchestratorItem(const WDJ::JsonObject& item)
     {
-        _DetachOrchestratorSession();
+        const std::wstring id{ item.GetNamedString(L"id", L"") };
+        if (id.empty())
+        {
+            return;
+        }
+        const auto rev = static_cast<uint64_t>(item.GetNamedNumber(L"rev", 0));
+        if (const auto found{ _orchestratorItems.find(id) }; found != _orchestratorItems.end())
+        {
+            if (found->second.Rev != rev)
+            {
+                found->second.Rev = rev;
+                found->second.Container.Child(_BuildOrchestratorItemContent(item));
+            }
+            return;
+        }
+        Border container;
+        container.Child(_BuildOrchestratorItemContent(item));
+        OrchestratorTranscript().Children().Append(container);
+        _orchestratorItems.emplace(id, OrchestratorItemView{ rev, container });
+    }
 
+    // Method Description:
+    // - Renders one transcript item: the user's bubble, the assistant's
+    //   markdown, a tool call card (expandable to its result), or an error.
+    UIElement TerminalPage::_BuildOrchestratorItemContent(const WDJ::JsonObject& item)
+    {
+        const auto style = [this](const wchar_t* key) {
+            return Resources().Lookup(winrt::box_value(key)).try_as<WUX::Style>();
+        };
+        const auto role{ item.GetNamedString(L"role", L"assistant") };
+        const auto text{ item.GetNamedString(L"text", L"") };
+        const auto status{ item.GetNamedString(L"status", L"done") };
+
+        if (role == L"user")
+        {
+            Border bubble;
+            bubble.Style(style(L"OrchestratorUserBubbleStyle"));
+            TextBlock block;
+            block.Style(style(L"OrchestratorBodyTextStyle"));
+            block.Text(text);
+            bubble.Child(block);
+            return bubble;
+        }
+
+        if (role == L"error")
+        {
+            Border row;
+            row.Style(style(L"OrchestratorErrorRowStyle"));
+            TextBlock block;
+            block.Style(style(L"OrchestratorBodyTextStyle"));
+            block.Text(text);
+            row.Child(block);
+            return row;
+        }
+
+        if (role == L"tool")
+        {
+            WDJ::JsonObject tool{ nullptr };
+            if (item.HasKey(L"tool") && item.GetNamedValue(L"tool").ValueType() == WDJ::JsonValueType::Object)
+            {
+                tool = item.GetNamedObject(L"tool");
+            }
+            const auto name{ tool ? tool.GetNamedString(L"name", L"") : winrt::hstring{} };
+            const auto summary{ tool ? tool.GetNamedString(L"summary", name) : winrt::hstring{} };
+            const auto result{ tool ? tool.GetNamedString(L"result", L"") : winrt::hstring{} };
+            const auto ok = tool ? tool.GetNamedBoolean(L"ok", true) : true;
+
+            Grid header;
+            header.ColumnSpacing(8);
+            ColumnDefinition iconColumn;
+            iconColumn.Width(GridLength{ 0, GridUnitType::Auto });
+            ColumnDefinition textColumn;
+            textColumn.Width(GridLength{ 1, GridUnitType::Star });
+            ColumnDefinition stateColumn;
+            stateColumn.Width(GridLength{ 0, GridUnitType::Auto });
+            header.ColumnDefinitions().Append(iconColumn);
+            header.ColumnDefinitions().Append(textColumn);
+            header.ColumnDefinitions().Append(stateColumn);
+
+            FontIcon icon;
+            icon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            icon.FontSize(12);
+            icon.Glyph(name == L"read_session"     ? L"\xE7B3" :
+                       name == L"send_input"       ? L"\xE765" :
+                       name == L"send_keys"        ? L"\xE765" :
+                       name == L"answer_prompt"    ? L"\xE97A" :
+                       name == L"wait_for_output"  ? L"\xE823" :
+                       name == L"create_session"   ? L"\xE710" :
+                       name == L"close_session"    ? L"\xE711" :
+                       name == L"rename_session"   ? L"\xE70F" :
+                       name == L"list_projects"    ? L"\xE8B7" :
+                       name == L"notify_user"      ? L"\xEA8F" :
+                                                     L"\xE8FD");
+            icon.VerticalAlignment(VerticalAlignment::Center);
+            Grid::SetColumn(icon, 0);
+            header.Children().Append(icon);
+
+            TextBlock summaryBlock;
+            summaryBlock.Style(style(L"OrchestratorBodyTextStyle"));
+            summaryBlock.FontSize(12);
+            summaryBlock.TextWrapping(TextWrapping::NoWrap);
+            summaryBlock.TextTrimming(TextTrimming::CharacterEllipsis);
+            summaryBlock.VerticalAlignment(VerticalAlignment::Center);
+            summaryBlock.Text(summary);
+            Grid::SetColumn(summaryBlock, 1);
+            header.Children().Append(summaryBlock);
+
+            if (status == L"streaming")
+            {
+                winrt::Microsoft::UI::Xaml::Controls::ProgressRing ring;
+                ring.IsActive(true);
+                ring.Width(14);
+                ring.Height(14);
+                ring.VerticalAlignment(VerticalAlignment::Center);
+                Grid::SetColumn(ring, 2);
+                header.Children().Append(ring);
+            }
+            else
+            {
+                FontIcon state;
+                state.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                state.FontSize(11);
+                state.VerticalAlignment(VerticalAlignment::Center);
+                const auto failed = status == L"error" || !ok;
+                state.Glyph(failed ? L"\xE783" : status == L"cancelled" ? L"\xE711" : L"\xE73E");
+                state.Foreground(SolidColorBrush{ failed ? ColorHelper::FromArgb(255, 232, 72, 85) : ColorHelper::FromArgb(255, 16, 185, 129) });
+                Grid::SetColumn(state, 2);
+                header.Children().Append(state);
+            }
+
+            Border row;
+            row.Style(style(L"OrchestratorToolRowStyle"));
+            if (result.empty())
+            {
+                row.Child(header);
+                return row;
+            }
+
+            // The result is one click away rather than always on screen: a
+            // read_session result is a whole screenful.
+            winrt::Microsoft::UI::Xaml::Controls::Expander expander;
+            expander.Header(header);
+            expander.HorizontalAlignment(HorizontalAlignment::Stretch);
+            expander.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+            TextBlock resultBlock;
+            resultBlock.Style(style(L"OrchestratorCodeTextStyle"));
+            std::wstring clipped{ result };
+            if (clipped.size() > 6000)
+            {
+                clipped.resize(6000);
+                clipped += L"\n…";
+            }
+            resultBlock.Text(clipped);
+            ScrollViewer resultScroller;
+            resultScroller.MaxHeight(260);
+            resultScroller.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            resultScroller.Content(resultBlock);
+            expander.Content(resultScroller);
+            row.Padding(ThicknessHelper::FromUniformLength(0));
+            row.Child(expander);
+            return row;
+        }
+
+        // Assistant.
+        StackPanel panel;
+        panel.Spacing(4);
+        if (item.HasKey(L"reasoning") && item.GetNamedValue(L"reasoning").ValueType() == WDJ::JsonValueType::String)
+        {
+            const auto reasoning{ item.GetNamedString(L"reasoning") };
+            if (!reasoning.empty())
+            {
+                winrt::Microsoft::UI::Xaml::Controls::Expander thinking;
+                TextBlock headerBlock;
+                headerBlock.Style(style(L"OrchestratorMetaTextStyle"));
+                headerBlock.Text(L"Thinking");
+                thinking.Header(headerBlock);
+                thinking.HorizontalAlignment(HorizontalAlignment::Stretch);
+                thinking.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+                TextBlock body;
+                body.Style(style(L"OrchestratorMetaTextStyle"));
+                body.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+                body.IsTextSelectionEnabled(true);
+                body.Text(reasoning);
+                thinking.Content(body);
+                panel.Children().Append(thinking);
+            }
+        }
+        if (text.empty())
+        {
+            if (status == L"streaming")
+            {
+                TextBlock thinking;
+                thinking.Style(style(L"OrchestratorMetaTextStyle"));
+                thinking.Text(L"Thinking…");
+                panel.Children().Append(thinking);
+            }
+        }
+        else
+        {
+            auto rendered = false;
+            try
+            {
+                const auto rich{ Microsoft::Terminal::UI::Markdown::Builder::Convert(text, L"about:blank") };
+                rich.FontSize(13);
+                rich.IsTextSelectionEnabled(true);
+                rich.TextWrapping(TextWrapping::Wrap);
+                panel.Children().Append(rich);
+                rendered = true;
+            }
+            CATCH_LOG();
+            if (!rendered)
+            {
+                TextBlock block;
+                block.Style(style(L"OrchestratorBodyTextStyle"));
+                block.Text(text);
+                panel.Children().Append(block);
+            }
+        }
+        if (status == L"cancelled")
+        {
+            TextBlock stopped;
+            stopped.Style(style(L"OrchestratorMetaTextStyle"));
+            stopped.Text(L"Stopped.");
+            panel.Children().Append(stopped);
+        }
+        return panel;
+    }
+
+    void TerminalPage::_ResetOrchestratorTranscript()
+    {
+        _orchestratorItems.clear();
+        OrchestratorTranscript().Children().Clear();
+        _orchestratorSeq = 0;
+        _orchestratorStickToBottom = true;
+    }
+
+    void TerminalPage::_ScrollOrchestratorToBottom()
+    {
         try
         {
-            NewTerminalArgs defaultArgs;
-            const auto profile{ _settings.GetProfileForArgs(defaultArgs) };
-            const auto controlSettings{ Settings::TerminalSettings::CreateWithProfile(_settings, _currentWindowSettings(), profile) };
-            TerminalConnection::WebSessionConnection connection{ sessionId };
-            const auto control{ _CreateNewControlAndContent(controlSettings, connection) };
-
-            OrchestratorContent().Children().Clear();
-            OrchestratorContent().Children().Append(control);
-            _orchestratorControl = control;
-            _orchestratorConnection = connection;
-            _orchestratorAttachedSessionId = sessionId;
-            control.Focus(FocusState::Programmatic);
+            const auto scroller{ OrchestratorTranscriptScroller() };
+            scroller.UpdateLayout();
+            scroller.ChangeView(nullptr, scroller.ScrollableHeight(), nullptr, true);
         }
         CATCH_LOG();
     }
 
-    void TerminalPage::_DetachOrchestratorSession()
+    void TerminalPage::_ShowOrchestratorError(const winrt::hstring& message)
     {
-        if (_orchestratorConnection)
-        {
-            try
-            {
-                _orchestratorConnection.Close();
-            }
-            CATCH_LOG();
-        }
-        _orchestratorConnection = nullptr;
-        _orchestratorControl = nullptr;
-        _orchestratorAttachedSessionId = {};
-        OrchestratorContent().Children().Clear();
+        OrchestratorErrorText().Text(message);
+        OrchestratorErrorBar().Visibility(message.empty() ? Visibility::Collapsed : Visibility::Visible);
     }
 
     // Method Description:
-    // - POSTs an orchestrator command (start/stop/restart) to the server on a
-    //   background thread, then refreshes the panel.
-    safe_void_coroutine TerminalPage::_PostOrchestratorCommand(std::wstring path, std::string body)
+    // - Status line, dot, send/stop buttons, empty state and the fast poll
+    //   timer, all derived from the last status snapshot.
+    void TerminalPage::_UpdateOrchestratorChrome()
+    {
+        const auto running = _orchestratorState == L"running";
+        const auto idle = _orchestratorState == L"idle";
+        const auto unconfigured = _orchestratorState == L"unconfigured";
+        const auto offline = _orchestratorState == L"offline";
+        const auto unavailable = _orchestratorState == L"unavailable";
+
+        std::wstring model{ _orchestratorModel };
+        if (const auto slash = model.rfind(L'/'); slash != std::wstring::npos)
+        {
+            model = model.substr(slash + 1);
+        }
+        if (model.empty())
+        {
+            model = L"No model";
+        }
+        std::wstring step{ _orchestratorStep };
+        std::replace(step.begin(), step.end(), L'_', L' ');
+        if (step.empty() || step == L"thinking")
+        {
+            step = L"thinking";
+        }
+
+        OrchestratorStatusText().Text(offline      ? winrt::hstring{ L"Bridge server offline" } :
+                                      unavailable  ? winrt::hstring{ L"Server outdated — rebuild the terminal" } :
+                                      unconfigured ? winrt::hstring{ L"Needs an API key" } :
+                                      running      ? winrt::hstring{ model + L" · " + step + L"…" } :
+                                                     winrt::hstring{ model + L" · ready" });
+        OrchestratorStatusDot().Fill(SolidColorBrush{ running ? ColorHelper::FromArgb(255, 251, 191, 36) :
+                                                      idle    ? ColorHelper::FromArgb(255, 16, 185, 129) :
+                                                                Colors::Gray() });
+
+        OrchestratorSendButton().Visibility(running ? Visibility::Collapsed : Visibility::Visible);
+        OrchestratorStopButton().Visibility(running ? Visibility::Visible : Visibility::Collapsed);
+        OrchestratorSendButton().IsEnabled(idle || unconfigured);
+        OrchestratorClearButton().IsEnabled(!_orchestratorItems.empty() && !offline && !unavailable);
+
+        const auto showEmpty = _orchestratorItems.empty();
+        OrchestratorEmptyState().Visibility(showEmpty ? Visibility::Visible : Visibility::Collapsed);
+        OrchestratorTranscriptScroller().Visibility(showEmpty ? Visibility::Collapsed : Visibility::Visible);
+        OrchestratorQuickPrompts().Visibility(idle ? Visibility::Visible : Visibility::Collapsed);
+        OrchestratorHintText().Text(unconfigured ? winrt::hstring{ L"Set " + std::wstring{ _orchestratorKeyEnv } + L" in your environment, or paste a key under the gear icon, to start." } :
+                                    offline      ? winrt::hstring{ L"Waiting for the bridge host…" } :
+                                    unavailable  ? winrt::hstring{ L"This terminal build predates the built-in orchestrator." } :
+                                                   winrt::hstring{});
+        OrchestratorComposer().PlaceholderText(running ? L"Working… (you can stop it)" : L"Ask about your tabs, or tell it what to do");
+
+        if (_orchestratorPollTimer)
+        {
+            if (running && _orchestratorPaneOpen)
+            {
+                _orchestratorPollTimer.Start();
+            }
+            else
+            {
+                _orchestratorPollTimer.Stop();
+            }
+        }
+    }
+
+    // Method Description:
+    // - Appends the user's message and starts a turn. The host rejects a
+    //   message while one is running or when no key is configured; that
+    //   message is shown in the error bar and the draft is kept.
+    safe_void_coroutine TerminalPage::_SendOrchestratorMessage(winrt::hstring text)
+    {
+        std::wstring trimmed{ text };
+        trimmed.erase(0, trimmed.find_first_not_of(L" \t\r\n"));
+        if (const auto end = trimmed.find_last_not_of(L" \t\r\n"); end != std::wstring::npos)
+        {
+            trimmed.resize(end + 1);
+        }
+        else
+        {
+            trimmed.clear();
+        }
+        if (trimmed.empty())
+        {
+            co_return;
+        }
+
+        const auto body = "{\"text\":" + winrt::to_string(WDJ::JsonValue::CreateStringValue(winrt::hstring{ trimmed }).Stringify()) + "}";
+        OrchestratorComposer().Text(L"");
+        _ShowOrchestratorError(L"");
+        _orchestratorStickToBottom = true;
+        _orchestratorState = L"running";
+        _UpdateOrchestratorChrome();
+
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        const auto response{ _projectServerRequestDetailed(L"POST", L"/api/orchestrator/messages", body) };
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        if (!response || response->Status < 200 || response->Status >= 300)
+        {
+            page->_ShowOrchestratorError(winrt::hstring{ _projectServerErrorMessage(response) });
+            page->OrchestratorComposer().Text(winrt::hstring{ trimmed });
+            page->_orchestratorNeedsFullRefresh = true;
+        }
+        page->_RefreshOrchestratorStatus();
+    }
+
+    // Method Description:
+    // - Sends a command (cancel, clear) to the host and reloads the panel.
+    safe_void_coroutine TerminalPage::_PostOrchestratorCommand(std::wstring verb, std::wstring path, std::string body)
     {
         const auto weakThis{ get_weak() };
         const auto dispatcher{ Dispatcher() };
 
         co_await winrt::resume_background();
-        std::ignore = _projectServerRequest(L"POST", path, body);
+        const auto response{ _projectServerRequestDetailed(verb.c_str(), path, body) };
         co_await wil::resume_foreground(dispatcher);
 
         if (const auto page{ weakThis.get() })
         {
+            if (!response || response->Status < 200 || response->Status >= 300)
+            {
+                page->_ShowOrchestratorError(winrt::hstring{ _projectServerErrorMessage(response) });
+            }
+            page->_orchestratorNeedsFullRefresh = true;
             page->_RefreshOrchestratorStatus();
         }
+    }
+
+    // Method Description:
+    // - Serializes the settings flyout into a config patch.
+    std::string TerminalPage::_OrchestratorConfigBody(const bool includeKey)
+    {
+        WDJ::JsonObject body;
+        winrt::hstring provider{ L"openrouter" };
+        if (const auto selected{ OrchestratorProviderBox().SelectedItem().try_as<ComboBoxItem>() })
+        {
+            provider = winrt::unbox_value_or<winrt::hstring>(selected.Tag(), L"openrouter");
+        }
+        body.SetNamedValue(L"provider", WDJ::JsonValue::CreateStringValue(provider));
+        if (provider == L"custom")
+        {
+            body.SetNamedValue(L"baseUrl", WDJ::JsonValue::CreateStringValue(OrchestratorBaseUrlBox().Text()));
+        }
+        if (!OrchestratorModelBox().Text().empty())
+        {
+            body.SetNamedValue(L"model", WDJ::JsonValue::CreateStringValue(OrchestratorModelBox().Text()));
+        }
+        body.SetNamedValue(L"keyEnv", WDJ::JsonValue::CreateStringValue(OrchestratorKeyEnvBox().Text()));
+        if (const auto selected{ OrchestratorReasoningBox().SelectedItem().try_as<ComboBoxItem>() })
+        {
+            body.SetNamedValue(L"reasoning", WDJ::JsonValue::CreateStringValue(winrt::unbox_value_or<winrt::hstring>(selected.Tag(), L"low")));
+        }
+        if (includeKey && !OrchestratorKeyBox().Password().empty())
+        {
+            body.SetNamedValue(L"apiKey", WDJ::JsonValue::CreateStringValue(OrchestratorKeyBox().Password()));
+        }
+        return winrt::to_string(body.Stringify());
+    }
+
+    safe_void_coroutine TerminalPage::_SaveOrchestratorConfig(std::string body)
+    {
+        OrchestratorSettingsMessage().Text(L"Saving…");
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        const auto response{ _projectServerRequestDetailed(L"PUT", L"/api/orchestrator/config", body) };
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        if (!response || response->Status < 200 || response->Status >= 300)
+        {
+            page->OrchestratorSettingsMessage().Text(winrt::hstring{ _projectServerErrorMessage(response) });
+            co_return;
+        }
+        page->OrchestratorKeyBox().Password(L"");
+        page->OrchestratorSettingsMessage().Text(L"Saved.");
+        page->_PopulateOrchestratorSettings();
+        page->_orchestratorNeedsFullRefresh = true;
+        page->_RefreshOrchestratorStatus();
+    }
+
+    safe_void_coroutine TerminalPage::_TestOrchestratorConnection()
+    {
+        OrchestratorSettingsMessage().Text(L"Testing…");
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        const auto response{ _projectServerRequestDetailed(L"POST", L"/api/orchestrator/test", "{}") };
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        winrt::hstring message{ _projectServerErrorMessage(response) };
+        if (response && response->Status >= 200 && response->Status < 300)
+        {
+            WDJ::JsonObject obj{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(response->Body), obj))
+            {
+                message = obj.GetNamedString(L"message", L"");
+            }
+        }
+        page->OrchestratorSettingsMessage().Text(message);
+    }
+
+    // Method Description:
+    // - Fills the settings flyout from GET /api/orchestrator/config, then
+    //   loads the model catalog for the picker.
+    safe_void_coroutine TerminalPage::_PopulateOrchestratorSettings()
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        WDJ::JsonObject config{ nullptr };
+        if (const auto response{ _projectServerRequest(L"GET", L"/api/orchestrator/config") })
+        {
+            WDJ::JsonObject parsed{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), parsed))
+            {
+                config = parsed;
+            }
+        }
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        if (!config)
+        {
+            page->OrchestratorSettingsMessage().Text(L"The bridge host is not reachable.");
+            co_return;
+        }
+
+        const auto provider{ config.GetNamedString(L"provider", L"openrouter") };
+        for (const auto& candidate : page->OrchestratorProviderBox().Items())
+        {
+            if (const auto item{ candidate.try_as<ComboBoxItem>() }; item && winrt::unbox_value_or<winrt::hstring>(item.Tag(), L"") == provider)
+            {
+                page->OrchestratorProviderBox().SelectedItem(item);
+            }
+        }
+        page->OrchestratorBaseUrlBox().Text(config.GetNamedString(L"baseUrl", L""));
+        page->OrchestratorBaseUrlBox().Visibility(provider == L"custom" ? Visibility::Visible : Visibility::Collapsed);
+        page->OrchestratorModelBox().Text(config.GetNamedString(L"model", L""));
+        page->OrchestratorKeyEnvBox().Text(config.GetNamedString(L"keyEnv", L"OPENROUTER_API_KEY"));
+        const auto reasoning{ config.GetNamedString(L"reasoning", L"low") };
+        for (const auto& candidate : page->OrchestratorReasoningBox().Items())
+        {
+            if (const auto item{ candidate.try_as<ComboBoxItem>() }; item && winrt::unbox_value_or<winrt::hstring>(item.Tag(), L"") == reasoning)
+            {
+                page->OrchestratorReasoningBox().SelectedItem(item);
+            }
+        }
+
+        const auto keySource{ config.GetNamedString(L"keySource", L"none") };
+        winrt::hstring keyPreview;
+        if (config.HasKey(L"keyPreview") && config.GetNamedValue(L"keyPreview").ValueType() == WDJ::JsonValueType::String)
+        {
+            keyPreview = config.GetNamedString(L"keyPreview");
+        }
+        const auto keyEnv{ config.GetNamedString(L"keyEnv", L"OPENROUTER_API_KEY") };
+        page->OrchestratorKeyStatusText().Text(keySource == L"manual" ? winrt::hstring{ L"Using a key pasted here (" + std::wstring{ keyPreview } + L")." } :
+                                               keySource == L"env"    ? winrt::hstring{ L"Using " + std::wstring{ keyEnv } + L" from the environment (" + std::wstring{ keyPreview } + L")." } :
+                                                                        winrt::hstring{ L"No key found. Set " + std::wstring{ keyEnv } + L" in your environment or paste one below." });
+        page->OrchestratorForgetKeyButton().Visibility(keySource == L"manual" ? Visibility::Visible : Visibility::Collapsed);
+        page->_LoadOrchestratorModels(false);
+    }
+
+    // Method Description:
+    // - Loads the model catalog (OpenRouter's, or whatever a custom endpoint
+    //   lists) and shows the coding shortlist in the picker.
+    safe_void_coroutine TerminalPage::_LoadOrchestratorModels(const bool refresh)
+    {
+        const auto weakThis{ get_weak() };
+        const auto dispatcher{ Dispatcher() };
+
+        co_await winrt::resume_background();
+        std::vector<OrchestratorModelEntry> recommended;
+        std::vector<OrchestratorModelEntry> all;
+        winrt::hstring error;
+        const auto parseEntries = [](const WDJ::JsonObject& catalog, const wchar_t* key, std::vector<OrchestratorModelEntry>& into) {
+            if (!catalog.HasKey(key) || catalog.GetNamedValue(key).ValueType() != WDJ::JsonValueType::Array)
+            {
+                return;
+            }
+            for (const auto& entry : catalog.GetNamedArray(key))
+            {
+                if (entry.ValueType() != WDJ::JsonValueType::Object)
+                {
+                    continue;
+                }
+                const auto model{ entry.GetObject() };
+                const auto id{ model.GetNamedString(L"id", L"") };
+                if (id.empty())
+                {
+                    continue;
+                }
+                std::wstring name{ model.GetNamedString(L"name", id) };
+                if (const auto colon = name.find(L": "); colon != std::wstring::npos)
+                {
+                    name.erase(0, colon + 2);
+                }
+                std::wstring meta;
+                const auto context = model.GetNamedNumber(L"contextLength", 0);
+                if (context >= 1'000'000)
+                {
+                    meta += std::to_wstring(static_cast<int>(context / 1'000'000)) + L"M ctx";
+                }
+                else if (context > 0)
+                {
+                    meta += std::to_wstring(static_cast<int>(context / 1000)) + L"k ctx";
+                }
+                const auto promptPrice = model.GetNamedNumber(L"promptPrice", 0);
+                const auto completionPrice = model.GetNamedNumber(L"completionPrice", 0);
+                if (promptPrice > 0 || completionPrice > 0)
+                {
+                    wchar_t price[64]{};
+                    swprintf_s(price, L"$%.2f / $%.2f per 1M", promptPrice, completionPrice);
+                    meta += (meta.empty() ? L"" : L" · ") + std::wstring{ price };
+                }
+                into.push_back(OrchestratorModelEntry{ id, winrt::hstring{ name }, winrt::hstring{ meta } });
+            }
+        };
+        if (const auto response{ _projectServerRequest(L"GET", refresh ? L"/api/orchestrator/models?refresh=1" : L"/api/orchestrator/models") })
+        {
+            WDJ::JsonObject catalog{ nullptr };
+            if (WDJ::JsonObject::TryParse(winrt::to_hstring(*response), catalog))
+            {
+                parseEntries(catalog, L"recommended", recommended);
+                parseEntries(catalog, L"models", all);
+                if (catalog.HasKey(L"error") && catalog.GetNamedValue(L"error").ValueType() == WDJ::JsonValueType::String)
+                {
+                    error = catalog.GetNamedString(L"error");
+                }
+            }
+        }
+        else
+        {
+            error = L"The model list could not be loaded.";
+        }
+        co_await wil::resume_foreground(dispatcher);
+
+        const auto page{ weakThis.get() };
+        if (!page)
+        {
+            co_return;
+        }
+        page->_orchestratorRecommendedModels = std::move(recommended);
+        page->_orchestratorAllModels = std::move(all);
+        if (!error.empty())
+        {
+            page->OrchestratorSettingsMessage().Text(error);
+        }
+        page->_FilterOrchestratorModels();
+    }
+
+    void TerminalPage::_FillOrchestratorModelList(const std::vector<OrchestratorModelEntry>& entries)
+    {
+        const auto list{ OrchestratorModelList() };
+        list.Items().Clear();
+        const auto current{ OrchestratorModelBox().Text() };
+        for (const auto& entry : entries)
+        {
+            StackPanel content;
+            TextBlock name;
+            name.Text(entry.Name);
+            name.FontSize(13);
+            name.TextTrimming(TextTrimming::CharacterEllipsis);
+            content.Children().Append(name);
+            TextBlock meta;
+            meta.Style(Resources().Lookup(winrt::box_value(L"OrchestratorMetaTextStyle")).try_as<WUX::Style>());
+            meta.Text(entry.Meta.empty() ? entry.Id : entry.Id + L" · " + entry.Meta);
+            meta.TextTrimming(TextTrimming::CharacterEllipsis);
+            meta.TextWrapping(TextWrapping::NoWrap);
+            content.Children().Append(meta);
+            ListViewItem item;
+            item.Content(content);
+            item.Tag(winrt::box_value(entry.Id));
+            list.Items().Append(item);
+            if (entry.Id == current)
+            {
+                list.SelectedItem(item);
+            }
+        }
+    }
+
+    // Method Description:
+    // - The picker shows the coding shortlist until the search box has text,
+    //   then the matching entries of the full catalog.
+    void TerminalPage::_FilterOrchestratorModels()
+    {
+        std::wstring query{ OrchestratorModelSearchBox().Text() };
+        std::transform(query.begin(), query.end(), query.begin(), ::towlower);
+        query.erase(0, query.find_first_not_of(L" \t"));
+        if (query.empty())
+        {
+            _FillOrchestratorModelList(_orchestratorRecommendedModels);
+            return;
+        }
+        std::vector<OrchestratorModelEntry> matches;
+        for (const auto& entry : _orchestratorAllModels)
+        {
+            std::wstring haystack{ entry.Id + L" " + entry.Name };
+            std::transform(haystack.begin(), haystack.end(), haystack.begin(), ::towlower);
+            if (haystack.find(query) != std::wstring::npos)
+            {
+                matches.push_back(entry);
+                if (matches.size() >= 40)
+                {
+                    break;
+                }
+            }
+        }
+        _FillOrchestratorModelList(matches);
+    }
+
+    // Method Description:
+    // - Enter sends; Shift+Enter inserts a newline (the box accepts returns).
+    void TerminalPage::_OrchestratorComposerKeyDown(const IInspectable&, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e)
+    {
+        if (e.Key() != VirtualKey::Enter)
+        {
+            return;
+        }
+        if (::GetKeyState(VK_SHIFT) & 0x8000)
+        {
+            return;
+        }
+        e.Handled(true);
+        _SendOrchestratorMessage(OrchestratorComposer().Text());
     }
 
     // Method Description:
@@ -3428,50 +5267,98 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Method Description:
-    // - Finishes a project tab drag: computes the insertion index from the
-    //   drop position, reorders locally, and persists the order server-side.
-    safe_void_coroutine TerminalPage::_ProjectDropReorder(winrt::hstring draggedId, float dropX)
+    // - Finishes a chip drag: reads the strip's real order back off the panel
+    //   (each chip carries its section key in Tag, so nothing has to assume
+    //   child indices line up with another list), works out where the drop
+    //   landed, and records the result as the section order.
+    // - That order is the rail's too - the rail ranks its headings by it and
+    //   the strip is rebuilt from the rail - so one drag moves both. The
+    //   bridge is told about it as far as it can be: the projects it has
+    //   saved, in the new relative order. Sections with no saved project keep
+    //   their position for this window only, which is the honest limit of a
+    //   store that keys order by project id.
+    safe_void_coroutine TerminalPage::_SectionDropReorder(winrt::hstring draggedKey, float dropX)
     {
         co_await wil::resume_foreground(Dispatcher());
 
-        const auto from = std::find_if(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& project) {
-            return project.Id == draggedId;
-        });
-        if (from == _bridgeProjects.end())
+        if (draggedKey.empty())
         {
             co_return;
         }
 
-        // Children: [0] "All", [1..N] project tabs, then the "+" and web buttons.
         const auto panel{ ProjectTabPanel() };
-        const auto children{ panel.Children() };
-        auto target = _bridgeProjects.size();
-        for (size_t i = 0; i < _bridgeProjects.size(); ++i)
+        if (!panel)
         {
-            const auto element{ children.GetAt(gsl::narrow_cast<uint32_t>(i + 1)).try_as<WUX::FrameworkElement>() };
+            co_return;
+        }
+
+        // Where the dragged chip goes: after every chip whose midpoint the
+        // drop passed. Counting rather than index arithmetic means removing
+        // the dragged chip first needs no correction afterwards.
+        std::vector<winrt::hstring> keys;
+        size_t target{ 0 };
+        auto found{ false };
+        for (const auto& child : panel.Children())
+        {
+            const auto element{ child.try_as<WUX::FrameworkElement>() };
             if (!element)
             {
-                break;
+                continue;
+            }
+            const auto key{ winrt::unbox_value_or<winrt::hstring>(element.Tag(), winrt::hstring{}) };
+            if (key.empty())
+            {
+                continue; // "All", the hairlines and the strip's own actions.
+            }
+            if (key == draggedKey)
+            {
+                found = true;
+                continue;
             }
             const auto origin{ element.TransformToVisual(panel).TransformPoint({ 0, 0 }) };
-            if (dropX < origin.X + element.ActualWidth() / 2.0)
+            if (dropX >= origin.X + element.ActualWidth() / 2.0)
             {
-                target = i;
-                break;
+                ++target;
+            }
+            keys.push_back(key);
+        }
+        if (!found)
+        {
+            co_return;
+        }
+        keys.insert(keys.begin() + std::min(target, keys.size()), draggedKey);
+
+        // Section keys back to the directories the rail ranks by.
+        const auto sections{ _railSectionsOf(_tabRow) };
+        std::vector<std::wstring> order;
+        order.reserve(keys.size());
+        for (const auto& key : keys)
+        {
+            for (const auto& section : sections)
+            {
+                if (section.Key == key && !section.Directory.empty())
+                {
+                    order.push_back(implementation::TabRowControl::NormalizeDirectory(section.Directory));
+                    break;
+                }
             }
         }
 
-        const auto fromIndex = gsl::narrow_cast<size_t>(from - _bridgeProjects.begin());
-        auto dragged = *from;
-        _bridgeProjects.erase(from);
-        if (target > fromIndex)
-        {
-            --target;
-        }
-        _bridgeProjects.insert(_bridgeProjects.begin() + target, std::move(dragged));
+        _sectionOrder = order;
+        _ApplyProjectNames();
         _RebuildProjectTabs();
 
+        // Persist as much of it as the store can hold: its saved projects, in
+        // the new relative order.
         WDJ::JsonArray ids;
+        std::stable_sort(_bridgeProjects.begin(), _bridgeProjects.end(), [&](const auto& left, const auto& right) {
+            const auto rank = [&](const BridgeProject& project) {
+                const auto key{ implementation::TabRowControl::NormalizeDirectory(project.Cwd) };
+                const auto position{ std::find(order.begin(), order.end(), key) };
+                return position == order.end() ? order.size() : static_cast<size_t>(position - order.begin());
+            };
+            return rank(left) < rank(right);
+        });
         for (const auto& project : _bridgeProjects)
         {
             ids.Append(WDJ::JsonValue::CreateStringValue(project.Id));
@@ -3531,37 +5418,63 @@ namespace winrt::TerminalApp::implementation
         {
             if (!createdId.empty())
             {
-                page->_bridgeProjects.push_back(BridgeProject{ createdId, name, createdCwd });
-                page->_SelectProject(createdId, createdCwd);
+                const auto directory{ createdCwd.empty() ? cwd : createdCwd };
+                page->_bridgeProjects.push_back(BridgeProject{ createdId, name, directory });
+                // No terminal is open there yet, so the rail has no heading
+                // for it: hand _SelectSection the directory so it can open
+                // one, and the section (and its chip) appears with the tab.
+                page->_SelectSection(implementation::TabRowControl::SectionKeyForDirectory(directory), directory);
             }
             page->_RefreshBridgeProjects();
         }
     }
 
     // Method Description:
-    // - Confirms and closes a project: closes this window's tabs that belong
-    //   to it, then deletes it from the terminal-web store (which also stops
-    //   the project's remote sessions).
-    safe_void_coroutine TerminalPage::_CloseProjectRequested(winrt::hstring projectId, winrt::hstring projectName)
+    // - Confirms and closes a rail section: closes this window's tabs under
+    //   it - subsections included, because that is what the heading holds -
+    //   and, when a saved terminal-web project sits behind the same
+    //   directory, deletes that too so its remote sessions stop.
+    // - A section with no saved project behind it (the common case with the
+    //   bridge offline) closes its tabs and touches nothing on the server.
+    //   Nothing is lost by that: a section *is* its open terminals, so once
+    //   they are closed the heading and its chip are gone by definition.
+    safe_void_coroutine TerminalPage::_CloseSectionRequested(winrt::hstring sectionKey, winrt::hstring sectionName, winrt::hstring directory)
     {
         const auto presenter{ _dialogPresenter.get() };
-        if (!presenter)
+        if (!presenter || sectionKey.empty())
         {
             co_return;
         }
 
-        std::vector<winrt::TerminalApp::Tab> projectTabs;
+        std::vector<winrt::TerminalApp::Tab> sectionTabs;
         for (const auto& tab : _tabs)
         {
-            if (tab.ProjectId() == projectId)
+            if (implementation::TabRowControl::SectionContainsTab(sectionKey, tab))
             {
-                projectTabs.push_back(tab);
+                sectionTabs.push_back(tab);
+            }
+        }
+
+        winrt::hstring projectId;
+        if (!directory.empty())
+        {
+            const auto directoryKey{ _projectDirectoryKey(directory) };
+            for (const auto& project : _bridgeProjects)
+            {
+                if (_projectDirectoryKey(project.Cwd) == directoryKey)
+                {
+                    projectId = project.Id;
+                    break;
+                }
             }
         }
 
         ContentDialog dialog;
         dialog.Title(winrt::box_value(L"Close Project"));
-        const auto message = L"Close project \"" + projectName + L"\"? This closes " + winrt::to_hstring(projectTabs.size()) + L" terminal tab(s) here and stops any remote sessions started in it.";
+        const auto tail = projectId.empty() ?
+                              winrt::hstring{ L" terminal tab(s) here." } :
+                              winrt::hstring{ L" terminal tab(s) here and stops any remote sessions started in it." };
+        const auto message = L"Close project \"" + sectionName + L"\"? This closes " + winrt::to_hstring(sectionTabs.size()) + tail;
         dialog.Content(winrt::box_value(message));
         dialog.PrimaryButtonText(L"Close Project");
         dialog.CloseButtonText(L"Cancel");
@@ -3573,20 +5486,29 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
-        if (_activeProjectId == projectId)
+        if (_activeSectionKey == sectionKey)
         {
-            _SelectProject({}, {});
+            _SelectSection({});
         }
 
-        // The project-level dialog already confirmed; don't re-prompt per tab.
-        for (const auto& tab : projectTabs)
+        // The section-level dialog already confirmed; don't re-prompt per tab.
+        // Closing them is what retires the heading, and _OnRailSectionsChanged
+        // is what takes the chip away with it.
+        for (const auto& tab : sectionTabs)
         {
             std::ignore = _HandleCloseTabRequested(tab, true);
         }
 
-        // Drop it locally right away so the strip feels responsive, then
-        // delete it on the server and re-sync.
+        if (projectId.empty())
+        {
+            co_return;
+        }
+
+        // Drop the saved project locally right away so the strip feels
+        // responsive, then delete it on the server and re-sync.
         std::erase_if(_bridgeProjects, [&](const auto& project) { return project.Id == projectId; });
+        _sectionNameOverrides.erase(implementation::TabRowControl::NormalizeDirectory(directory));
+        _ApplyProjectNames();
         _RebuildProjectTabs();
 
         const auto weakThis{ get_weak() };
@@ -3871,7 +5793,7 @@ namespace winrt::TerminalApp::implementation
 
         // Shells that emit title changes do so right after changing directory,
         // so this keeps the tab's git branch in step with `cd`.
-        _RefreshTabGitBranch(tab);
+        _RefreshTabDirectory(tab);
 
         if (tab == _GetFocusedTab())
         {
@@ -3900,6 +5822,11 @@ namespace winrt::TerminalApp::implementation
         term.SetTaskbarProgress({ get_weak(), &TerminalPage::_SetTaskbarProgressHandler });
 
         term.ConnectionStateChanged({ get_weak(), &TerminalPage::_ConnectionStateChangedHandler });
+
+        // The shell told us it changed directory. This is the authoritative
+        // signal behind grouping tabs by directory; everything else is a
+        // fallback for shells and TUIs that never report.
+        term.WorkingDirectoryChanged({ get_weak(), &TerminalPage::_ControlWorkingDirectoryChangedHandler });
 
         term.PropertyChanged([weakThis = get_weak()](auto& /*sender*/, auto& e) {
             if (auto page{ weakThis.get() })
@@ -4657,50 +6584,6 @@ namespace winrt::TerminalApp::implementation
     uint32_t TerminalPage::NumberOfTabs() const
     {
         return _tabs.Size();
-    }
-
-    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalPage::ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount)
-    {
-        ContentDialog dialog{};
-
-        if (windowCount == 0 || tabCount == 0)
-        {
-            if (externalWindowCount > 0)
-            {
-                dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogExternalOnlyTitle")));
-                dialog.Content(winrt::box_value(RS_fmt(L"CollectWindowsDialogExternalOnlyBody", externalWindowCount)));
-            }
-            else
-            {
-                dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogNoneTitle")));
-                dialog.Content(winrt::box_value(RS_(L"CollectWindowsDialogNoneBody")));
-            }
-            dialog.CloseButtonText(RS_(L"CollectWindowsDialogClose"));
-            dialog.DefaultButton(ContentDialogButton::Close);
-
-            if (auto presenter{ _dialogPresenter.get() })
-            {
-                co_await presenter.ShowDialog(dialog);
-            }
-
-            co_return false;
-        }
-
-        dialog.Title(winrt::box_value(RS_(L"CollectWindowsDialogTitle")));
-        dialog.Content(winrt::box_value(externalWindowCount > 0 ?
-                                            RS_fmt(L"CollectWindowsDialogBodyWithExternal", tabCount, windowCount, externalWindowCount) :
-                                            RS_fmt(L"CollectWindowsDialogBody", tabCount, windowCount)));
-        dialog.PrimaryButtonText(RS_(L"CollectWindowsDialogCollect"));
-        dialog.CloseButtonText(RS_(L"CollectWindowsDialogCancel"));
-        dialog.DefaultButton(ContentDialogButton::Primary);
-
-        if (auto presenter{ _dialogPresenter.get() })
-        {
-            const auto result = co_await presenter.ShowDialog(dialog);
-            co_return result == ContentDialogResult::Primary;
-        }
-
-        co_return false;
     }
 
     // Method Description:
@@ -5796,14 +7679,53 @@ namespace winrt::TerminalApp::implementation
 
     // NOTE: callers of _MakePane should be able to accept nullptr as a return
     // value gracefully.
+    // Method Description:
+    // - The directory a new terminal should start in when nothing asked for
+    //   one explicitly: the focused tab's live working directory (shell
+    //   integration first, then the directory its process tree runs in),
+    //   else the selected project's directory. Empty means "use the profile".
+    winrt::hstring TerminalPage::_InheritedStartingDirectory()
+    {
+        if (const auto focused{ _GetFocusedTabImpl() })
+        {
+            winrt::hstring cwd;
+            if (const auto control{ focused->GetActiveTerminalControl() })
+            {
+                cwd = control.WorkingDirectory();
+            }
+            if (cwd.empty())
+            {
+                cwd = focused->WorkingDirectory();
+            }
+            if (!cwd.empty() && Utils::IsValidDirectory(cwd.c_str()))
+            {
+                return cwd;
+            }
+        }
+        return _activeProjectCwd;
+    }
+
     std::shared_ptr<Pane> TerminalPage::_MakePane(const INewContentArgs& contentArgs,
                                                   const winrt::TerminalApp::Tab& sourceTab,
                                                   TerminalConnection::ITerminalConnection existingConnection)
 
     {
-        const auto& newTerminalArgs{ contentArgs.try_as<NewTerminalArgs>() };
+        auto newTerminalArgs{ contentArgs.try_as<NewTerminalArgs>() };
         if (contentArgs == nullptr || newTerminalArgs != nullptr || contentArgs.Type().empty())
         {
+            // A brand-new terminal (not a duplicate, not attached content, no
+            // directory asked for) opens where the user currently is.
+            if (!sourceTab && !existingConnection && (!newTerminalArgs || (newTerminalArgs.ContentId() == 0 && newTerminalArgs.StartingDirectory().empty())))
+            {
+                if (const auto inherited{ _InheritedStartingDirectory() }; !inherited.empty())
+                {
+                    if (!newTerminalArgs)
+                    {
+                        newTerminalArgs = NewTerminalArgs{};
+                    }
+                    newTerminalArgs.StartingDirectory(inherited);
+                }
+            }
             // Terminals are of course special, and have to deal with debug taps, duplicating the tab, etc.
             return _MakeTerminalPane(newTerminalArgs, sourceTab, existingConnection);
         }
@@ -8048,30 +9970,6 @@ namespace winrt::TerminalApp::implementation
         }
 
         _sendDraggedTabToWindow(winrt::to_hstring(args.TargetWindow()), args.TabIndex(), std::nullopt);
-    }
-
-    void TerminalPage::SendAllTabsToWindow(uint64_t targetWindowId)
-    {
-        if (targetWindowId == _WindowProperties.WindowId())
-        {
-            return;
-        }
-
-        std::vector<winrt::TerminalApp::Tab> tabsToMove;
-        std::copy(begin(_tabs), end(_tabs), std::back_inserter(tabsToMove));
-
-        const auto targetWindow{ winrt::to_hstring(targetWindowId) };
-        const auto appendTabIndex{ static_cast<uint32_t>(-1) };
-        for (const auto& tab : tabsToMove)
-        {
-            if (const auto tabImpl{ _GetTabImpl(tab) })
-            {
-                auto startupActions = tabImpl->BuildStartupActions(BuildStartupKind::Content);
-                _DetachTabFromWindow(tabImpl);
-                _MoveContent(std::move(startupActions), targetWindow, appendTabIndex);
-                _RemoveTab(tab);
-            }
-        }
     }
 
     void TerminalPage::_onTabDroppedOutside(winrt::IInspectable /*sender*/,

@@ -281,6 +281,19 @@ std::wstring_view Terminal::GetWorkingDirectory() noexcept
     return _workingDirectory;
 }
 
+// Pre-seeds the working directory from the profile without claiming the shell
+// reported it, so callers can still tell "opened here" from "is here now".
+void Terminal::SeedWorkingDirectory(std::wstring_view uri)
+{
+    _assertLocked();
+    _workingDirectory = uri;
+}
+
+bool Terminal::WorkingDirectoryFromShell() const noexcept
+{
+    return _workingDirectoryFromShell;
+}
+
 // Method Description:
 // - Resize the terminal as the result of some user interaction.
 // Arguments:
@@ -1153,6 +1166,11 @@ void Terminal::SetWarningBellCallback(std::function<void()> pfn) noexcept
 void Terminal::SetTitleChangedCallback(std::function<void(std::wstring_view)> pfn) noexcept
 {
     _pfnTitleChanged.swap(pfn);
+}
+
+void Terminal::SetWorkingDirectoryChangedCallback(std::function<void()> pfn) noexcept
+{
+    _pfnWorkingDirectoryChanged.swap(pfn);
 }
 
 void Terminal::SetCopyToClipboardCallback(std::function<void(wil::zwstring_view)> pfn) noexcept

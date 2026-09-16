@@ -19,206 +19,301 @@
     -->
 
     <ContentPresenter.Resources>
-        <Style x:Key="TabRailTabContainerStyle"
-               TargetType="ListViewItem">
-            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="MinHeight" Value="44" />
-            <Setter Property="Padding" Value="0" />
-        </Style>
-        <!--  Section headers are not selectable rows: no hover/selection chrome, no tab stop.  -->
-        <Style x:Key="TabRailGroupHeaderContainerStyle"
-               TargetType="ListViewItem">
-            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="MinHeight" Value="0" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Margin" Value="0" />
-            <Setter Property="IsTabStop" Value="False" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ListViewItem">
-                        <ContentPresenter HorizontalContentAlignment="Stretch"
-                                          Content="{TemplateBinding Content}"
-                                          ContentTemplate="{TemplateBinding ContentTemplate}" />
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
+        <!--
+            Row and header chrome - the selection accent bar, the hover fill,
+            the metrics and the type ramp - lives in TabRailStyles.xaml, which
+            App.xaml merges. Only the markup that needs x:Bind or an event
+            handler is here.
+        -->
         <DataTemplate x:Key="TabRailGroupHeaderTemplate"
                       x:DataType="local:TabGroup">
-            <Grid Margin="0,8,0,2"
-                  HorizontalAlignment="Stretch"
-                  ColumnSpacing="2">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
+            <!--
+                One project section header: a hairline, then a row that is
+                itself the collapse toggle. The [+] fades in on hover or
+                keyboard focus. Nothing here carries a fill - the accent is
+                reserved for "this is the tab you are looking at", and the one
+                exception is the marker that says the focused tab is inside
+                this folded section.
+            -->
+            <StackPanel>
+                <Border Style="{StaticResource TabRailDividerStyle}"
+                        Visibility="{x:Bind ShowDivider, Mode=OneWay}" />
+                <Grid Margin="{x:Bind HeaderMargin, Mode=OneWay}"
+                      HorizontalAlignment="Stretch"
+                      Background="Transparent"
+                      PointerEntered="OnTabGroupHeaderPointerEntered"
+                      PointerExited="OnTabGroupHeaderPointerExited">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
 
-                <!--  Whole header toggles the section; hover uses the subtle fill like the tab rows.  -->
-                <Button Grid.Column="0"
-                        Padding="6,4,6,4"
-                        HorizontalAlignment="Stretch"
-                        HorizontalContentAlignment="Stretch"
-                        AutomationProperties.Name="{x:Bind Name}"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Click="OnTabGroupHeaderClick"
-                        CornerRadius="4">
-                    <Grid ColumnSpacing="6">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="12" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <FontIcon Grid.Column="0"
-                                  VerticalAlignment="Center"
-                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                  FontSize="9"
-                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                  Glyph="{x:Bind ChevronGlyph}" />
-                        <StackPanel Grid.Column="1"
-                                    VerticalAlignment="Center"
-                                    Spacing="1">
-                            <TextBlock FontSize="12"
-                                       FontWeight="SemiBold"
-                                       Text="{x:Bind Name}"
-                                       TextTrimming="CharacterEllipsis" />
-                            <TextBlock FontSize="10.5"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       Text="{x:Bind Path}"
-                                       TextTrimming="CharacterEllipsis"
-                                       ToolTipService.ToolTip="{x:Bind Path}"
-                                       Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Path)}" />
-                        </StackPanel>
-                        <!--  Count pill  -->
-                        <Border Grid.Column="2"
-                                MinWidth="18"
-                                Padding="5,0"
-                                VerticalAlignment="Center"
-                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                CornerRadius="9">
-                            <TextBlock HorizontalAlignment="Center"
-                                       FontSize="10.5"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       Text="{x:Bind CountText}" />
-                        </Border>
-                    </Grid>
-                </Button>
+                    <Button Grid.Column="0"
+                            AutomationProperties.Name="{x:Bind AccessibleName, Mode=OneWay}"
+                            Click="OnTabGroupHeaderClick"
+                            KeyDown="OnTabGroupHeaderKeyDown"
+                            Style="{StaticResource TabRailSectionHeaderButtonStyle}">
+                        <!--
+                            _toggleGroup animates the first FontIcon among this
+                            Grid's children, so the chevron has to stay ahead of
+                            the folder/repository glyph.
+                        -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Grid.Column="0"
+                                      AutomationProperties.AccessibilityView="Raw"
+                                      Glyph="&#xE70D;"
+                                      Style="{StaticResource TabRailSectionGlyphStyle}">
+                                <FontIcon.RenderTransform>
+                                    <RotateTransform Angle="{x:Bind ChevronAngle, Mode=OneWay}" />
+                                </FontIcon.RenderTransform>
+                            </FontIcon>
+                            <!--  A checkout reads differently from a plain folder.  -->
+                            <FontIcon Grid.Column="1"
+                                      Margin="6,0,0,0"
+                                      AutomationProperties.AccessibilityView="Raw"
+                                      Glyph="{x:Bind SectionGlyph, Mode=OneWay}"
+                                      Style="{StaticResource TabRailSectionGlyphStyle}"
+                                      Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(SectionGlyph), Mode=OneWay}" />
+                            <StackPanel Grid.Column="2"
+                                        Margin="6,0,0,0"
+                                        VerticalAlignment="Center"
+                                        Spacing="1">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Style="{StaticResource TabRailSectionNameTextBlockStyle}"
+                                               Text="{x:Bind Name, Mode=OneWay}" />
+                                    <!--  Focused tab is inside this folded section.  -->
+                                    <Ellipse Width="6"
+                                             Height="6"
+                                             Margin="6,0,0,0"
+                                             VerticalAlignment="Center"
+                                             Fill="{ThemeResource TabRailSelectionAccentBrush}"
+                                             Visibility="{x:Bind ActiveMarkerVisibility, Mode=OneWay}" />
+                                </StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Style="{StaticResource TabRailSectionPathTextBlockStyle}"
+                                               Text="{x:Bind Path, Mode=OneWay}"
+                                               ToolTipService.ToolTip="{x:Bind Path, Mode=OneWay}"
+                                               Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Path), Mode=OneWay}" />
+                                    <!--
+                                        Every tab in one checkout is on the same
+                                        branch, so the section says it once here
+                                        instead of every row repeating it.
+                                    -->
+                                    <Border Grid.Column="1"
+                                            Margin="6,0,0,0"
+                                            Style="{StaticResource TabRailBranchPillStyle}"
+                                            Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(Branch), Mode=OneWay}">
+                                        <TextBlock Foreground="{ThemeResource TabRailBranchBrush}"
+                                                   Style="{StaticResource TabRailSectionPathTextBlockStyle}"
+                                                   Text="{x:Bind Branch, Mode=OneWay}" />
+                                    </Border>
+                                </Grid>
+                            </StackPanel>
+                            <!--  A tab count is neither urgent nor unread: plain tertiary text, no pill.  -->
+                            <TextBlock Grid.Column="3"
+                                       Style="{StaticResource TabRailCountTextBlockStyle}"
+                                       Text="{x:Bind CountText, Mode=OneWay}" />
+                        </Grid>
+                    </Button>
 
-                <Button x:Uid="TabGroupNewTabButton"
-                        Grid.Column="1"
-                        Width="26"
-                        Height="26"
-                        Padding="0"
-                        VerticalAlignment="Center"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Click="OnTabGroupNewTabClick"
-                        Content="&#xE710;"
-                        CornerRadius="4"
-                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                        FontSize="11"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                        Visibility="{x:Bind CanOpenNewTab}" />
-            </Grid>
+                    <!--
+                        _setHeaderNewTabButtonOpacity picks this out as the
+                        header's only direct Button child with a fixed width -
+                        TabRailIconButtonStyle sets one, TabRailSectionHeader-
+                        ButtonStyle deliberately leaves Width unset. Keep it
+                        that way, on both sides.
+                    -->
+                    <Button x:Uid="TabGroupNewTabButton"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Click="OnTabGroupNewTabClick"
+                            Content="&#xE710;"
+                            GotFocus="OnTabGroupNewTabGotFocus"
+                            LostFocus="OnTabGroupNewTabLostFocus"
+                            Opacity="0"
+                            Style="{StaticResource TabRailIconButtonStyle}"
+                            Visibility="{x:Bind CanOpenNewTab, Mode=OneWay}">
+                        <Button.OpacityTransition>
+                            <ScalarTransition Duration="0:0:0.12" />
+                        </Button.OpacityTransition>
+                    </Button>
+                </Grid>
+            </StackPanel>
         </DataTemplate>
 
         <DataTemplate x:Key="TabRailTabTemplate"
                       x:DataType="local:Tab">
-            <Grid MinHeight="44"
-                  Padding="8,4"
+            <!--
+                One tab row. The title is what the rail is for, so it gets the
+                width: nothing else claims any until it has something to say.
+                The whole row carries one tooltip (RailTooltip) - the title
+                TextBlock no longer runs its own, so the two can't fight.
+            -->
+            <Grid x:Name="RailRowRoot"
+                  Padding="{x:Bind RailPadding, Mode=OneWay}"
                   HorizontalAlignment="Stretch"
-                  AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
-                  ColumnSpacing="8"
-                  ContextFlyout="{x:Bind TabViewItem.ContextFlyout, Mode=OneWay}">
+                  AutomationProperties.Name="{x:Bind RailAccessibleName, Mode=OneWay}"
+                  Background="Transparent"
+                  ContextFlyout="{x:Bind TabViewItem.ContextFlyout, Mode=OneWay}"
+                  PointerEntered="OnVerticalTabRowPointerEntered"
+                  PointerExited="OnVerticalTabRowPointerExited"
+                  ToolTipService.Placement="Right"
+                  ToolTipService.ToolTip="{x:Bind RailTooltip, Mode=OneWay}">
+                <!--
+                    No ColumnSpacing: a Grid pads between its columns even when
+                    a column's content is collapsed, which is exactly what used
+                    to reserve room for status glyphs nobody was showing. The
+                    gaps are margins on the children instead, and a collapsed
+                    child contributes neither size nor margin.
+                -->
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="16" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="24" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <mux:ProgressRing Grid.Column="0"
-                                  Width="15"
-                                  Height="15"
-                                  MinWidth="0"
-                                  MinHeight="0"
-                                  IsActive="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
-                                  IsIndeterminate="{x:Bind TabStatus.IsProgressRingIndeterminate, Mode=OneWay}"
-                                  Visibility="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
-                                  Value="{x:Bind TabStatus.ProgressValue, Mode=OneWay}" />
-                <IconSourceElement Grid.Column="0"
-                                   Width="16"
-                                   Height="16"
-                                   IconSource="{x:Bind mtu:IconPathConverter.IconSourceWUX(Icon), Mode=OneWay}"
-                                   Visibility="{x:Bind mtu:Converters.InvertedBooleanToVisibility(TabStatus.IsProgressRingActive), Mode=OneWay}" />
+                <Grid Grid.Column="0"
+                      Width="16"
+                      Height="16"
+                      VerticalAlignment="Center">
+                    <mux:ProgressRing Width="15"
+                                      Height="15"
+                                      MinWidth="0"
+                                      MinHeight="0"
+                                      IsActive="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
+                                      IsIndeterminate="{x:Bind TabStatus.IsProgressRingIndeterminate, Mode=OneWay}"
+                                      Visibility="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
+                                      Value="{x:Bind TabStatus.ProgressValue, Mode=OneWay}" />
+                    <IconSourceElement Width="16"
+                                       Height="16"
+                                       IconSource="{x:Bind mtu:IconPathConverter.IconSourceWUX(Icon), Mode=OneWay}"
+                                       Visibility="{x:Bind mtu:Converters.InvertedBooleanToVisibility(TabStatus.IsProgressRingActive), Mode=OneWay}" />
+                    <!--
+                        The tab colour rides on the corner of the icon rather
+                        than taking a column of its own: unset it is a fully
+                        transparent brush, and it costs the title nothing.
+                    -->
+                    <Ellipse Width="6"
+                             Height="6"
+                             Margin="0,0,-1,-1"
+                             HorizontalAlignment="Right"
+                             VerticalAlignment="Bottom"
+                             Fill="{x:Bind mtu:Converters.ColorToBrush(TabStatus.TabColorIndicator), Mode=OneWay}" />
+                </Grid>
 
                 <StackPanel Grid.Column="1"
-                            VerticalAlignment="Center">
-                    <TextBlock PointerCanceled="OnVerticalTabTitlePointerCanceled"
-                               PointerCaptureLost="OnVerticalTabTitlePointerCaptureLost"
-                               PointerEntered="OnVerticalTabTitlePointerEntered"
-                               PointerExited="OnVerticalTabTitlePointerExited"
-                               Text="{x:Bind Title, Mode=OneWay}"
-                               TextTrimming="CharacterEllipsis" />
-                    <!--  Project (working directory) and git branch of the pane's current working directory.  -->
-                    <StackPanel Orientation="Horizontal"
-                                Spacing="6">
-                        <TextBlock FontSize="11"
-                                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                                   Text="{x:Bind RailSubtitle, Mode=OneWay}"
-                                   TextTrimming="CharacterEllipsis"
-                                   Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailSubtitle), Mode=OneWay}" />
-                        <TextBlock FontSize="11"
-                                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                                   Text="{x:Bind GitBranch, Mode=OneWay}"
-                                   TextTrimming="CharacterEllipsis"
-                                   Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(GitBranch), Mode=OneWay}" />
-                    </StackPanel>
+                            Margin="8,0,0,0"
+                            VerticalAlignment="Center"
+                            Spacing="1">
+                    <TextBlock Style="{StaticResource TabRailTitleTextBlockStyle}"
+                               Text="{x:Bind Title, Mode=OneWay}" />
+                    <!--
+                        Location, then the branch - bound apart so the path
+                        reads as tertiary text and the branch reads as a
+                        branch. The whole line goes away when there is neither:
+                        RailMeta is empty exactly when both of them are.
+                    -->
+                    <Grid Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailMeta), Mode=OneWay}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   Style="{StaticResource TabRailMetaTextBlockStyle}"
+                                   Text="{x:Bind RailPathText, Mode=OneWay}"
+                                   Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailPathText), Mode=OneWay}" />
+                        <!--
+                            Segoe Fluent Icons and Segoe MDL2 Assets have no
+                            branch or fork glyph (checked, codepoint by
+                            codepoint, across E7xx-E9xx and F1xx-F2xx), so the
+                            branch is told apart by weight of ink alone: its own
+                            right-hand column and one notch less transparent
+                            than the path beside it.
+                        -->
+                        <Border Grid.Column="1"
+                                Margin="6,0,0,0"
+                                Style="{StaticResource TabRailBranchPillStyle}"
+                                Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailBranch), Mode=OneWay}">
+                            <TextBlock Style="{StaticResource TabRailBranchTextBlockStyle}"
+                                       Text="{x:Bind RailBranch, Mode=OneWay}" />
+                        </Border>
+                    </Grid>
                 </StackPanel>
 
-                <StackPanel Grid.Column="2"
+                <!--
+                    State. Each glyph is Collapsed when it is off, and a
+                    collapsed element takes neither width nor margin, so a row
+                    with nothing to report spends nothing on this column.
+                -->
+                <StackPanel x:Name="RailRowStatus"
+                            Grid.Column="2"
                             VerticalAlignment="Center"
                             Orientation="Horizontal">
-                    <FontIcon Margin="0,0,8,0"
-                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              FontSize="12"
+                    <!--
+                        Which agent is working in here. Deliberately the
+                        quietest thing in the row: the meta opacity, no fill,
+                        no badge - it answers a question you only ask when you
+                        are already looking at the row.
+                    -->
+                    <FontIcon Margin="6,0,0,0"
+                              AutomationProperties.Name="{x:Bind RailAgent, Mode=OneWay}"
+                              Glyph="{x:Bind RailAgentGlyph, Mode=OneWay}"
+                              Opacity="{ThemeResource TabRailMetaOpacity}"
+                              Style="{StaticResource TabRailRowGlyphStyle}"
+                              ToolTipService.ToolTip="{x:Bind RailAgent, Mode=OneWay}"
+                              Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(RailAgentGlyph), Mode=OneWay}" />
+                    <FontIcon Margin="6,0,0,0"
                               Glyph="&#xEA8F;"
+                              Style="{StaticResource TabRailRowGlyphStyle}"
                               Visibility="{x:Bind TabStatus.BellIndicator, Mode=OneWay}" />
-                    <FontIcon Margin="0,0,8,0"
-                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              FontSize="12"
+                    <FontIcon Margin="6,0,0,0"
                               Glyph="&#xE8A3;"
+                              Style="{StaticResource TabRailRowGlyphStyle}"
                               Visibility="{x:Bind TabStatus.IsPaneZoomed, Mode=OneWay}" />
-                    <FontIcon Margin="0,0,8,0"
-                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              FontSize="12"
+                    <FontIcon Margin="6,0,0,0"
                               Glyph="&#xE72E;"
+                              Style="{StaticResource TabRailRowGlyphStyle}"
                               Visibility="{x:Bind TabStatus.IsReadOnlyActive, Mode=OneWay}" />
-                    <FontIcon Margin="0,0,8,0"
-                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              FontSize="12"
+                    <FontIcon Margin="6,0,0,0"
                               Glyph="&#xEC05;"
+                              Style="{StaticResource TabRailRowGlyphStyle}"
                               Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
-                    <Ellipse Width="8"
-                             Height="8"
-                             Margin="0,0,8,0"
-                             VerticalAlignment="Center"
-                             Fill="{x:Bind mtu:Converters.ColorToBrush(TabStatus.TabColorIndicator), Mode=OneWay}" />
                 </StackPanel>
 
-                <Button x:Uid="VerticalTabCloseButton"
-                        Grid.Column="3"
-                        Width="24"
-                        Height="24"
-                        Padding="0"
-                        VerticalAlignment="Center"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Click="OnVerticalTabCloseClick"
-                        Content="&#xE711;"
-                        FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                        FontSize="10" />
+                <!--
+                    Row actions. Opacity only, never Visibility: the column
+                    keeps its width so a click at the row's edge can never land
+                    on an invisible close button, and the fade stays a pure
+                    state change with no reflow. TabRowControl raises it for the
+                    hovered row, the selected row and the row holding keyboard
+                    focus.
+                -->
+                <StackPanel x:Name="RailRowActions"
+                            Grid.Column="3"
+                            Margin="4,0,0,0"
+                            VerticalAlignment="Center"
+                            Opacity="0"
+                            Orientation="Horizontal">
+                    <StackPanel.OpacityTransition>
+                        <ScalarTransition Duration="0:0:0.1" />
+                    </StackPanel.OpacityTransition>
+                    <Button x:Uid="VerticalTabCloseButton"
+                            Click="OnVerticalTabCloseClick"
+                            Content="&#xE711;"
+                            Style="{StaticResource TabRailRowActionButtonStyle}" />
+                </StackPanel>
             </Grid>
         </DataTemplate>
 
@@ -226,8 +321,8 @@
                                            GroupHeaderTemplate="{StaticResource TabRailGroupHeaderTemplate}"
                                            TabTemplate="{StaticResource TabRailTabTemplate}" />
         <local:TabRailItemStyleSelector x:Key="TabRailItemStyleSelector"
-                                        GroupHeaderStyle="{StaticResource TabRailGroupHeaderContainerStyle}"
-                                        TabStyle="{StaticResource TabRailTabContainerStyle}" />
+                                        GroupHeaderStyle="{StaticResource TabRailHeaderContainerStyle}"
+                                        TabStyle="{StaticResource TabRailRowContainerStyle}" />
     </ContentPresenter.Resources>
 
     <Grid x:Name="VerticalTabRoot">
@@ -238,91 +333,109 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
+        <!--
+            Search. The action beside it is transparent until touched - filled
+            rectangles used to compete with the data underneath them. There is
+            deliberately no second one: another button would cost the query
+            32px in a 232px rail, and sections already fold one at a time from
+            their own headers. The elevation shield rides in this row rather
+            than a row of its own, which is worth a column here: on its own row
+            it pushed the whole list down by a line for the entire session.
+        -->
         <Grid Grid.Row="0"
-              Margin="8,8,8,4"
-              ColumnSpacing="6">
+              Margin="8,8,8,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="32" />
-                <ColumnDefinition Width="32" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <TextBox x:Name="VerticalTabSearchBox"
-                     x:Uid="VerticalTabSearchBox"
-                     Grid.Column="0"
-                     Padding="10,5,10,6"
-                     IsSpellCheckEnabled="False"
-                     TextChanged="OnVerticalTabSearchTextChanged">
-                <TextBox.ContextFlyout>
-                    <mtu:TextMenuFlyout />
-                </TextBox.ContextFlyout>
-            </TextBox>
+            <Grid Grid.Column="0">
+                <!--
+                    The magnifier and the clear button sit inside the field, so
+                    this Padding overrides TabRailSearchBoxStyle's to leave them
+                    room. It is the one metric in the rail that a token cannot
+                    express, because it depends on those two glyphs.
+                -->
+                <TextBox x:Name="VerticalTabSearchBox"
+                         x:Uid="VerticalTabSearchBox"
+                         Padding="28,4,28,6"
+                         IsSpellCheckEnabled="False"
+                         KeyDown="OnVerticalTabSearchKeyDown"
+                         Style="{StaticResource TabRailSearchBoxStyle}"
+                         TextChanged="OnVerticalTabSearchTextChanged">
+                    <TextBox.ContextFlyout>
+                        <mtu:TextMenuFlyout />
+                    </TextBox.ContextFlyout>
+                </TextBox>
 
-            <Button x:Name="CollectWindowsButton"
-                    x:Uid="CollectWindowsButton"
-                    Grid.Column="1"
-                    Width="32"
-                    Height="32"
-                    Padding="0"
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Stretch"
-                    Click="OnCollectWindowsClick">
-                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                          FontSize="12"
-                          Glyph="&#xE8DE;" />
-            </Button>
+                <FontIcon Margin="9,0,0,0"
+                          HorizontalAlignment="Left"
+                          VerticalAlignment="Center"
+                          AutomationProperties.AccessibilityView="Raw"
+                          Glyph="&#xE721;"
+                          IsHitTestVisible="False"
+                          Opacity="{ThemeResource TabRailMetaOpacity}"
+                          Style="{StaticResource TabRailRowGlyphStyle}" />
+
+                <!--  TabRowControl shows this only while there is something to clear.  -->
+                <Button x:Name="VerticalTabSearchClearButton"
+                        x:Uid="VerticalTabSearchClearButton"
+                        Margin="0,0,3,0"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center"
+                        Click="OnVerticalTabSearchClearClick"
+                        Content="&#xE711;"
+                        Style="{StaticResource TabRailRowActionButtonStyle}"
+                        Visibility="Collapsed" />
+            </Grid>
+
+            <!--  EA18 is the "Shield" glyph  -->
+            <FontIcon x:Uid="ElevationShield"
+                      Grid.Column="1"
+                      Margin="6,0,2,0"
+                      VerticalAlignment="Center"
+                      Glyph="&#xEA18;"
+                      Opacity="{ThemeResource TabRailMetaOpacity}"
+                      Style="{StaticResource TabRailRowGlyphStyle}"
+                      Visibility="{x:Bind ShowElevationShield, Mode=OneWay}" />
 
             <ToggleButton x:Name="RecentSortToggle"
                           x:Uid="RecentSortToggle"
                           Grid.Column="2"
-                          Width="32"
-                          Height="32"
-                          Padding="0"
-                          HorizontalAlignment="Stretch"
-                          VerticalAlignment="Stretch"
+                          Margin="2,0,0,0"
                           Checked="OnRecentSortToggleChecked"
-                          Unchecked="OnRecentSortToggleUnchecked">
-                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                          FontSize="12"
-                          Glyph="&#xE81C;" />
-            </ToggleButton>
+                          Content="&#xE81C;"
+                          Style="{StaticResource TabRailIconToggleButtonStyle}"
+                          Unchecked="OnRecentSortToggleUnchecked" />
         </Grid>
 
+        <!--
+            The workspace button is collapsed; it exists as the anchor
+            WorkspaceFlyout is shown at. The row is collapsed with it so an
+            empty strip never reserves a line above the list - which is what
+            the elevation shield used to do from here.
+        -->
         <StackPanel Grid.Row="1"
                     Margin="8,0,8,4"
                     Orientation="Horizontal"
                     Spacing="4"
-                    Visibility="{x:Bind ShowElevationShield, Mode=OneWay}">
-            <!--  EA18 is the "Shield" glyph  -->
-            <FontIcon x:Uid="ElevationShield"
-                      Margin="0,4,0,4"
-                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                      FontSize="16"
-                      Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                      Glyph="&#xEA18;"
-                      Visibility="{x:Bind ShowElevationShield, Mode=OneWay}" />
-
+                    Visibility="Collapsed">
             <!--  Workspace/windows button  -->
             <Button x:Name="WorkspaceDropdown"
                     x:Uid="WorkspaceDropdown"
-                    Padding="8,0,8,0"
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Stretch"
-                    Background="Transparent"
-                    BorderThickness="0"
+                    Style="{StaticResource TabRailSectionHeaderButtonStyle}"
                     Visibility="Collapsed">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal"
                                 Spacing="8">
                         <!--  EE40 is the "TaskViewSettings" glyph  -->
-                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                  FontSize="12"
-                                  Glyph="&#xEE40;" />
+                        <FontIcon Glyph="&#xEE40;"
+                                  Style="{StaticResource TabRailRowGlyphStyle}" />
                         <TextBlock x:Name="WorkspaceNameText"
                                    VerticalAlignment="Center"
-                                   FontSize="12"
+                                   Style="{StaticResource TabRailSectionNameTextBlockStyle}"
                                    Text="{x:Bind WorkspaceName, Mode=OneWay}"
-                                   TextTrimming="CharacterEllipsis"
                                    Visibility="{x:Bind mtu:Converters.StringNotEmptyToVisibility(WorkspaceName), Mode=OneWay}" />
                     </StackPanel>
                 </Button.Content>
@@ -345,13 +458,48 @@
                   ItemContainerStyleSelector="{StaticResource TabRailItemStyleSelector}"
                   ItemTemplateSelector="{StaticResource TabRailItemTemplateSelector}"
                   SelectionChanged="OnVerticalTabSelectionChanged"
-                  SelectionMode="Single" />
+                  SelectionMode="Single">
+            <!--  No item transitions. The rail regroups itself whenever a tab
+                  changes directory, project or section, and animating rows in,
+                  out and past each other for that turns a data update into a
+                  visible lurch - especially with the list rebuilt behind a
+                  window that just took focus. Selection and hover still
+                  animate; only the reflow is immediate.  -->
+            <ListView.ItemContainerTransitions>
+                <TransitionCollection />
+            </ListView.ItemContainerTransitions>
+        </ListView>
+
+        <!--
+            A query that matches nothing says so instead of leaving the rail
+            blank. TabRowControl reveals this panel and rewrites
+            VerticalTabEmptyStateText with the query that found nothing; the
+            x:Uid on it is the fallback that shows if that string is missing.
+        -->
+        <StackPanel x:Name="VerticalTabEmptyState"
+                    Grid.Row="2"
+                    VerticalAlignment="Top"
+                    Visibility="Collapsed">
+            <TextBlock x:Name="VerticalTabEmptyStateText"
+                       x:Uid="VerticalTabEmptyStateText"
+                       Style="{StaticResource TabRailEmptyStateTextBlockStyle}" />
+            <TextBlock x:Uid="VerticalTabEmptyStateHint"
+                       Style="{StaticResource TabRailEmptyStateHintTextBlockStyle}" />
+            <Button x:Uid="VerticalTabEmptyStateClearButton"
+                    HorizontalAlignment="Center"
+                    Click="OnVerticalTabSearchClearClick"
+                    Style="{StaticResource TabRailSectionHeaderButtonStyle}" />
+        </StackPanel>
 
         <Grid Grid.Row="3">
-            <!--  Remove this border after WinUI 2.8  -->
-            <Border Height="1"
+            <!--
+                The same hairline the sections use, run edge to edge: this one
+                separates two regions of the rail rather than two sections of a
+                list, so it overrides the style's inset.
+            -->
+            <Border Margin="0"
                     VerticalAlignment="Top"
-                    Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+                    Style="{StaticResource TabRailDividerStyle}" />
 
             <Grid Margin="8,6,8,8">
                 <Grid.ColumnDefinitions>
@@ -374,7 +522,7 @@
                                  DragOver="OnNewTabButtonDragOver"
                                  Drop="OnNewTabButtonDrop"
                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                 FontSize="12">
+                                 FontSize="{StaticResource TabRailGlyphFontSize}">
                     <ToolTipService.ToolTip>
                         <ToolTip Placement="Mouse">
                             <TextBlock TextWrapping="Wrap">
@@ -388,36 +536,63 @@
                     </ToolTipService.ToolTip>
                     <!--  U+E710 is the fancy plus icon.  -->
                     <mux:SplitButton.Resources>
-                        <!--  Override the SplitButton* resources to match the tab view's button's styles.  -->
+                        <!--
+                            The footer is one quiet strip: no fill and no border
+                            until the button is touched, using the same chrome
+                            ramp as the rail's icon buttons. The aliases have to
+                            sit inside ThemeDictionaries - a StaticResource
+                            resolves once, so a flat dictionary would freeze the
+                            brush at whatever the theme was at parse time.
+                            TerminalPage still writes these same keys directly
+                            when a tab colour is applied to the new-tab button.
+                            High contrast keeps the system's own chrome: a
+                            borderless transparent button is an invisible one.
+                        -->
                         <ResourceDictionary>
                             <ResourceDictionary.ThemeDictionaries>
                                 <ResourceDictionary x:Key="Light">
                                     <StaticResource x:Key="SplitButtonBackground"
-                                                    ResourceKey="TabViewButtonBackground" />
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
                                     <StaticResource x:Key="SplitButtonForeground"
-                                                    ResourceKey="TabViewButtonForeground" />
+                                                    ResourceKey="TabRailChromeForegroundBrush" />
                                     <StaticResource x:Key="SplitButtonBackgroundPressed"
-                                                    ResourceKey="TabViewButtonBackgroundPressed" />
+                                                    ResourceKey="TabRailChromePressedBrush" />
                                     <StaticResource x:Key="SplitButtonForegroundPressed"
-                                                    ResourceKey="TabViewButtonForegroundPressed" />
+                                                    ResourceKey="TabRailChromeHoverForegroundBrush" />
                                     <StaticResource x:Key="SplitButtonBackgroundPointerOver"
-                                                    ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                                    ResourceKey="TabRailChromeHoverBrush" />
                                     <StaticResource x:Key="SplitButtonForegroundPointerOver"
-                                                    ResourceKey="TabViewButtonForegroundPointerOver" />
+                                                    ResourceKey="TabRailChromeHoverForegroundBrush" />
+                                    <StaticResource x:Key="SplitButtonForegroundSecondary"
+                                                    ResourceKey="TabRailChromeForegroundBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrush"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrushPointerOver"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrushPressed"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
                                 </ResourceDictionary>
                                 <ResourceDictionary x:Key="Dark">
                                     <StaticResource x:Key="SplitButtonBackground"
-                                                    ResourceKey="TabViewButtonBackground" />
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
                                     <StaticResource x:Key="SplitButtonForeground"
-                                                    ResourceKey="TabViewButtonForeground" />
+                                                    ResourceKey="TabRailChromeForegroundBrush" />
                                     <StaticResource x:Key="SplitButtonBackgroundPressed"
-                                                    ResourceKey="TabViewButtonBackgroundPressed" />
+                                                    ResourceKey="TabRailChromePressedBrush" />
                                     <StaticResource x:Key="SplitButtonForegroundPressed"
-                                                    ResourceKey="TabViewButtonForegroundPressed" />
+                                                    ResourceKey="TabRailChromeHoverForegroundBrush" />
                                     <StaticResource x:Key="SplitButtonBackgroundPointerOver"
-                                                    ResourceKey="TabViewButtonBackgroundPointerOver" />
+                                                    ResourceKey="TabRailChromeHoverBrush" />
                                     <StaticResource x:Key="SplitButtonForegroundPointerOver"
-                                                    ResourceKey="TabViewButtonForegroundPointerOver" />
+                                                    ResourceKey="TabRailChromeHoverForegroundBrush" />
+                                    <StaticResource x:Key="SplitButtonForegroundSecondary"
+                                                    ResourceKey="TabRailChromeForegroundBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrush"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrushPointerOver"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
+                                    <StaticResource x:Key="SplitButtonBorderBrushPressed"
+                                                    ResourceKey="ControlFillColorTransparentBrush" />
                                 </ResourceDictionary>
                                 <ResourceDictionary x:Key="HighContrast">
                                     <StaticResource x:Key="SplitButtonBackground"
@@ -445,10 +620,13 @@
                     the new tab split button. TerminalPage fills this panel from
                     the active profile list; FitNewTabProfileButtons collapses
                     the buttons that would overflow the rail, so nothing (and
-                    especially not the dropdown chevron) renders clipped.
+                    especially not the dropdown chevron) renders clipped. Those
+                    buttons are built in code, so TabRailFooterProfileButtonStyle
+                    has to be applied there rather than here.
                 -->
                 <StackPanel x:Name="NewTabProfilesPanel"
                             Grid.Column="1"
+                            Margin="4,0,0,0"
                             VerticalAlignment="Center"
                             Orientation="Horizontal"
                             SizeChanged="OnNewTabProfilesPanelSizeChanged" />

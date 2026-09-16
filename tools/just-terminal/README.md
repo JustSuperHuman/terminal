@@ -1,100 +1,48 @@
-# Terminal Companion
+# JustTerminal mobile companion
 
-A React Native (Expo SDK 56) mobile client for the **Terminal Web Host**
-(`tools/terminal-web`). It connects to a running host over its WebSocket
-protocol and gives you a phone-first companion to Windows Terminal: live ANSI
-output, a control-key composer, and a streamlined session switcher — styled
-after WinUI 3 / Windows Terminal itself (Mica-grey Fluent dark chrome, the
-Windows accent, Selawik for UI text, Cascadia Mono in the terminal, and the
-Campbell color scheme).
+An Expo app for controlling your desktop terminals from Android or iOS.
 
-It deliberately drops the web sidebar's host-process list, peer hosts, bridge
-command helpers, and access-URL panel — the mobile drawer is just **sessions**
-and **launch profiles**.
+- Sessions grouped by project, with stable ordering while output streams.
+- Automatic reconnect after network interruptions or returning to the app.
+- Separate **Send** (submit a draft) and **Enter** (press the terminal key), plus **Alt+↑**, arrows, and control keys.
+- **Hide / Show keyboard** controls and per-session drafts.
+- New sessions use the last selected session's working directory.
+- A pinned **Orchestrator** opens the same conversation used on desktop and web.
+- Terminal Assist question cards for supported Claude Code and Codex prompts.
 
-## What it does
+## Connect
 
-- Connect to any reachable host by address (`192.168.1.50:10001`), with an
-  optional access token. Recent servers are remembered.
-- Render terminals with the real xterm.js engine inside a WebView, themed to
-  match the web client exactly.
-- Type via the composer (Line / Paste modes, history) and a control-key row
-  (Esc, Tab, arrows, Ctrl+C/D/L). Tap the terminal or the ⌨ button to type
-  directly with the soft keyboard.
-- Answer Claude Code and Codex questions as native option cards. This works for
-  structured ACP Agent Workspace requests and for ordinary direct/bro-launched
-  terminal sessions through Terminal Assist; a live question hides the normal
-  text keyboard, validates that it is still current, and sends the exact TUI
-  interaction when an option is tapped.
-- Paste an image from the phone clipboard, or choose one from Photos, into the
-  active terminal prompt.
-- Switch, create, rename, and stop sessions from the drawer.
-- Launch the desktop's visible Windows Terminal profiles. The host monitors its
-  `settings.json`, so profile additions, removals, renames, and hidden-state
-  changes appear on connected phones without restarting the app.
+Run the [JustTerminal desktop app](https://github.com/JustSuperHuman/terminal/releases/latest). Enter the PC's reachable host address and access token in the companion. Keep the PC running and reachable over your LAN or private network.
 
-## Run
+The host normally uses port `10001`. Open `http://localhost:10001` on the PC to find its network addresses; it chooses another port if needed. For the Android emulator, use `10.0.2.2:10001`.
+
+Configure your model provider in the desktop/web orchestrator settings. The phone shares its transcript, send, and stop controls. The optional ACP Agent Workspace requires a host that advertises ACP support; the native desktop host uses Terminal Assist for existing terminal sessions.
+
+## Develop
+
+This app uses Expo SDK 56 and custom native modules, so use a development build rather than Expo Go.
 
 ```powershell
-# 1. Start a Terminal Web Host (separate terminal)
-cd ..\terminal-web
-npm install
-npm run dev            # binds 127.0.0.1:10001
-
-# 2. Start Terminal Companion
-cd ..\just-terminal
-npm install
-npx expo start
+cd tools/just-terminal
+bun install
+bunx expo run:android
 ```
 
-Open the app in **Expo Go** (Android/iOS) or a dev build, then enter the host
-address.
-
-### Connecting from an Android emulator
-
-The emulator reaches the host's loopback at `10.0.2.2`. Use
-`10.0.2.2:10001` (the connect screen has a one-tap chip for this). Because that
-traffic arrives at the host as loopback, no token is required.
-
-### Connecting from a physical phone (same LAN)
-
-Start the host bound to the network and copy its token from the web sidebar:
+For an already installed development build:
 
 ```powershell
-npm run dev -- --host 0.0.0.0
+bunx expo start --dev-client
 ```
 
-Then enter the host's LAN address and the token in the connect screen.
+An iOS native build requires macOS or EAS. The repository's `bun run build:internal` script starts the configured internal iOS EAS build; it requires access to that Expo project and signing credentials. Mobile binaries are released separately from the Windows ZIP.
 
-## How it talks to the host
+## Check changes
 
-The native side owns one reconnecting WebSocket to `/ws` and speaks the same
-JSON protocol as the web client (`subscribe`, `input`, `resize`, `create`,
-`rename`, `kill`; receives `hello`, `sessions`, `session`, `snapshot`,
-`profiles`, `output`, `exit`). Session creation uses `POST /api/sessions`; a
-profile launch carries its live profile id so Windows Terminal opens that exact
-configured profile and the new session id is returned for auto-selection.
-
-Terminal rendering happens in a WebView that hosts xterm.js. The native side
-forwards `snapshot`/`output` into the page via `injectJavaScript`, and the page
-posts keystrokes/resize back via `window.ReactNativeWebView.postMessage`.
-
-The separate Agent Workspace is the full ACP surface. Existing terminal TUIs
-cannot be converted into ACP sessions after launch; they appear in the same
-session list with a Claude/Codex identity and use Terminal Assist instead, so
-the question-and-answer UX stays consistent without pretending the underlying
-protocol is attached.
-
-## Layout
-
+```powershell
+bun run typecheck
+bun run smoke:mobile-reliability
+bun run smoke:mobile-orchestrator
+bun run smoke:terminal-html
 ```
-App.tsx                     connection state, connect vs terminal screen
-src/TerminalScreen.tsx      session state, header + terminal + composer + drawer
-src/terminalHtml.ts         xterm.js WebView page + RN bridge
-src/lib/socket.ts           reconnecting WebSocket client (configurable endpoint)
-src/lib/endpoint.ts         address -> http/ws URLs + token
-src/lib/api.ts              REST: create session, reachability probe
-src/lib/storage.ts          remembered servers (AsyncStorage)
-src/components/             ConnectScreen, Header, TerminalView, CommandBar, SessionsDrawer
-src/theme.ts                WinUI 3 dark design tokens (Mica ramp, Fluent hues)
-```
+
+The terminal WebView uses Ghostty's WASM renderer. The final smoke check needs Chrome or Edge installed.

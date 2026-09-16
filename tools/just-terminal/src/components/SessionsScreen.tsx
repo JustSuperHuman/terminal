@@ -1,3 +1,6 @@
+import type { OrchestratorStatus } from "../orchestratorTypes";
+import { groupSessions } from "../lib/sessionOrder";
+import type { TerminalProject } from "../types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
@@ -30,6 +33,7 @@ export interface CreateSpec {
 interface SessionsScreenProps {
   visible: boolean;
   sessions: TerminalSessionSummary[];
+  projects: TerminalProject[];
   profiles: TerminalProfile[];
   activeId?: string;
   unread: Record<string, number>;
@@ -37,6 +41,8 @@ interface SessionsScreenProps {
   activeCwd?: string;
   recentCwds: string[];
   acpState?: AcpBridgeState;
+  orchestratorState?: OrchestratorStatus["state"];
+  onOpenOrchestrator: () => void;
   onClose: () => void;
   onOpenAgentWorkspace: () => void;
   onSelect: (id: string) => void;
@@ -125,6 +131,7 @@ interface SessionGroup {
 export function SessionsScreen({
   visible,
   sessions,
+  projects,
   profiles,
   activeId,
   unread,
@@ -132,6 +139,8 @@ export function SessionsScreen({
   activeCwd,
   recentCwds,
   acpState,
+  orchestratorState,
+  onOpenOrchestrator,
   onClose,
   onOpenAgentWorkspace,
   onSelect,
@@ -154,8 +163,7 @@ export function SessionsScreen({
   // While a session row is being swiped to delete, lock the list's vertical
   // scroll so the two gestures don't fight.
   const [rowSwiping, setRowSwiping] = useState(false);
-  // Recency sort: flat list ordered by last update, most recent at the BOTTOM
-  // (closest to the thumb). Off = grouping by working directory. Persisted.
+  // Sort by creation time within each project; streaming output never reorders rows.
   const [sortRecent, setSortRecent] = useState(false);
 
   // Fast X-style push: slide + fade, ~160ms, native driver. The screen mounts
@@ -234,37 +242,11 @@ export function SessionsScreen({
     return normalizedQuery ? alive.filter((session) => sessionMatches(session, normalizedQuery)) : alive;
   }, [sessions, hiddenIds, normalizedQuery]);
 
-  // Sessions are grouped by their current working directory: each distinct cwd
-  // is a "project" heading (folder name + full path). Groups are ordered by
-  // their most recent activity. With recency sort on, grouping collapses into
-  // one flat list ordered oldest → newest (recent at the bottom).
-  const sessionGroups = useMemo<SessionGroup[]>(() => {
-    if (sortRecent) {
-      const ordered = [...visibleSessions].sort(
-        (a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
-      );
-      return ordered.length > 0 ? [{ key: "__recent__", label: "", sessions: ordered }] : [];
-    }
-    const byCwd = new Map<string, TerminalSessionSummary[]>();
-    for (const session of visibleSessions) {
-      const key = session.cwd || "";
-      const bucket = byCwd.get(key);
-      if (bucket) {
-        bucket.push(session);
-      } else {
-        byCwd.set(key, [session]);
-      }
-    }
-    return [...byCwd.entries()]
-      .map(([cwd, grouped]) => ({
-        key: cwd || "__none__",
-        label: cwd ? folderName(cwd) : "No directory",
-        sublabel: cwd || undefined,
-        sessions: grouped,
-        latest: Math.max(...grouped.map((session) => new Date(session.updatedAt).getTime() || 0)),
-      }))
-      .sort((a, b) => b.latest - a.latest);
-  }, [visibleSessions, sortRecent]);
+  const sessionGroups = useMemo<SessionGroup[]>(() =>
+    groupSessions(visibleSessions, projects).map((group) => ({
+      ...group,
+      sessions: sortRecent ? [...group.sessions].reverse() : group.sessions,
+    })), [visibleSessions, projects, sortRecent]);
 
   function deleteSession(id: string) {
     setHiddenIds((current) => (current.includes(id) ? current : [...current, id]));
@@ -337,7 +319,7 @@ export function SessionsScreen({
           hitSlop={10}
           accessibilityRole="button"
           accessibilityLabel={
-            sortRecent ? "Group sessions by directory" : "Sort sessions by last update, recent at the bottom"
+            sortRecent ? "Oldest sessions first within each project" : "Newest sessions first within each project"
           }
           style={({ pressed }) => [
             styles.iconCircle,
@@ -378,6 +360,20 @@ export function SessionsScreen({
           </Text>
         ) : null}
       </View>
+
+      <Pressable
+        onPress={onOpenOrchestrator}
+        accessibilityRole="button"
+        accessibilityLabel="Open pinned Orchestrator chat shared with desktop"
+        style={({ pressed }) => [styles.agentWorkspaceRow, { marginHorizontal: 16, marginBottom: 10 }, pressed && styles.agentWorkspacePressed]}
+      >
+        <View style={styles.agentWorkspaceCopy}>
+          <Text style={styles.agentWorkspaceTitle}>Orchestrator</Text>
+          <Text style={styles.agentWorkspaceSubtitle}>{orchestratorState === "running" ? "Working…" : orchestratorState === "unconfigured" ? "Set up on desktop" : "Shared with desktop"}</Text>
+        </View>
+        <Text style={styles.agentWorkspaceSubtitle}>Pinned</Text>
+        <Text style={styles.agentWorkspaceChevron}>›</Text>
+      </Pressable>
 
       <ScrollView
         style={styles.body}

@@ -455,13 +455,52 @@
     <value>Shift+Click to open a new window</value>
   </data>
   <data name="VerticalTabSearchBox.PlaceholderText" xml:space="preserve">
-    <value>Search tabs, paths, output</value>
+    <value>Search tabs</value>
+    <comment>Placeholder in the vertical tab rail's search field. Kept very short: the field is only about 150px wide in a 240px rail, and a longer string is clipped mid-word.</comment>
+  </data>
+  <data name="VerticalTabSearchBox.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Search tabs, paths and output</value>
+  </data>
+  <data name="VerticalTabSearchBox.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Search tab titles, paths and terminal output</value>
+  </data>
+  <data name="VerticalTabSearchClearButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Clear search</value>
+  </data>
+  <data name="VerticalTabSearchClearButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Clear search</value>
+  </data>
+  <data name="VerticalTabEmptyStateText.Text" xml:space="preserve">
+    <value>No tabs match your search</value>
+    <comment>Shown in the vertical tab rail when a search matches no tabs. Replaced at runtime with TabRailNoSearchResults, which names the query.</comment>
+  </data>
+  <data name="VerticalTabEmptyStateHint.Text" xml:space="preserve">
+    <value>Try fewer or different words.</value>
+    <comment>Second line of the vertical tab rail's empty search result state.</comment>
+  </data>
+  <data name="VerticalTabEmptyStateClearButton.Content" xml:space="preserve">
+    <value>Clear search</value>
+  </data>
+  <data name="VerticalTabEmptyStateClearButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Clear search</value>
+  </data>
+  <data name="TabRailNoSearchResults" xml:space="preserve">
+    <value>No tabs match "{0}"</value>
+    <comment>{Locked="{0}"}Shown in the vertical tab rail when a search matches no tabs. {0} is the text the user typed.</comment>
   </data>
   <data name="RecentSortToggle.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
     <value>Sort tabs by recent activity</value>
   </data>
   <data name="RecentSortToggle.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>Sort tabs by recent activity</value>
+  </data>
+  <data name="TabGroupHeaderAccessibleNameExpanded" xml:space="preserve">
+    <value>{0}, {1} tabs, expanded</value>
+    <comment>{0} is a project name, {1} the number of tabs in its section of the vertical tab rail.</comment>
+  </data>
+  <data name="TabGroupHeaderAccessibleNameCollapsed" xml:space="preserve">
+    <value>{0}, {1} tabs, collapsed</value>
+    <comment>{0} is a project name, {1} the number of tabs in its section of the vertical tab rail.</comment>
   </data>
   <data name="TabRailUngroupedSectionName" xml:space="preserve">
     <value>Other</value>
@@ -565,44 +604,6 @@
   </data>
   <data name="ConfirmCloseDialog_MultiplePanesPrimary" xml:space="preserve">
     <value>Close panes</value>
-  </data>
-  <data name="CollectWindowsButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
-    <value>Collect windows</value>
-  </data>
-  <data name="CollectWindowsButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
-    <value>Collect windows</value>
-  </data>
-  <data name="CollectWindowsDialogTitle" xml:space="preserve">
-    <value>Collect terminal windows?</value>
-  </data>
-  <data name="CollectWindowsDialogBody" xml:space="preserve">
-    <value>Collect {0} tab(s) from {1} other window(s) into this window?</value>
-  </data>
-  <data name="CollectWindowsDialogBodyWithExternal" xml:space="preserve">
-    <value>Collect {0} tab(s) from {1} other window(s) into this window?
-
-{2} other terminal window(s) were found outside this Terminal instance. Windows does not expose a safe live-session handoff for other terminal apps, packages, or elevations, so those windows cannot be moved into tabs.</value>
-  </data>
-  <data name="CollectWindowsDialogCollect" xml:space="preserve">
-    <value>Collect</value>
-  </data>
-  <data name="CollectWindowsDialogCancel" xml:space="preserve">
-    <value>Cancel</value>
-  </data>
-  <data name="CollectWindowsDialogNoneTitle" xml:space="preserve">
-    <value>No terminal windows to collect</value>
-  </data>
-  <data name="CollectWindowsDialogNoneBody" xml:space="preserve">
-    <value>There are no other Terminal windows in this instance.</value>
-  </data>
-  <data name="CollectWindowsDialogExternalOnlyTitle" xml:space="preserve">
-    <value>Other terminal windows found</value>
-  </data>
-  <data name="CollectWindowsDialogExternalOnlyBody" xml:space="preserve">
-    <value>Found {0} terminal window(s) outside this Terminal instance. Windows does not expose a safe live-session handoff for other terminal apps, packages, or elevations, so there are no tabs this window can collect.</value>
-  </data>
-  <data name="CollectWindowsDialogClose" xml:space="preserve">
-    <value>OK</value>
   </data>
   <data name="DontAskAgainCheckBox.Content" xml:space="preserve">
     <value>Don't ask me again</value>

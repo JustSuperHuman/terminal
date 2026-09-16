@@ -4,7 +4,6 @@ node_modules/
 .terminal-web-projects.json
 .terminal-web-server.json
 .terminal-web-server.log
-.terminal-web-orchestrator.mcp.json
 .task-demo.log
 .task-demo-config.json
 .task-demo-requests.json

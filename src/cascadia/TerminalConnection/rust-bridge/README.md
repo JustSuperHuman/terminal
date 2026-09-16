@@ -37,6 +37,12 @@ Set-MsBuildDevEnvironment
 msbuild .\OpenConsole.slnx /t:Terminal\TerminalConnection /p:Platform=x64 /p:Configuration=Debug /m
 ```
 
-ACP and the experimental agent orchestrator are separate optional adapters,
-not terminal transport. The Rust bridge advertises those capabilities as
-unavailable instead of starting the former JavaScript host implicitly.
+ACP is a separate optional adapter, not terminal transport; the Rust bridge
+advertises it as unavailable instead of starting the former JavaScript host
+implicitly.
+
+The orchestrator (`src/orchestrator/`) is built in: a chat agent over every
+session that talks to an OpenAI-compatible endpoint (OpenRouter by default,
+`OPENROUTER_API_KEY` from the environment or a key entered in the panel) and
+drives tabs through in-process tools. `cargo test live_orchestrator --
+--ignored --nocapture` runs one real turn against the configured endpoint.

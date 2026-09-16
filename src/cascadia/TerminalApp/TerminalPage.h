@@ -5,6 +5,10 @@
 
 #include <ThrottledFunc.h>
 
+#include <map>
+#include <unordered_map>
+#include <winrt/Windows.Data.Json.h>
+
 #include "TerminalPage.g.h"
 #include "Tab.h"
 #include "AppKeyBindings.h"
@@ -225,9 +229,7 @@ namespace winrt::TerminalApp::implementation
         bool OnDirectKeyEvent(const uint32_t vkey, const uint8_t scanCode, const bool down);
 
         void AttachContent(Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::ActionAndArgs> args, uint32_t tabIndex);
-        winrt::Windows::Foundation::IAsyncOperation<bool> ConfirmCollectOtherWindows(uint32_t windowCount, uint32_t tabCount, uint32_t externalWindowCount);
         void SendContentToOther(winrt::TerminalApp::RequestReceiveContentArgs args);
-        void SendAllTabsToWindow(uint64_t targetWindowId);
 
         uint32_t NumberOfTabs() const;
 
@@ -245,7 +247,6 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<IInspectable, IInspectable> SetTaskbarProgress;
         til::typed_event<IInspectable, IInspectable> Initialized;
         til::typed_event<IInspectable, IInspectable> IdentifyWindowsRequested;
-        til::typed_event<IInspectable, IInspectable> CollectOtherWindowsRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::RenameWindowRequestedArgs> RenameWindowRequested;
         til::typed_event<IInspectable, IInspectable> SummonWindowRequested;
         til::typed_event<IInspectable, winrt::TerminalApp::SummonWindowByIdRequestedArgs> SummonWindowByIdRequested;
@@ -408,9 +409,11 @@ namespace winrt::TerminalApp::implementation
 
         // Polls each tab's cwd for its git branch; title updates refresh a
         // single tab immediately so `cd` feels instant.
-        void _GitBranchTimerTick(const IInspectable& sender, const IInspectable& e);
-        safe_void_coroutine _RefreshTabGitBranch(winrt::TerminalApp::Tab tab);
-        SafeDispatcherTimer _gitBranchTimer;
+        void _DirectoryRefreshTimerTick(const IInspectable& sender, const IInspectable& e);
+        safe_void_coroutine _RefreshTabDirectory(winrt::TerminalApp::Tab tab);
+        void _ControlWorkingDirectoryChangedHandler(const IInspectable& sender, const IInspectable& args);
+        winrt::hstring _InheritedStartingDirectory();
+        SafeDispatcherTimer _directoryRefreshTimer;
 
         // Horizontal project tabs, backed by the terminal-web project store.
         struct BridgeProject
@@ -422,18 +425,35 @@ namespace winrt::TerminalApp::implementation
             bool operator==(const BridgeProject&) const = default;
         };
         std::vector<BridgeProject> _bridgeProjects;
+        // The strip's selection is a *rail section*, not a bridge project:
+        // the rail's headings are what the strip shows, so they are what it
+        // filters by. The two below stay derived from it - a bridge project
+        // behind the section's directory still supplies the id new tabs are
+        // stamped with, and the directory is where new terminals start.
+        winrt::hstring _activeSectionKey;
         winrt::hstring _activeProjectId;
         winrt::hstring _activeProjectCwd;
+        // Section renames made here, keyed by TabRowControl::NormalizeDirectory.
+        // They keep a rename working while the bridge is offline and are
+        // dropped again once the bridge reports the same name.
+        std::map<std::wstring, winrt::hstring> _sectionNameOverrides;
+        // Strip order as normalized directories, set by a chip drag. The
+        // bridge's project order fills in whatever this doesn't name.
+        std::vector<std::wstring> _sectionOrder;
         std::atomic<bool> _projectFetchInFlight{ false };
 
         safe_void_coroutine _RefreshBridgeProjects();
+        void _OnRailSectionsChanged();
         void _RebuildProjectTabs();
-        void _SelectProject(const winrt::hstring& projectId, const winrt::hstring& projectCwd);
+        void _SelectSection(const winrt::hstring& sectionKey, const winrt::hstring& sectionDirectory = {});
+        void _UpdateActiveSectionTargets();
         void _ShowNewProjectTip();
         safe_void_coroutine _CreateProjectFromTip();
-        safe_void_coroutine _CloseProjectRequested(winrt::hstring projectId, winrt::hstring projectName);
-        void _ShowRenameProjectFlyout(const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const winrt::hstring& projectId, const winrt::hstring& currentName);
-        safe_void_coroutine _RenameProject(winrt::hstring projectId, winrt::hstring newName);
+        safe_void_coroutine _CloseSectionRequested(winrt::hstring sectionKey, winrt::hstring sectionName, winrt::hstring directory);
+        void _CloseSectionForKey(const winrt::hstring& sectionKey);
+        void _RenameSectionForKey(const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const winrt::hstring& sectionKey);
+        void _ShowRenameSectionFlyout(const winrt::Windows::UI::Xaml::FrameworkElement& anchor, const winrt::hstring& directory, const winrt::hstring& currentName);
+        safe_void_coroutine _RenameSection(winrt::hstring directory, winrt::hstring newName);
         void _ApplyProjectNames();
 
     public:
@@ -449,32 +469,57 @@ namespace winrt::TerminalApp::implementation
         bool _newProjectPressedEnter{ false };
         std::vector<winrt::hstring> _recentProjectDirs;
         safe_void_coroutine _FetchRecentProjectDirs();
-        safe_void_coroutine _ProjectDropReorder(winrt::hstring draggedId, float dropX);
+        safe_void_coroutine _SectionDropReorder(winrt::hstring draggedKey, float dropX);
 
-        // Orchestrator panel: a collapsible right-side pane hosting the
-        // server-managed orchestrator session (a Claude Code / Codex TUI with
-        // cross-session MCP tools), attached over the terminal-web WebSocket.
-        struct OrchestratorStatus
+        // Orchestrator panel: a chat agent hosted by the terminal bridge that
+        // sees every tab (native, web, mobile) and drives them through tools.
+        // The transcript is shared with the other clients; this pane renders
+        // it from GET /api/orchestrator, incrementally by item id/revision,
+        // and sends messages to POST /api/orchestrator/messages.
+        struct OrchestratorItemView
         {
-            winrt::hstring State; // "stopped" | "starting" | "running"
-            winrt::hstring Agent;
-            winrt::hstring SessionId;
-
-            bool operator==(const OrchestratorStatus&) const = default;
+            uint64_t Rev{ 0 };
+            winrt::Windows::UI::Xaml::Controls::Border Container{ nullptr };
         };
-        OrchestratorStatus _orchestratorStatus;
-        winrt::hstring _orchestratorAttachedSessionId;
-        winrt::Microsoft::Terminal::Control::TermControl _orchestratorControl{ nullptr };
-        winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection _orchestratorConnection{ nullptr };
-        std::atomic<bool> _orchestratorFetchInFlight{ false };
+        struct OrchestratorModelEntry
+        {
+            winrt::hstring Id;
+            winrt::hstring Name;
+            winrt::hstring Meta;
+        };
+        std::unordered_map<std::wstring, OrchestratorItemView> _orchestratorItems;
+        std::vector<OrchestratorModelEntry> _orchestratorRecommendedModels;
+        std::vector<OrchestratorModelEntry> _orchestratorAllModels;
+        winrt::hstring _orchestratorState; // idle | running | unconfigured | unavailable | offline
+        winrt::hstring _orchestratorModel;
+        winrt::hstring _orchestratorStep;
+        winrt::hstring _orchestratorKeyEnv;
+        uint64_t _orchestratorSeq{ 0 };
+        bool _orchestratorNeedsFullRefresh{ true };
         bool _orchestratorPaneOpen{ false };
+        bool _orchestratorStickToBottom{ true };
+        std::atomic<bool> _orchestratorFetchInFlight{ false };
+        winrt::Windows::UI::Xaml::DispatcherTimer _orchestratorPollTimer{ nullptr };
 
         void _ToggleOrchestratorPane();
         safe_void_coroutine _RefreshOrchestratorStatus();
-        void _ApplyOrchestratorStatus(const OrchestratorStatus& status);
-        void _AttachOrchestratorSession(const winrt::hstring& sessionId);
-        void _DetachOrchestratorSession();
-        safe_void_coroutine _PostOrchestratorCommand(std::wstring path, std::string body);
+        void _ApplyOrchestratorStatus(const winrt::Windows::Data::Json::JsonObject& status, bool partial);
+        void _ApplyOrchestratorItem(const winrt::Windows::Data::Json::JsonObject& item);
+        winrt::Windows::UI::Xaml::UIElement _BuildOrchestratorItemContent(const winrt::Windows::Data::Json::JsonObject& item);
+        void _ResetOrchestratorTranscript();
+        void _UpdateOrchestratorChrome();
+        void _ShowOrchestratorError(const winrt::hstring& message);
+        void _ScrollOrchestratorToBottom();
+        safe_void_coroutine _SendOrchestratorMessage(winrt::hstring text);
+        safe_void_coroutine _PostOrchestratorCommand(std::wstring verb, std::wstring path, std::string body);
+        std::string _OrchestratorConfigBody(bool includeKey);
+        safe_void_coroutine _SaveOrchestratorConfig(std::string body);
+        safe_void_coroutine _TestOrchestratorConnection();
+        safe_void_coroutine _LoadOrchestratorModels(bool refresh);
+        safe_void_coroutine _PopulateOrchestratorSettings();
+        void _FillOrchestratorModelList(const std::vector<OrchestratorModelEntry>& entries);
+        void _FilterOrchestratorModels();
+        void _OrchestratorComposerKeyDown(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
 
         // Orchestrator pane resize (mirrors the vertical tab rail's handle,
         // but the pane hangs off the right edge so dragging left widens it).

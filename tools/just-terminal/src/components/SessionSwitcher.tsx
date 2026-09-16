@@ -64,6 +64,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
   ref
 ) {
   const [active, setActive] = useState(false);
+  const [scrubSessions, setScrubSessions] = useState(sessions);
   const [selected, setSelected] = useState(0);
   const [containerH, setContainerH] = useState(0);
 
@@ -82,8 +83,8 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
   const activeRef = useRef(false);
 
   useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
+    if (!activeRef.current) sessionsRef.current = sessions;
+  }, [sessions, active]);
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
@@ -115,6 +116,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
       return false;
     }
     const start = Math.max(0, list.findIndex((item) => item.id === activeIdRef.current));
+    setScrubSessions(list);
     anchorIndexRef.current = start;
     anchorSessionIdRef.current = list[start]?.id;
     selectedRef.current = start;
@@ -148,14 +150,14 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
       activeRef.current = false;
       onScrubbingChangeRef.current?.(false);
       const target = sessionsRef.current[selectedRef.current];
-      if (commit && target) {
+      if (commit && target && sessions.some((session) => session.id === target.id)) {
         // The terminal was already previewed to `target`; finalize (clears unread,
         // closes the drawer). Only celebrate when it's an actual change.
         if (target.id !== anchorSessionIdRef.current) {
           confirm();
         }
         onSelect(target.id);
-      } else if (!commit && anchorSessionIdRef.current) {
+      } else if (anchorSessionIdRef.current && sessions.some((session) => session.id === anchorSessionIdRef.current)) {
         // Cancelled mid-scrub: snap the terminal back to where we started.
         onPreviewRef.current?.(anchorSessionIdRef.current);
       }
@@ -165,7 +167,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
         }
       });
     },
-    [fade, onSelect]
+    [fade, onSelect, sessions]
   );
 
   useImperativeHandle(ref, () => ({ begin, moveBy, finish }), [begin, moveBy, finish]);
@@ -189,7 +191,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
           <View style={styles.topHint}>
             <Text style={styles.topHintText}>Switch terminal</Text>
             <Text style={styles.topHintSub}>
-              {selected + 1} / {sessions.length}
+              {selected + 1} / {scrubSessions.length}
             </Text>
           </View>
 
@@ -200,7 +202,7 @@ export const SessionSwitcher = forwardRef<SessionSwitcherHandle, SessionSwitcher
             style={[styles.list, { transform: [{ translateY: listTranslate }] }]}
             pointerEvents="none"
           >
-            {sessions.map((session, index) => {
+            {scrubSessions.map((session, index) => {
               const isSelected = index === selected;
               const cardOpacity = pos.interpolate({
                 inputRange: [index - 2.4, index, index + 2.4],

@@ -11,15 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  ApiError,
-  createProject,
-  createSession,
-  deleteProject,
-  getBootstrap,
-  startOrchestrator,
-  stopOrchestrator
-} from "@/lib/api";
+import { ApiError, createProject, createSession, deleteProject, getBootstrap } from "@/lib/api";
 import { setAccessToken, withAccessToken } from "@/lib/access-token";
 import { buildTerminalTargets, type TerminalTarget } from "@/lib/session-targets";
 import { terminalSocket, type SocketStatus } from "@/lib/terminal-socket";
@@ -28,7 +20,6 @@ import type {
   BridgeCommandInfo,
   CreateSessionOptions,
   HostTerminalProcess,
-  OrchestratorAgent,
   OrchestratorStatus,
   ServerInfo,
   ServerMessage,
@@ -73,17 +64,11 @@ export function App() {
   );
   const [orchestratorPulse, setOrchestratorPulse] = useState(false);
   const activeTargetIdRef = useRef<string | undefined>(activeTargetId);
-  const orchestratorSessionIdRef = useRef<string | undefined>();
   const orchestratorOpenRef = useRef(orchestratorOpen);
   const terminalSurfaceRef = useRef<TerminalSurfaceHandle | null>(null);
 
-  // The orchestrator session lives exclusively in its own panel; keep it out
-  // of the regular target list and sidebar.
+  // Special-kind sessions never belong in the regular target list or sidebar.
   const terminalSessions = useMemo(() => sessions.filter((session) => session.kind !== "orchestrator"), [sessions]);
-  const orchestratorSession = useMemo(
-    () => sessions.find((session) => session.id === orchestrator?.sessionId),
-    [orchestrator?.sessionId, sessions]
-  );
 
   const targets = useMemo(() => buildTerminalTargets(terminalSessions, peerHosts), [terminalSessions, peerHosts]);
   const activeTarget = useMemo(() => {
@@ -109,10 +94,6 @@ export function App() {
   useEffect(() => {
     activeTargetIdRef.current = activeTargetId;
   }, [activeTargetId]);
-
-  useEffect(() => {
-    orchestratorSessionIdRef.current = orchestrator?.sessionId;
-  }, [orchestrator?.sessionId]);
 
   useEffect(() => {
     orchestratorOpenRef.current = orchestratorOpen;
@@ -144,7 +125,6 @@ export function App() {
     setBridgeCommands(payload.bridgeCommands);
     setServerInfo(payload.server);
     setOrchestrator(payload.orchestrator);
-    orchestratorSessionIdRef.current = payload.orchestrator?.sessionId;
     setActiveTargetId((current) => current ?? payload.sessions.find((session) => session.kind !== "orchestrator")?.id);
     setAuthRequired(false);
     setActionError("");
@@ -193,8 +173,31 @@ export function App() {
       }
 
       if (message.type === "orchestrator") {
-        setOrchestrator(message.orchestrator);
-        orchestratorSessionIdRef.current = message.orchestrator.sessionId;
+        // Status events carry no transcript; keep the one already loaded.
+        setOrchestrator((current) => ({
+          ...message.orchestrator,
+          transcript: message.orchestrator.transcript ?? current?.transcript ?? []
+        }));
+      }
+
+      if (message.type === "orchestrator_item") {
+        const item = message.item;
+        setOrchestrator((current) => {
+          const transcript = current?.transcript ?? [];
+          const exists = transcript.some((existing) => existing.id === item.id);
+          return {
+            ...(current ?? { state: "idle" as const }),
+            seq: message.seq,
+            transcript: exists ? transcript.map((existing) => (existing.id === item.id ? item : existing)) : [...transcript, item]
+          };
+        });
+        if (item.role === "assistant" && item.status === "done" && item.text && !orchestratorOpenRef.current) {
+          setOrchestratorPulse(true);
+        }
+      }
+
+      if (message.type === "orchestrator_reset") {
+        setOrchestrator((current) => (current ? { ...current, seq: message.seq, transcript: [] } : current));
       }
 
       if (message.type === "session" || message.type === "exit") {
@@ -231,14 +234,6 @@ export function App() {
       }
 
       if (message.type === "output" || message.type === "activity") {
-        if (message.sessionId === orchestratorSessionIdRef.current) {
-          // Orchestrator activity pulses its collapsed rail instead of the
-          // session list's unread badges.
-          if (!orchestratorOpenRef.current) {
-            setOrchestratorPulse(true);
-          }
-          return;
-        }
         setUnread((current) => {
           if (message.sessionId === activeTargetIdRef.current) {
             return current;
@@ -348,14 +343,6 @@ export function App() {
     if (activeTarget) {
       killSession(activeTarget.id);
     }
-  }
-
-  async function handleOrchestratorStart(agent: OrchestratorAgent, restart = false) {
-    setOrchestrator(await startOrchestrator(agent, restart));
-  }
-
-  async function handleOrchestratorStop() {
-    setOrchestrator(await stopOrchestrator());
   }
 
   function killSession(targetId: string) {
@@ -502,12 +489,10 @@ export function App() {
                       <span
                         className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
                           orchestrator?.state === "running"
-                            ? "bg-emerald-500"
-                            : orchestrator?.state === "starting"
-                              ? "animate-pulse bg-amber-400"
-                              : orchestratorPulse
-                                ? "animate-pulse bg-primary"
-                                : "bg-transparent"
+                            ? "animate-pulse bg-amber-400"
+                            : orchestratorPulse
+                              ? "animate-pulse bg-primary"
+                              : "bg-transparent"
                         }`}
                         aria-hidden="true"
                       />
@@ -652,13 +637,12 @@ export function App() {
           {!authRequired ? (
             <OrchestratorPanel
               orchestrator={orchestrator}
-              session={orchestratorSession}
-              socketStatus={socketStatus}
               open={orchestratorOpen}
               pulse={orchestratorPulse}
               onOpenChange={setOrchestratorOpen}
-              onStart={handleOrchestratorStart}
-              onStop={handleOrchestratorStop}
+              onStatus={(status) =>
+                setOrchestrator((current) => ({ ...status, transcript: status.transcript ?? current?.transcript ?? [] }))
+              }
             />
           ) : null}
         </div>

@@ -6,6 +6,8 @@
 
 #include <conpty-static.h>
 #include <tlhelp32.h>
+#include <chrono>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <winmeta.h>
@@ -945,29 +947,10 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             return {};
         }
 
-        wil::unique_handle snapshot{ CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if (!snapshot)
+        const auto processes = _processTable();
+        if (processes.empty())
         {
             return {};
-        }
-
-        struct ProcessInfo
-        {
-            DWORD Pid{};
-            DWORD ParentPid{};
-            std::wstring Image;
-        };
-        std::vector<ProcessInfo> processes;
-        PROCESSENTRY32W entry{};
-        entry.dwSize = sizeof(entry);
-        if (Process32FirstW(snapshot.get(), &entry))
-        {
-            do
-            {
-                std::wstring image{ entry.szExeFile };
-                std::transform(image.begin(), image.end(), image.begin(), ::towlower);
-                processes.push_back({ entry.th32ProcessID, entry.th32ParentProcessID, std::move(image) });
-            } while (Process32NextW(snapshot.get(), &entry));
         }
 
         static constexpr auto classify = [](std::wstring_view text) -> const wchar_t* {
@@ -1029,6 +1012,244 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
             }
         }
         return {};
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        return {};
+    }
+
+    // Returns the current directory of the given process, read from its PEB.
+    // winternl.h only publishes ImagePathName/CommandLine of the process
+    // parameters, but CurrentDirectory (a CURDIR: DosPath + Handle) sits a
+    // fixed distance before them, right after DllPath.
+    // Requires PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ.
+    std::wstring ConptyConnection::_workingDirectoryFromProcess(HANDLE process)
+    {
+        struct PROCESS_BASIC_INFORMATION
+        {
+            NTSTATUS ExitStatus;
+            PPEB PebBaseAddress;
+            ULONG_PTR AffinityMask;
+            KPRIORITY BasePriority;
+            ULONG_PTR UniqueProcessId;
+            ULONG_PTR InheritedFromUniqueProcessId;
+        } info;
+        THROW_IF_NTSTATUS_FAILED(NtQueryInformationProcess(process, ProcessBasicInformation, &info, sizeof(info), nullptr));
+
+        PEB peb;
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(process, info.PebBaseAddress, &peb, sizeof(peb), nullptr));
+
+        RTL_USER_PROCESS_PARAMETERS params;
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(process, peb.ProcessParameters, &params, sizeof(params), nullptr));
+
+        constexpr auto currentDirectoryOffset = offsetof(RTL_USER_PROCESS_PARAMETERS, ImagePathName) - sizeof(UNICODE_STRING) /*DllPath*/ - (sizeof(UNICODE_STRING) + sizeof(HANDLE)) /*CURDIR*/;
+        UNICODE_STRING dosPath;
+        memcpy(&dosPath, reinterpret_cast<const BYTE*>(&params) + currentDirectoryOffset, sizeof(dosPath));
+        if (dosPath.Length == 0 || dosPath.Length > 0x8000 || !dosPath.Buffer)
+        {
+            return {};
+        }
+
+        std::wstring directory(dosPath.Length / sizeof(wchar_t), L'\0');
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(process, dosPath.Buffer, directory.data(), dosPath.Length, nullptr));
+        // "C:\repo\" -> "C:\repo" (a drive root keeps its separator).
+        while (directory.size() > 3 && (directory.back() == L'\\' || directory.back() == L'/'))
+        {
+            directory.pop_back();
+        }
+        return directory;
+    }
+
+    // One process table shared by every caller in this process.
+    //
+    // Every tab used to take its own CreateToolhelp32Snapshot, which on a
+    // normal desktop means enumerating several hundred processes per tab per
+    // refresh. The table only has to be fresh enough that a program the user
+    // just started shows up on the next refresh, so a short TTL lets all the
+    // tabs in one sweep share a single snapshot.
+    std::vector<ConptyConnection::ProcessTableEntry> ConptyConnection::_processTable()
+    {
+        static std::mutex mutex;
+        static std::vector<ProcessTableEntry> cache;
+        static std::chrono::steady_clock::time_point capturedAt{};
+        static constexpr auto ttl = std::chrono::milliseconds(750);
+
+        const std::lock_guard guard{ mutex };
+        const auto now = std::chrono::steady_clock::now();
+        if (!cache.empty() && now - capturedAt < ttl)
+        {
+            return cache;
+        }
+
+        wil::unique_handle snapshot{ CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if (!snapshot)
+        {
+            return cache;
+        }
+
+        std::vector<ProcessTableEntry> processes;
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot.get(), &entry))
+        {
+            do
+            {
+                std::wstring image{ entry.szExeFile };
+                std::transform(image.begin(), image.end(), image.begin(), ::towlower);
+                processes.push_back({ entry.th32ProcessID, entry.th32ParentProcessID, std::move(image) });
+            } while (Process32NextW(snapshot.get(), &entry));
+        }
+
+        if (processes.empty())
+        {
+            return cache;
+        }
+
+        cache = std::move(processes);
+        capturedAt = now;
+        return cache;
+    }
+
+    // How long a process has been running, or 0 when that cannot be read.
+    static std::chrono::milliseconds _processAge(HANDLE process) noexcept
+    {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(process, &created, &exited, &kernel, &user))
+        {
+            return {};
+        }
+
+        FILETIME nowFile{};
+        GetSystemTimeAsFileTime(&nowFile);
+
+        const auto createdTicks = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        const auto nowTicks = (static_cast<uint64_t>(nowFile.dwHighDateTime) << 32) | nowFile.dwLowDateTime;
+        if (nowTicks <= createdTicks)
+        {
+            return {};
+        }
+        // FILETIME ticks are 100ns.
+        return std::chrono::milliseconds{ (nowTicks - createdTicks) / 10000 };
+    }
+
+    // Returns the working directory that best represents where this connection
+    // is working, read from a process PEB. This is only ever a fallback: a
+    // shell that reports OSC 7 / OSC 9;9 is authoritative, and pwsh in
+    // particular never moves its process cwd on `cd` at all, so for a bare
+    // pwsh tab this cannot do better than the directory it launched in.
+    //
+    // The program the user ran is the ConPTY client own child - an agent like
+    // Claude Code inherits the directory it was started in and never emits
+    // OSC 9;9 - so the SHALLOWEST descendant that reads back wins, not the
+    // deepest. Whatever that agent then spawns for its own work (a shell for a
+    // tool call, a test runner, a language server) sits below it, and picking
+    // the deepest is what used to drag a tab between rail sections and back
+    // every time one of those came and went.
+    //
+    // Returns "" when nothing could be read.
+    winrt::hstring ConptyConnection::ForegroundWorkingDirectory()
+    try
+    {
+        const auto rootPid = _piClient.dwProcessId;
+        if (rootPid == 0)
+        {
+            return {};
+        }
+
+        const auto processes = _processTable();
+        if (processes.empty())
+        {
+            return {};
+        }
+
+        // Helper processes that agents and shells spawn but that never
+        // represent where the user is working.
+        static constexpr std::array ignoredImages{
+            std::wstring_view{ L"conhost.exe" },
+            std::wstring_view{ L"openconsole.exe" },
+            std::wstring_view{ L"rg.exe" },
+            std::wstring_view{ L"git.exe" },
+            std::wstring_view{ L"ssh.exe" },
+            std::wstring_view{ L"fzf.exe" },
+            std::wstring_view{ L"less.exe" },
+            std::wstring_view{ L"more.com" },
+            std::wstring_view{ L"where.exe" },
+            std::wstring_view{ L"findstr.exe" },
+            std::wstring_view{ L"tasklist.exe" },
+        };
+
+        // A descendant this young is a transient step (a tool call, a build
+        // command) rather than the program sitting in the tab.
+        static constexpr auto minimumAge = std::chrono::milliseconds(1500);
+
+        const auto isIgnored = [&](DWORD pid) {
+            const auto self = std::find_if(processes.begin(), processes.end(), [pid](const auto& p) { return p.Pid == pid; });
+            return self != processes.end() &&
+                   std::find(ignoredImages.begin(), ignoredImages.end(), self->Image) != ignoredImages.end();
+        };
+
+        const auto readDirectory = [&](DWORD pid, bool requireAge) -> std::wstring {
+            wil::unique_handle handle{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
+            if (!handle)
+            {
+                return {};
+            }
+            if (requireAge && _processAge(handle.get()) < minimumAge)
+            {
+                return {};
+            }
+            try
+            {
+                return _workingDirectoryFromProcess(handle.get());
+            }
+            CATCH_LOG();
+            return {};
+        };
+
+        // Breadth-first from the client. The shallowest level below the client
+        // that yields a directory wins; within a level, the first (oldest)
+        // process does. The client itself is only the answer when nothing
+        // under it reads back, because the client is usually a shell and a
+        // shell process cwd is the unreliable one.
+        std::unordered_set<DWORD> visited{ rootPid };
+        std::vector<DWORD> level{ rootPid };
+        std::wstring clientDirectory;
+        auto depth = 0;
+        while (!level.empty())
+        {
+            std::vector<DWORD> next;
+            std::wstring levelDirectory;
+            for (const auto pid : level)
+            {
+                if (levelDirectory.empty() && !isIgnored(pid))
+                {
+                    // The client is as old as the tab, so only its descendants
+                    // have to prove they have stuck around.
+                    levelDirectory = readDirectory(pid, depth > 0);
+                }
+                for (const auto& process : processes)
+                {
+                    if (process.ParentPid == pid && process.Pid != pid && visited.insert(process.Pid).second)
+                    {
+                        next.push_back(process.Pid);
+                    }
+                }
+            }
+
+            if (!levelDirectory.empty())
+            {
+                if (depth > 0)
+                {
+                    return winrt::hstring{ levelDirectory };
+                }
+                clientDirectory = std::move(levelDirectory);
+            }
+
+            level = std::move(next);
+            ++depth;
+        }
+        return winrt::hstring{ clientDirectory };
     }
     catch (...)
     {
