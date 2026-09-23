@@ -512,6 +512,46 @@ try {
   const restoredFocus = await evalValue(cdp, 'document.activeElement === window.__term.textarea');
   await host(cdp, { type: "keepFocus", enabled: false });
 
+  // Taps use the rendered grid, including scaling, Unicode cell widths,
+  // wrapped rows, scrollback and OSC 8 links. Drags must never open a file.
+  const fileChecks = {};
+  const tapCell = async (col, row) => {
+    const point = await evalValue(cdp, `(() => { const r = document.querySelector('#root canvas').getBoundingClientRect(); return { x: r.left + (${col} + 0.5) * r.width / window.__term.cols, y: r.top + (${row} + 0.5) * r.height / window.__term.rows }; })()`);
+    await tapTouch(cdp, point.x, point.y); await sleep(80);
+  };
+  const resetLinks = async (text, cols = 40) => {
+    await host(cdp, { type: "hostLayout", width: 390, height: 760 });
+    await host(cdp, { type: "session", sessionId: "link-session", cols, rows: 12 });
+    await host(cdp, { type: "reset" });
+    await host(cdp, { type: "write", data: text });
+    await sleep(120);
+    await evalValue(cdp, "window.__rnMessages = []");
+  };
+  const lastFile = async () => latestMessage((await state(cdp)).messages, "openFile");
+  await resetLinks("\x1b[31msrc/app.ts:42:3\x1b[0m\r\n");
+  await tapCell(4, 0);
+  const plainFile = await lastFile();
+  fileChecks.pathTapOpensCorrectLine = plainFile?.path === "src/app.ts" && plainFile?.line === 42 && plainFile?.column === 3 && plainFile?.sessionId === "link-session";
+  fileChecks.pathTapDoesNotDoubleOpen = (await state(cdp)).messages.filter((m) => m.type === "openFile").length === 1;
+  await resetLinks("😀 日本 src/app.ts:9\r\n");
+  await tapCell(10, 0);
+  fileChecks.unicodeCellMapping = (await lastFile())?.path === "src/app.ts";
+  const wrappedPath = "F:/workspace/long-directory/src/app.ts:21";
+  await resetLinks(wrappedPath, 24);
+  await tapCell(6, 1);
+  fileChecks.wrappedPathTap = (await lastFile())?.path === "F:/workspace/long-directory/src/app.ts" && (await lastFile())?.line === 21;
+  await resetLinks("\x1b]8;;file:///F:/workspace/app.ts#L8\x1b\\Open source\x1b]8;;\x1b\\\r\n");
+  await tapCell(4, 0);
+  fileChecks.oscFileLinkTap = (await lastFile())?.path === "F:/workspace/app.ts" && (await lastFile())?.line === 8;
+  await resetLinks("src/history.ts:6\r\n" + Array.from({ length: 30 }, (_, i) => `filler ${i}\r\n`).join(""));
+  await evalValue(cdp, "window.__term.scrollToTop()"); await sleep(100);
+  await tapCell(4, 0);
+  fileChecks.scrollbackPathTap = (await lastFile())?.path === "src/history.ts";
+  await resetLinks("src/app.ts:42\r\n");
+  const point = await evalValue(cdp, "(() => { const r = document.querySelector('#root canvas').getBoundingClientRect(); return {x:r.left+25,y:r.top+8}; })()");
+  await oneFingerDrag(cdp, [point, { x: point.x, y: point.y + 60 }]);
+  fileChecks.dragDoesNotOpenFile = !(await lastFile());
+
   const managedFullResize = latestMessage(managedFull.messages, "resize");
 
   // With the 13px base font on a 390px-wide viewport, the readability floor is
@@ -519,6 +559,7 @@ try {
   const FLOOR = 10 / 13;
 
   const checks = {
+    ...fileChecks,
     keyboardFocusHeld: heldFocus,
     keyboardHideSurvivesPendingRefocus: releasedFocus,
     keyboardShowRestoresFocus: restoredFocus,

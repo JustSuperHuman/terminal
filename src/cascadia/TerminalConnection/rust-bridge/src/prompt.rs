@@ -45,7 +45,8 @@ fn parse_options(text: &str) -> Vec<Value> {
             "label": label,
             "key": number,
             "index": index.saturating_sub(1),
-            "focused": selected_prefix(line)
+            "focused": selected_prefix(line),
+            "selected": false, "disabled": false, "custom": false
         }));
     }
     options
@@ -88,6 +89,8 @@ pub(crate) fn detect_prompt(text: &str) -> Option<Value> {
             "id": stable_id(&identity),
             "kind": "single-select",
             "title": title,
+            "interaction": "direct-key", "details": [],
+            "acceptsNotes": false, "canSubmit": false, "cancelLabel": "Cancel",
             "options": options,
             "submit": "enter",
             "cancel": true
@@ -104,9 +107,11 @@ pub(crate) fn detect_prompt(text: &str) -> Option<Value> {
             "id": stable_id(&identity),
             "kind": "confirm",
             "title": trimmed.lines().last().unwrap_or("Confirm"),
+            "interaction": "direct-key", "details": [],
+            "acceptsNotes": false, "canSubmit": false, "cancelLabel": "Cancel",
             "options": [
-                { "id": "yes", "label": "Yes", "key": "y", "index": 0, "focused": false },
-                { "id": "no", "label": "No", "key": "n", "index": 1, "focused": false }
+                { "id": "yes", "label": "Yes", "key": "y", "index": 0, "focused": false, "selected": false, "disabled": false, "custom": false },
+                { "id": "no", "label": "No", "key": "n", "index": 1, "focused": false, "selected": false, "disabled": false, "custom": false }
             ],
             "submit": "key",
             "cancel": true
@@ -131,6 +136,8 @@ pub fn input_context(
     };
     let prompt = observation.agent.and_then(|_| detect_prompt(text));
     json!({
+        "sessionId": session.id, "status": session.status, "at": crate::model::iso_now(),
+        "pasteSafe": bracketed_paste || observation.agent.is_some(),
         "agent": agent,
         "agentLabel": label,
         "cwd": session.cwd,
@@ -215,6 +222,23 @@ mod tests {
             active.pointer("/prompt/kind").and_then(Value::as_str),
             Some("single-select")
         );
+        for text in [
+            "Choose\r\n❯ 1. Yes\r\n  2. No\r\nEnter to confirm",
+            "Continue? (y/n)?",
+        ] {
+            let context = input_context(&session(), text, true, false);
+            let prompt = &context["prompt"];
+            assert!(prompt["details"].is_array(), "mobile reads details.length");
+            assert_eq!(prompt["interaction"], "direct-key");
+            assert_eq!(prompt["cancelLabel"], "Cancel");
+            assert_eq!(prompt["canSubmit"], false);
+            for option in prompt["options"].as_array().unwrap() {
+                assert!(option["selected"].is_boolean());
+                assert!(option["disabled"].is_boolean());
+                assert!(option["custom"].is_boolean());
+            }
+            assert_eq!(context["sessionId"], "id");
+        }
         let plain = input_context(&session(), "1. src\r\n2. tests", false, false);
         assert!(plain.get("prompt").unwrap().is_null());
     }

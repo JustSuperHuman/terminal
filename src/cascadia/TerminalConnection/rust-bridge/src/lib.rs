@@ -1,4 +1,5 @@
 mod agents;
+mod file_preview;
 mod host;
 mod model;
 mod orchestrator;

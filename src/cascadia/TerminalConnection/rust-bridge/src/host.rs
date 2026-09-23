@@ -1954,6 +1954,21 @@ async fn files(Path(id): Path<String>, State(state): State<AppState>) -> Respons
     };
     Json(json!({ "cwd": summary.cwd, "files": [] })).into_response()
 }
+
+async fn file_preview(
+    Path(id): Path<String>, Query(query): Query<HashMap<String, String>>, State(state): State<AppState>,
+) -> Response {
+    let Some(session) = state.summary(&id) else {
+        return api_error(StatusCode::NOT_FOUND, "Unknown terminal session.");
+    };
+    let target = query.get("path").cloned().unwrap_or_default();
+    let line = query.get("line").and_then(|value| value.parse::<usize>().ok()).unwrap_or(1);
+    match tokio::task::spawn_blocking(move || crate::file_preview::read_preview(&session.cwd, &target, line)).await {
+        Ok(Ok(preview)) => Json(preview).into_response(),
+        Ok(Err(message)) => api_error(StatusCode::BAD_REQUEST, message),
+        Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "File could not be opened."),
+    }
+}
 async fn orchestrator_status(
     Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
@@ -2211,6 +2226,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/attachments", post(attachment))
         .route("/api/sessions/{id}/commands", get(commands))
         .route("/api/sessions/{id}/files", get(files))
+        .route("/api/sessions/{id}/file", get(file_preview))
         .route("/api/sessions/{id}/agent", get(unavailable))
         .route("/api/sessions/{id}/agent/attach", any(unavailable))
         .route("/api/notifications", get(notifications))
@@ -2840,6 +2856,16 @@ mod tests {
             .unwrap();
         assert_eq!(bootstrap["sessions"][0]["id"], "native-session");
         assert_eq!(bootstrap["server"]["port"], address.port());
+        std::fs::write(root.path().join("preview.txt"), "first\nsecond\nthird").unwrap();
+        state.inner.lock().sessions.get_mut("native-session").unwrap().summary.cwd = root.path().to_string_lossy().to_string();
+        let preview: Value = client.get(format!("{base}/api/sessions/native-session/file?path=preview.txt&line=2"))
+            .send().await.unwrap()
+            .error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(preview["kind"], "text");
+        assert_eq!(preview["line"], 2);
+        assert!(preview["content"].as_str().unwrap().contains("second"));
+        assert_eq!(client.get(format!("{base}/api/sessions/missing/file?path=preview.txt"))
+            .send().await.unwrap().status(), StatusCode::NOT_FOUND);
         let page = client
             .get(&base)
             .send()

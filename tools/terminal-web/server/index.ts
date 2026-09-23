@@ -14,6 +14,7 @@ import { AgentLinkRegistry, agentLinkCandidates, terminalAcpAgent } from "./agen
 import type { AcpAgentId, AcpPromptBlockInput } from "./acp-types.js";
 import { BridgeRegistry } from "./bridge-registry.js";
 import { searchFiles } from "./file-search.js";
+import { readFilePreview } from "./file-preview.js";
 import { discoverHostTerminals } from "./host-discovery.js";
 import { BellDetector, NotificationCenter } from "./notifications.js";
 import { discoverTerminalWebPeers } from "./peer-discovery.js";
@@ -1820,6 +1821,19 @@ app.get("/api/sessions/:id/commands", async (req, res) => {
       message: "Slash commands could not be listed.",
       detail: error instanceof Error ? error.message : String(error)
     });
+  }
+});
+
+// Read-only previews for paths printed by terminal and ACP agents.
+app.get(["/api/sessions/:id/file", "/api/acp/sessions/:id/file"], async (req, res) => {
+  const acp = req.path.startsWith("/api/acp/");
+  const session = acp ? acpManager.state().sessions.find((item) => item.id === req.params.id) : allSessions().find((item) => item.id === req.params.id);
+  if (!session) { res.status(404).json({ message: "Unknown session." }); return; }
+  try {
+    const roots = [session.cwd, ...(acp && "additionalDirectories" in session ? session.additionalDirectories : [])];
+    res.json(await readFilePreview(roots, typeof req.query.path === "string" ? req.query.path : "", Number(req.query.line)));
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : "File could not be opened." });
   }
 });
 

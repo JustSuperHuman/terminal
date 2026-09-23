@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
@@ -59,6 +59,10 @@ import type { ServerEndpoint } from "../lib/endpoint";
 import { terminalSocket } from "../lib/socket";
 import { colors, font, radius, withAlpha } from "../theme";
 import { AcpRequestCard } from "./AcpRequestCard";
+import { FileLinkText, FilePathText, OpenFileContext } from "./FileLinkText";
+import { FilePreviewModal } from "./FilePreviewModal";
+import { findFileLinks, type FileLink } from "../lib/fileLinks";
+import type { FilePreviewTarget } from "../lib/filePreviewApi";
 import { BottomSheet } from "./BottomSheet";
 import { ClaudeIcon, CloseIcon, CodexIcon, ImageIcon, SendIcon, TerminalGlyph } from "./icons";
 
@@ -309,7 +313,7 @@ function FileChangeCards({ reports }: { reports: AcpFileChangeReportView[] }) {
           </View>
           {report.status === "reported" ? (
             <>
-              {report.paths.slice(0, 12).map((path) => <Text key={path} style={styles.changePath} numberOfLines={1}>{path}</Text>)}
+              {report.paths.slice(0, 12).map((path) => <FilePathText key={path} path={path} style={styles.changePath} numberOfLines={1} />)}
               {report.paths.length > 12 || report.truncated ? <Text style={styles.metaHint}>Additional paths were omitted from this report.</Text> : null}
               {report.uncertainty ? <Text style={styles.failureDetails}>{report.uncertainty}</Text> : null}
               <Text style={styles.metaHint}>{report.declaredComplete ? "Agent declared this report complete." : "Agent did not declare this report complete."}</Text>
@@ -326,7 +330,8 @@ function openExternal(uri: string, onError: (error: unknown) => void) {
 }
 
 function ContentBlock({ content, onError }: { content: AcpContentView; onError: (error: unknown) => void }) {
-  if (content.type === "text") return <Text style={styles.timelineText} selectable>{content.text}</Text>;
+  const openFile = useContext(OpenFileContext);
+  if (content.type === "text") return <FileLinkText style={styles.timelineText} selectable>{content.text}</FileLinkText>;
   if (content.type === "image") {
     const uri = content.data ? `data:${content.mimeType};base64,${content.data}` : content.uri;
     return uri ? <Image source={{ uri }} resizeMode="contain" style={styles.contentImage} accessibilityLabel="Agent image" /> : <Text style={styles.metaHint}>Image content unavailable</Text>;
@@ -335,7 +340,11 @@ function ContentBlock({ content, onError }: { content: AcpContentView; onError: 
     return <View style={styles.resourceCard}><Text style={styles.resourceType}>AUDIO</Text><Text style={styles.resourceTitle}>{content.mimeType}</Text></View>;
   }
   return (
-    <Pressable onPress={() => openExternal(content.uri, onError)} accessibilityRole="link" style={({ pressed }) => [styles.resourceCard, pressed && styles.rowPressed]}>
+    <Pressable onPress={() => {
+      const file = findFileLinks(content.uri)[0];
+      if (file && openFile) openFile(file);
+      else openExternal(content.uri, onError);
+    }} accessibilityRole="link" style={({ pressed }) => [styles.resourceCard, pressed && styles.rowPressed]}>
       <Text style={styles.resourceType}>RESOURCE</Text>
       <Text style={styles.resourceTitle}>{content.title ?? content.name ?? content.uri}</Text>
       <Text style={styles.resourceUri} numberOfLines={2}>{content.uri}</Text>
@@ -367,7 +376,7 @@ function DiffCard({ path, oldText, newText, truncated }: { path: string; oldText
   const added = newText.split("\n").slice(0, 120);
   return (
     <View style={styles.diffCard}>
-      <View style={styles.diffHead}><Text style={styles.diffGlyph}>±</Text><Text style={styles.diffPath} numberOfLines={2}>{path}</Text></View>
+      <View style={styles.diffHead}><Text style={styles.diffGlyph}>±</Text><FilePathText path={path} style={styles.diffPath} numberOfLines={2} /></View>
       {removed.length ? <View style={styles.diffRemoved}>{removed.map((line, index) => <Text key={`r${index}`} style={styles.diffRemovedText} selectable>- {line}</Text>)}</View> : null}
       <View style={styles.diffAdded}>{added.map((line, index) => <Text key={`a${index}`} style={styles.diffAddedText} selectable>+ {line}</Text>)}</View>
       {truncated || removed.length >= 80 || added.length >= 120 ? <Text style={styles.metaHint}>Diff preview truncated.</Text> : null}
@@ -390,7 +399,7 @@ function ToolCard({ tool, session, onError }: { tool: AcpToolCallView; session: 
       </Pressable>
       {expanded ? (
         <View style={styles.toolBody}>
-          {tool.locations.map((location) => <Text key={`${location.path}:${location.line ?? 0}`} style={styles.changePath}>{location.path}{location.line ? `:${location.line}` : ""}</Text>)}
+          {tool.locations.map((location) => <FilePathText key={`${location.path}:${location.line ?? 0}`} {...location} style={styles.changePath} />)}
           {tool.content.map((entry, index) => {
             if (entry.type === "content") return <ContentBlock key={index} content={entry.content} onError={onError} />;
             if (entry.type === "diff") return <DiffCard key={index} {...entry} />;
@@ -413,7 +422,7 @@ function TimelineRow({ item, session, onError }: { item: AcpTimelineItemView; se
     return (
       <Pressable onPress={() => setExpanded((current) => !current)} accessibilityRole="button" accessibilityState={{ expanded }} style={({ pressed }) => [styles.thoughtCard, pressed && styles.rowPressed]}>
         <View style={styles.thoughtHead}><Text style={styles.thoughtGlyph}>◇</Text><Text style={styles.thoughtTitle}>{item.title ?? "Reasoning"}</Text><Text style={styles.expandGlyph}>{expanded ? "⌃" : "⌄"}</Text></View>
-        {expanded ? <Text style={styles.thoughtText} selectable>{item.text ?? (item.content?.type === "text" ? item.content.text : "")}</Text> : null}
+        {expanded ? <FileLinkText style={styles.thoughtText} selectable>{item.text ?? (item.content?.type === "text" ? item.content.text : "")}</FileLinkText> : null}
       </Pressable>
     );
   }
@@ -430,7 +439,7 @@ function TimelineRow({ item, session, onError }: { item: AcpTimelineItemView; se
       {!isUser ? <View style={styles.agentMini}>{agentIcon(session.agent, 15)}</View> : null}
       <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.agentBubble]}>
         {item.title ? <Text style={styles.messageTitle}>{item.title}</Text> : null}
-        {item.content ? <ContentBlock content={item.content} onError={onError} /> : item.text ? <Text style={styles.timelineText} selectable>{item.text}</Text> : null}
+        {item.content ? <ContentBlock content={item.content} onError={onError} /> : item.text ? <FileLinkText style={styles.timelineText} selectable>{item.text}</FileLinkText> : null}
         <Text style={styles.messageTime}>{formatWhen(item.at)}</Text>
       </View>
     </View>
@@ -917,6 +926,7 @@ export function AgentWorkspaceScreen({
   onClose,
   onStateChange,
 }: AgentWorkspaceScreenProps) {
+  const [fileTarget, setFileTarget] = useState<FilePreviewTarget>();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const progress = useRef(new Animated.Value(0)).current;
@@ -1087,6 +1097,9 @@ export function AgentWorkspaceScreen({
   }, [bridge?.requests, bridge?.sessions, visible]);
 
   const session = bridge?.sessions.find((candidate) => candidate.id === activeSessionId);
+  const openFile = useCallback((link: FileLink) => {
+    if (session) { Keyboard.dismiss(); setFileTarget({ ...link, sessionId: session.id, acp: true }); }
+  }, [session?.id]);
   const agent = bridge?.agents.find((candidate) => candidate.id === session?.agent);
   const activeRequest = bridge?.requests.find((request) => !request.sessionId || request.sessionId === session?.id);
   const canSteer = session?.state === "prompting" && Boolean(agent?.capabilities.steering);
@@ -1253,6 +1266,7 @@ export function AgentWorkspaceScreen({
   const rootSubagents = session?.subagents.filter((subagent) => !subagent.parentId || !session.subagents.some((candidate) => candidate.id === subagent.parentId)) ?? [];
 
   return (
+    <OpenFileContext.Provider value={openFile}>
     <Animated.View
       pointerEvents={visible ? "auto" : "none"}
       accessibilityViewIsModal={visible}
@@ -1483,7 +1497,9 @@ export function AgentWorkspaceScreen({
         onClose={() => setSheet(undefined)}
         onAction={(action, objective) => session && void run("goal", () => actOnAcpGoal(endpoint, session.id, { action, ...(objective ? { objective } : {}) }))}
       />
+      <FilePreviewModal endpoint={endpoint} target={fileTarget} onClose={() => setFileTarget(undefined)} />
     </Animated.View>
+    </OpenFileContext.Provider>
   );
 }
 

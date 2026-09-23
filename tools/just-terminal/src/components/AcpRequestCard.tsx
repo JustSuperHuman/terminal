@@ -16,6 +16,7 @@ import type { AcpInteractiveRequestView, AcpPermissionOptionView } from "../acpT
 import type { RespondToAcpRequestInput } from "../lib/acpApi";
 import { colors, font, radius, withAlpha } from "../theme";
 import { ClaudeIcon, CloseIcon, CodexIcon, SendIcon, TerminalGlyph } from "./icons";
+import { FileLinkText, FilePathText } from "./FileLinkText";
 
 interface AcpRequestCardProps {
   request: AcpInteractiveRequestView;
@@ -372,15 +373,13 @@ export function AcpRequestCard({ request, disabled = false, onRespond, onError }
         keyboardShouldPersistTaps="handled"
         nestedScrollEnabled
       >
-        {request.message ? <Text style={styles.message} selectable>{request.message}</Text> : null}
+        {request.message ? <FileLinkText style={styles.message} selectable>{request.message}</FileLinkText> : null}
         {request.toolCall ? (
           <View style={styles.toolContext}>
             <Text style={styles.toolEyebrow}>REQUESTED BY TOOL</Text>
             <Text style={styles.toolTitle} numberOfLines={2}>{request.toolCall.title}</Text>
             {request.toolCall.locations.slice(0, 3).map((location) => (
-              <Text key={`${location.path}:${location.line ?? 0}`} style={styles.pathText} numberOfLines={1}>
-                {location.path}{location.line ? `:${location.line}` : ""}
-              </Text>
+              <FilePathText key={`${location.path}:${location.line ?? 0}`} {...location} style={styles.pathText} numberOfLines={1} />
             ))}
           </View>
         ) : null}

@@ -1,4 +1,5 @@
 import { apiUrl, type ServerEndpoint } from "./endpoint";
+import { normalizeSessionPrompt } from "./sessionPrompt";
 
 // Client for the host's composer endpoints (tools/terminal-web/server:
 // session-input.ts, slash-commands.ts, file-search.ts). The phone cannot see
@@ -100,12 +101,13 @@ async function getJson<T>(endpoint: ServerEndpoint, path: string, signal?: Abort
 }
 
 /** Which agent is listening, whether it is busy, and any menu it is blocking on. */
-export function fetchInputContext(
+export async function fetchInputContext(
   endpoint: ServerEndpoint,
   sessionId: string,
   signal?: AbortSignal
 ): Promise<SessionInputContext> {
-  return getJson<SessionInputContext>(endpoint, `/api/sessions/${encodeURIComponent(sessionId)}/input-context`, signal);
+  const context = await getJson<SessionInputContext>(endpoint, `/api/sessions/${encodeURIComponent(sessionId)}/input-context`, signal);
+  return { ...context, prompt: normalizeSessionPrompt(context.prompt) };
 }
 
 /** The agent's built-in slash commands plus the project's and user's own. */

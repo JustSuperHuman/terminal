@@ -28,6 +28,7 @@
 import { GHOSTTY_WEB_JS_B64 } from "./vendor/ghosttyWebBundle";
 import { GHOSTTY_VT_WASM_B64 } from "./vendor/ghosttyWasm";
 import { CASCADIA_MONO_TTF_B64 } from "./vendor/cascadiaMonoFont";
+import { FILE_LINKS_SCRIPT } from "./fileLinksScript";
 
 // Campbell — Windows Terminal's default color scheme, verbatim, so a mirrored
 // session looks identical to the desktop window it mirrors.
@@ -95,6 +96,8 @@ export const TERMINAL_HTML = `<!doctype html>
         var pending = [];
         var ready = false;
         var term = null;
+        var sessionId = null;
+        var findFileLinks = (${FILE_LINKS_SCRIPT});
         var hostW = null;
         var hostH = null;
         var scrollAccum = 0;
@@ -190,6 +193,44 @@ export const TERMINAL_HTML = `<!doctype html>
         //     it lands on ghostty's stretched textarea and raises the keyboard.
         var TAP_SLOP_PX = 8;
 
+        function fileLinkAt(clientX, clientY) {
+          if (!term || !term.wasmTerm) return null;
+          var canvas = getCanvas(), rect = canvas && canvas.getBoundingClientRect();
+          if (!rect || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) return null;
+          var col = Math.floor((clientX - rect.left) / (rect.width / term.cols));
+          var row = Math.floor((clientY - rect.top) / (rect.height / term.rows));
+          var back = term.wasmTerm.isAlternateScreen() ? 0 : term.getScrollbackLength();
+          var absolute = back + row - (term.getViewportY() || 0);
+          var buffer = term.buffer.active, current = buffer.getLine(absolute);
+          if (!current) return null;
+          var cell = current.getCell(col);
+          if (cell && cell.getHyperlinkId && cell.getHyperlinkId()) {
+            var uri = absolute < back ? term.wasmTerm.getScrollbackHyperlinkUri(absolute, col)
+              : term.wasmTerm.getHyperlinkUri(absolute - back, col);
+            var explicit = uri && findFileLinks(uri)[0];
+            if (explicit) return explicit;
+          }
+          var first = absolute, last = absolute;
+          // Ghostty marks continuation rows (the row after a soft wrap).
+          while (first > 0 && absolute - first < 8 && buffer.getLine(first).isWrapped) first--;
+          while (last + 1 < buffer.length && last - absolute < 8 && buffer.getLine(last + 1).isWrapped) last++;
+          var text = "", offset = 0;
+          for (var y = first; y <= last; y++) {
+            var line = buffer.getLine(y);
+            for (var x = 0; x < line.length; x++) {
+              var c = line.getCell(x);
+              if (y === absolute && x === col) offset = text.length;
+              if (c && c.getWidth() !== 0) text += c.getChars() || " ";
+            }
+          }
+          var links = findFileLinks(text);
+          return links.find(function (link) { return offset >= link.start && offset < link.end; }) || null;
+        }
+
+        function activateFileLink(link) {
+          post({ type: "openFile", sessionId: sessionId, path: link.path, line: link.line, column: link.column });
+        }
+
         function installGestures() {
           var root = document.getElementById("root");
           if (!root || root.__gesturesInstalled) { return; }
@@ -198,6 +239,7 @@ export const TERMINAL_HTML = `<!doctype html>
           // One-finger tracker. mode: "pending" until movement passes the tap
           // slop (so plain taps reach the textarea), then "pan" or "scroll".
           var single = null;
+          var lastFileTap = 0;
 
           root.addEventListener("touchstart", function (e) {
             if (e.touches.length === 2) {
@@ -220,7 +262,9 @@ export const TERMINAL_HTML = `<!doctype html>
                 startX: t.clientX, startY: t.clientY,
                 lastX: t.clientX, lastY: t.clientY,
                 mode: "pending",
+                link: fileLinkAt(t.clientX, t.clientY),
               };
+              if (single.link) e.preventDefault();
               // No preventDefault: a tap must stay a tap (keyboard focus).
             }
           }, { passive: false, capture: true });
@@ -285,6 +329,13 @@ export const TERMINAL_HTML = `<!doctype html>
           }, { passive: false, capture: true });
 
           var endTouch = function (e) {
+            if (e.type === "touchend" && single && single.mode === "pending" && single.link) {
+              var ended = Array.from(e.changedTouches || []).find(function (t) { return t.identifier === single.id; });
+              if (ended && Math.hypot(ended.clientX - single.startX, ended.clientY - single.startY) < TAP_SLOP_PX) {
+                var link = fileLinkAt(ended.clientX, ended.clientY);
+                if (link && link.path === single.link.path) { activateFileLink(link); lastFileTap = Date.now(); e.preventDefault(); }
+              }
+            }
             if (!e.touches || e.touches.length < 2) { pinch = null; }
             if (!e.touches || e.touches.length === 0) { single = null; return; }
             if (single) {
@@ -295,8 +346,13 @@ export const TERMINAL_HTML = `<!doctype html>
               if (!alive) { single = null; }
             }
           };
-          root.addEventListener("touchend", endTouch, { passive: true, capture: true });
+          root.addEventListener("touchend", endTouch, { passive: false, capture: true });
           root.addEventListener("touchcancel", endTouch, { passive: true, capture: true });
+          root.addEventListener("click", function (event) {
+            if (Date.now() - lastFileTap < 600) { event.preventDefault(); event.stopPropagation(); return; }
+            var link = fileLinkAt(event.clientX, event.clientY);
+            if (link) { event.preventDefault(); event.stopPropagation(); activateFileLink(link); }
+          }, true);
         }
 
         function post(obj) {
@@ -603,6 +659,7 @@ export const TERMINAL_HTML = `<!doctype html>
               applyLayout();
               break;
             case "session": {
+              sessionId = typeof msg.sessionId === "string" ? msg.sessionId : null;
               // The host tells us the session's real grid size; mirror it.
               var sc = clampDimension(msg.cols, 1, 1000);
               var sr = clampDimension(msg.rows, 1, 1000);

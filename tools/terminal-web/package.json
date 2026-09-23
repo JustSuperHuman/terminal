@@ -14,6 +14,7 @@
     "smoke:bridge-replay": "node scripts/smoke-bridge-replay.mjs",
     "smoke:session-input": "node scripts/smoke-session-input.mjs",
     "test:acp": "node --import tsx --test server/acp-manager.test.ts",
+    "test:file-preview": "node --import tsx --test server/file-preview.test.ts",
     "test:terminal-agents": "node --import tsx --test server/terminal-agent-metadata.test.ts",
     "test:agent-links": "node --import tsx --test server/agent-links.test.ts",
     "test:bridge": "node --import tsx --test server/bridge-registry.test.ts",

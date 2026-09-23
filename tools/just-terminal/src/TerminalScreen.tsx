@@ -30,6 +30,9 @@ import type { AcpBridgeState } from "./acpTypes";
 import { AgentAttachSheet } from "./components/AgentAttachSheet";
 import { AgentStatusBar } from "./components/AgentStatusBar";
 import { AgentWorkspaceScreen } from "./components/AgentWorkspaceScreen";
+import { AgentErrorBoundary } from "./components/AgentErrorBoundary";
+import { FilePreviewModal } from "./components/FilePreviewModal";
+import type { FilePreviewTarget } from "./lib/filePreviewApi";
 import { AttachmentSheet } from "./components/AttachmentSheet";
 import { CommandBar } from "./components/CommandBar";
 import { Composer, type ComposerHandle } from "./components/Composer";
@@ -116,6 +119,7 @@ function selectPreferredSessionId(sessions: TerminalSessionSummary[], currentId?
 }
 
 export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) {
+  const [fileTarget, setFileTarget] = useState<FilePreviewTarget>();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [sessionData, setSessions] = useState<TerminalSessionSummary[]>([]);
@@ -542,7 +546,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
 
   const sessionLive = socketStatus === "open" && activeSession?.status === "running";
   const composerActive =
-    !keyboardHidden && composerMode && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
+    !fileTarget && !keyboardHidden && composerMode && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
 
   // What the active terminal needs to know about the far end: which agent is
   // listening, whether it is mid-turn, and any dialog it is blocking on. This
@@ -592,7 +596,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
   // The composer must not fight for focus, so this is off while it is up — the
   // composer's own field is then what holds the keyboard.
   const keepKeyboardOpen =
-    !keyboardHidden && !composerMode && !inputContext?.prompt && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
+    !fileTarget && !keyboardHidden && !composerMode && !inputContext?.prompt && !drawerOpen && !agentWorkspaceOpen && !orchestratorOpen && !attachmentSheetOpen && !attaching && !creating && Boolean(sessionLive);
   useEffect(() => {
     keepKeyboardOpenRef.current = keepKeyboardOpen;
     terminalRef.current?.setKeepFocus(keepKeyboardOpen);
@@ -880,6 +884,7 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
               surface itself runs edge to edge. */}
           <View style={[styles.terminalWrap, { paddingTop: insets.top, marginBottom: terminalBottomInset }]}>
             <TerminalView
+              onOpenFile={(link, sessionId) => { Keyboard.dismiss(); setFileTarget({ ...link, sessionId }); }}
               ref={terminalRef}
               targetId={activeId}
               session={activeSession}
@@ -1105,14 +1110,17 @@ export function TerminalScreen({ endpoint, onDisconnect }: TerminalScreenProps) 
         onCancel={orchestrator.cancel}
         onClose={() => { setDrawerOpen(true); setOrchestratorOpen(false); }}
       />
-      <AgentWorkspaceScreen
-        visible={agentWorkspaceOpen}
-        endpoint={endpoint}
-        initialSessionId={agentWorkspaceSessionId}
-        defaultCwd={activeCwd}
-        onClose={closeAgentWorkspace}
-        onStateChange={applyAcpState}
-      />
+      <AgentErrorBoundary resetKey={`${endpoint.id}:${agentWorkspaceOpen}`} visible={agentWorkspaceOpen} onDismiss={() => setAgentWorkspaceOpen(false)}>
+        <AgentWorkspaceScreen
+          visible={agentWorkspaceOpen}
+          endpoint={endpoint}
+          initialSessionId={agentWorkspaceSessionId}
+          defaultCwd={activeCwd}
+          onClose={closeAgentWorkspace}
+          onStateChange={applyAcpState}
+        />
+      </AgentErrorBoundary>
+      <FilePreviewModal endpoint={endpoint} target={fileTarget} onClose={() => setFileTarget(undefined)} />
     </View>
   );
 }

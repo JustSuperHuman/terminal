@@ -9,6 +9,7 @@ An Expo app for controlling your desktop terminals from Android or iOS.
 - New sessions use the last selected session's working directory.
 - A pinned **Orchestrator** opens the same conversation used on desktop and web.
 - Terminal Assist question cards for supported Claude Code and Codex prompts.
+- Tap file paths in terminal output or ACP messages to preview source text and images, including `path:line:column` references.
 
 ## Connect
 
@@ -17,6 +18,8 @@ Run the [JustTerminal desktop app](https://github.com/JustSuperHuman/terminal/re
 The host normally uses port `10001`. Open `http://localhost:10001` on the PC to find its network addresses; it chooses another port if needed. For the Android emulator, use `10.0.2.2:10001`.
 
 Configure your model provider in the desktop/web orchestrator settings. The phone shares its transcript, send, and stop controls. The optional ACP Agent Workspace requires a host that advertises ACP support; the native desktop host uses Terminal Assist for existing terminal sessions.
+
+File previews require an updated desktop host. Relative paths use the session's working directory; files must be within that directory or an ACP session's additional workspace directories. Text previews highlight the requested line and show a bounded excerpt; PNG, JPEG, GIF, and WebP images are supported. Files larger than 2 MB and other binary formats show an explanation instead of opening.
 
 ## Develop
 
@@ -40,9 +43,12 @@ An iOS native build requires macOS or EAS. The repository's `bun run build:inter
 
 ```powershell
 bun run typecheck
+bun run test:agents
 bun run smoke:mobile-reliability
 bun run smoke:mobile-orchestrator
 bun run smoke:terminal-html
 ```
 
 The terminal WebView uses Ghostty's WASM renderer. The final smoke check needs Chrome or Edge installed.
+
+After editing `src/lib/fileLinks.ts`, run `bun run build:file-links` to regenerate the WebView copy of the detector. The agent tests verify that both copies match.

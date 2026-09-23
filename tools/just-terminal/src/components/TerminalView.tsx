@@ -7,6 +7,7 @@ import { TERMINAL_HTML } from "../terminalHtml";
 import { colors, font, glass, radius } from "../theme";
 import { Acrylic } from "./Acrylic";
 import { TerminalLoading } from "./TerminalLoading";
+import type { FileLink } from "../lib/fileLinks";
 
 // Hard cap on how long the cold-start skeleton lingers if a session never prints.
 const LOADING_FALLBACK_MS = 4000;
@@ -25,6 +26,7 @@ export interface TerminalViewHandle {
 }
 
 interface TerminalViewProps {
+  onOpenFile?: (link: FileLink, sessionId: string) => void;
   targetId?: string;
   session?: TerminalSessionSummary;
   socketStatus: SocketStatus;
@@ -39,7 +41,7 @@ interface HostLayout {
 }
 
 export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(function TerminalView(
-  { targetId, session, socketStatus, suppressLoading = false },
+  { targetId, session, socketStatus, suppressLoading = false, onOpenFile },
   ref
 ) {
   const webRef = useRef<WebView | null>(null);
@@ -139,7 +141,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
 
   const postSession = useCallback(() => {
     const current = activeSessionRef.current;
-    postToWeb({ type: "session", cols: current?.cols, rows: current?.rows });
+    postToWeb({ type: "session", sessionId: current?.id, cols: current?.cols, rows: current?.rows });
   }, [postToWeb]);
 
   const requestTerminalFit = useCallback(
@@ -257,10 +259,8 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
         // (the host owns the width) before clearing + writing, so the bytes land
         // without re-wrapping. This is the ONLY place a new session's dims are
         // posted — doing it here keeps the resize atomic with the reset+write.
-        if (message.session) {
-          postToWeb({ type: "session", cols: message.session.cols, rows: message.session.rows });
-          postedSessionIdRef.current = message.sessionId;
-        }
+        postToWeb({ type: "session", sessionId: message.sessionId, cols: message.session?.cols, rows: message.session?.rows });
+        postedSessionIdRef.current = message.sessionId;
         postToWeb({ type: "reset" });
         if (message.screen) {
           // Prefer the server's rendered screen dump: it reproduces the full
@@ -330,6 +330,13 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
 
     const target = activeTargetRef.current;
     switch (message.type) {
+      case "openFile": {
+        if (target && message.sessionId === target && typeof message.path === "string") {
+          onOpenFile?.({ path: message.path, line: typeof message.line === "number" ? message.line : undefined,
+            column: typeof message.column === "number" ? message.column : undefined }, target);
+        }
+        break;
+      }
       case "ready": {
         webReadyRef.current = true;
         setWebReady(true);
@@ -365,7 +372,7 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       default:
         break;
     }
-  }, [postSession, postToWeb, requestTerminalFit]);
+  }, [postSession, postToWeb, requestTerminalFit, onOpenFile]);
 
   return (
     <View

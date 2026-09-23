@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "react-test-renderer": "19.2.3",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -39,6 +40,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test:agents": "bun test scripts/agent-interactions.test.mjs scripts/file-links.test.mjs",
+    "build:file-links": "bun scripts/build-file-links.mjs",
     "smoke:terminal-html": "bun scripts/smoke-terminal-html.mjs",
     "smoke:mobile-reliability": "bun scripts/smoke-mobile-reliability.mjs",
     "smoke:mobile-orchestrator": "bun scripts/smoke-mobile-orchestrator.mjs",

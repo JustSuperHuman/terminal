@@ -39,6 +39,7 @@ import {
 } from "../lib/storage";
 import type { DictationControl } from "./CommandBar";
 import { AgentPromptCard } from "./AgentPromptCard";
+import { AgentErrorBoundary } from "./AgentErrorBoundary";
 import { ClaudeIcon, CodexIcon, FileIcon, FolderIcon, MicIcon, TerminalGlyph } from "./icons";
 import { colors, font, glass, radius, withAlpha } from "../theme";
 
@@ -757,14 +758,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       <View style={[StyleSheet.absoluteFill, styles.tint]} pointerEvents="none" />
 
       {prompt ? (
-        <AgentPromptCard
-          agent={agent}
-          agentLabel={context?.agentLabel ?? "Terminal"}
-          prompt={prompt}
-          disabled={disabled}
-          onRespond={answerPrompt}
-          onError={reportPromptError}
-        />
+        <AgentErrorBoundary resetKey={prompt.id}>
+          <AgentPromptCard
+            agent={agent}
+            agentLabel={context?.agentLabel ?? "Terminal"}
+            prompt={prompt}
+            disabled={disabled}
+            onRespond={answerPrompt}
+            onError={reportPromptError}
+          />
+        </AgentErrorBoundary>
       ) : (
         <>
           {renderPanel()}
